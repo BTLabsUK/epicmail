@@ -36,10 +36,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.17", default-features = false }
-governor = "0.10"
+async-trait = "0.1"
+parking_lot = "0.12"
 clap = { version = "4", features = ["derive"] }
 url = "2"
-ipnet = "2"
+ipnet = { version = "2", features = ["serde"] }
 base64 = "0.22"
 
 [dev-dependencies]
