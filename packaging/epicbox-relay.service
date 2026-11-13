@@ -1,0 +1,53 @@
+[Unit]
+Description=Epicbox relay
+Documentation=https://example.org/docs/operating.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/epicbox-relay serve --config /etc/epicbox-relay/relay.toml
+# Config sets store.path = "/var/lib/epicbox-relay/epicbox-relay.db"
+DynamicUser=yes
+StateDirectory=epicbox-relay
+StateDirectoryMode=0750
+ConfigurationDirectory=epicbox-relay
+Restart=on-failure
+RestartSec=2
+
+# 150k sockets plus store and DNS descriptors.
+LimitNOFILE=262144
+TasksMax=4096
+
+# SIGTERM drains sockets with close 1001 within server.drain_seconds (default 10).
+# Keep TimeoutStopSec above it.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
