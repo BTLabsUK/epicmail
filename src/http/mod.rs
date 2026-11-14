@@ -142,11 +142,11 @@ async fn fallback(
     let permit = match relay.limiter.open_socket(ip) {
         Ok(p) => p,
         Err(SocketRefusal::Total) => {
-            metrics::counter!("epicbox_limit_refusals_total", "limit" => "sockets_total").increment(1);
+            relay.limiter.refused("sockets_total", ip);
             return (StatusCode::SERVICE_UNAVAILABLE, "Relay is full.\n").into_response();
         }
         Err(SocketRefusal::PerIp) => {
-            metrics::counter!("epicbox_limit_refusals_total", "limit" => "sockets_per_ip").increment(1);
+            relay.limiter.refused("sockets_per_ip", ip);
             return (StatusCode::TOO_MANY_REQUESTS, "Too many connections from this network.\n").into_response();
         }
     };
@@ -195,7 +195,7 @@ async fn ready(State(st): State<AppState>) -> Response {
             Json(json!({"ready":true})).into_response()
         }
         Err(e) => {
-            tracing::error!(error = %e, "store write check failed");
+            crate::sampled!(error, error = %e, "store write check failed");
             r.store_ok.store(false, Ordering::Relaxed);
             (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"ready":false,"reason":"store"}))).into_response()
         }

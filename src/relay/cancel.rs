@@ -14,6 +14,7 @@ use super::{CancelOutcome, Cmd, Refusal, Relay, CANCEL_SIG_PREFIX};
 use crate::address::parse_address;
 use crate::clock::now_ms;
 use crate::ids::{is_txid, rand_id};
+use crate::logging::short;
 use crate::sig;
 use crate::store::{ForwardKind, NewForward};
 
@@ -119,7 +120,13 @@ impl Relay {
                 }
             }
         }
-        tracing::debug!(mailboxes = queues.len(), "transaction cancelled");
+        tracing::debug!(
+            txid = %short(&txid),
+            by = %short(&requester),
+            mailboxes = queues.len(),
+            signed_over = if separated { "prefixed txid" } else { "bare txid" },
+            "transaction cancelled"
+        );
         CancelOutcome::Cancelled(txid)
     }
 }

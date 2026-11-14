@@ -119,9 +119,13 @@ pub async fn run(relay: Arc<Relay>, ws: WebSocket, ip: IpAddr, permit: SocketPer
         subscribed_once: false,
     };
     metrics::gauge!("epicbox_sockets").increment(1.0);
+    let opened = Instant::now();
+    tracing::debug!(socket = id, net = %s.relay.limiter.prefix(ip).0, "socket opened");
     s.serve(ws, rx).await;
+    let mux = s.mux.is_some();
     s.cleanup().await;
     metrics::gauge!("epicbox_sockets").decrement(1.0);
+    tracing::debug!(socket = id, mux, seconds = opened.elapsed().as_secs(), "socket closed");
 }
 
 /// Serialize a frame.
@@ -283,7 +287,7 @@ impl Session {
         }
         if !release.is_empty() {
             if let Err(e) = r.store.release(release).await {
-                tracing::warn!(error = %e, "release on close failed");
+                crate::sampled!(warn, error = %e, "release on close failed");
             }
         }
         for k in wake {
@@ -330,7 +334,7 @@ impl Session {
             _ => t.len(),
         };
         if self.relay.limiter.frame_bytes(self.ip, charge).is_err() {
-            metrics::counter!("epicbox_limit_refusals_total", "limit" => "bytes_per_ip").increment(1);
+            self.relay.limiter.refused("bytes_per_ip", self.ip);
             return Flow::Close(1008, "Too many bytes.");
         }
         let Some(ty) = ty else {

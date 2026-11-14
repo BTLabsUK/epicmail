@@ -10,6 +10,7 @@ use super::{ok, Flow, Session};
 use crate::address::parse_address;
 use crate::clock::now_ms;
 use crate::ids::{is_msgid, rand_id};
+use crate::logging::short;
 use crate::relay::{CancelOutcome, Cmd, PostOutcome, PostReq, Refusal, OFFER_LEASE_MS};
 use crate::sig;
 use crate::store::{ClaimMode, StoredMessage};
@@ -132,6 +133,7 @@ impl Session {
         let Some(key) = key.filter(|_| verified) else {
             r.limiter.sig_failed(self.ip);
             metrics::counter!("epicbox_subscribe_total", "result" => "bad_signature").increment(1);
+            tracing::debug!(socket = self.id, "subscribe refused: signature");
             if let Some(k) = self.key.take() {
                 r.registry.unsubscribe_classic(&k, self.id);
                 // The message in flight was that key's: hand it back, or it blocks the next
@@ -149,6 +151,7 @@ impl Session {
         if ver.is_some() {
             self.ver = ver;
         }
+        tracing::debug!(socket = self.id, mailbox = %short(&key), ver = self.ver.map_or("none", Ver::as_str), "subscribed");
         self.prev_challenge = None;
 
         // 3.1.0: a successful Subscribe acknowledges the TransactionCancelled sent before it.
@@ -250,7 +253,7 @@ impl Session {
                 }
             }
             Err(e) => {
-                tracing::error!(error = %e, "claim failed");
+                crate::sampled!(error, error = %e, "claim failed");
                 if on_subscribe {
                     self.send(ws, ok()).await;
                 }
@@ -264,7 +267,7 @@ impl Session {
     pub(super) async fn send_cancelled(&mut self, ws: &mut WebSocket, txid: String) {
         if let Some(i) = self.inflight.take() {
             if let Err(e) = self.relay.store.release(vec![i.id]).await {
-                tracing::warn!(error = %e, "store release failed");
+                crate::sampled!(warn, error = %e, "store release failed");
             }
         }
         self.attempts = 0;
@@ -329,7 +332,7 @@ impl Session {
             return;
         }
         if let Err(e) = r.store.made(&key, vec![msgid.to_string()]).await {
-            tracing::error!(error = %e, "made failed");
+            crate::sampled!(error, error = %e, "made failed");
             self.send(ws, json!({"type":"Error","kind":"UnknownError","description":"Internal error; try again."}))
                 .await;
             return;

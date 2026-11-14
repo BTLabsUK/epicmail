@@ -9,7 +9,6 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use axum::serve::ListenerExt;
 use clap::{Parser, Subcommand};
-use tracing_subscriber::EnvFilter;
 
 use epicmail::clock::now_ms;
 use epicmail::config::Config;
@@ -17,7 +16,7 @@ use epicmail::http::{self, AppState};
 use epicmail::relay::Relay;
 use epicmail::store::sqlite::SqliteStore;
 use epicmail::store::Store;
-use epicmail::{forward, metrics as relay_metrics, migrate, sig};
+use epicmail::{forward, logging, metrics as relay_metrics, migrate, sig};
 
 #[derive(Parser)]
 #[command(name = "epicmail", version, about = "An Epicbox relay")]
@@ -50,7 +49,7 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg = Config::load(&cli.config)?;
-    init_tracing(&cfg);
+    logging::init(&cfg.log);
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     match cli.cmd {
         Command::Serve => rt.block_on(serve(cfg)),
@@ -62,16 +61,6 @@ fn main() -> Result<()> {
         Command::Import { file } => rt.block_on(import(cfg, file)),
         Command::Export { out } => export(&cfg, out),
         Command::Selftest => rt.block_on(selftest(cfg)),
-    }
-}
-
-fn init_tracing(cfg: &Config) {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.log.level));
-    let b = tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr);
-    if cfg.log.format == "json" {
-        b.json().flatten_event(true).init();
-    } else {
-        b.init();
     }
 }
 
@@ -104,8 +93,19 @@ async fn serve(cfg: Config) -> Result<()> {
         metrics_on_main: cfg.server.metrics_listen.is_none(),
     };
     let app = http::router(state).into_make_service_with_connect_info::<SocketAddr>();
-    tracing::info!(listen = %cfg.server.listen, identity = %format!("{}:{}", cfg.server.domain, cfg.server.port),
-        version = env!("CARGO_PKG_VERSION"), "relay listening");
+    tracing::info!(
+        listen = %cfg.server.listen,
+        identity = %format!("{}:{}", cfg.server.domain, cfg.server.port),
+        version = env!("CARGO_PKG_VERSION"),
+        getversion = %cfg.protocol.getversion,
+        cancel = cfg.protocol.cancel,
+        mux = cfg.protocol.mux,
+        http_api = cfg.http_api.enabled,
+        federation = cfg.federation.enabled,
+        retention_days = cfg.store.retention_days,
+        max_bytes = cfg.store.max_bytes,
+        "relay listening"
+    );
     let mut listener = tokio::spawn(async move { axum::serve(main_listener, app).await });
     if let Some(addr) = cfg.server.metrics_listen {
         let l = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
@@ -194,7 +194,7 @@ async fn housekeeping(relay: Arc<Relay>) {
                 metrics::gauge!("epicbox_store_used_bytes").set(s.used_bytes as f64);
                 *relay.last_stats.lock() = Some(s);
             }
-            Err(e) => tracing::error!(error = %e, "store stats failed"),
+            Err(e) => epicmail::sampled!(error, error = %e, "store stats failed"),
         }
         let (mailboxes, mux, _) = relay.registry.counts();
         metrics::gauge!("epicbox_listening_mailboxes").set(mailboxes as f64);

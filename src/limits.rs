@@ -189,9 +189,7 @@ impl Limiter {
     /// it as a refusal in the metrics when over.
     pub fn sig_checks(&self, ip: IpAddr, n: usize) -> Result<(), u64> {
         let (p, m) = self.prefix(ip);
-        self.sig_check_ip.take(&p, n.max(1) as f64, m).inspect_err(|_| {
-            metrics::counter!("epicbox_limit_refusals_total", "limit" => "sig_checks").increment(1);
-        })
+        self.sig_check_ip.take(&p, n.max(1) as f64, m).inspect_err(|_| self.refused("sig_checks", ip))
     }
 
     /// One mux/1 Attach or Resume frame against the prefix's budget.
@@ -204,6 +202,15 @@ impl Limiter {
     pub fn http_ip(&self, ip: IpAddr, cost: usize) -> Result<(), u64> {
         let (p, m) = self.prefix(ip);
         self.http_ip.take(&p, cost.max(1) as f64, m)
+    }
+
+    /// Record a request that a limit refused: the `epicbox_limit_refusals_total` metric, and a
+    /// sampled log line with the client's network prefix, which is what an operator needs to act
+    /// on abuse. The full client address is never logged.
+    pub fn refused(&self, limit: &'static str, ip: IpAddr) {
+        metrics::counter!("epicbox_limit_refusals_total", "limit" => limit).increment(1);
+        let (net, _) = self.prefix(ip);
+        crate::sampled!(info, limit, net = %net, "limit refused a request");
     }
 
     /// Count a failed signature against the prefix.

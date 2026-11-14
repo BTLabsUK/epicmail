@@ -80,7 +80,7 @@ impl Session {
     pub(super) async fn upgrade_to_mux(&mut self, ws: &mut WebSocket) -> bool {
         let (_, mult) = self.relay.limiter.prefix(self.ip);
         if !self.permit.upgrade_mux(mult) {
-            metrics::counter!("epicbox_limit_refusals_total", "limit" => "mux_sockets").increment(1);
+            self.relay.limiter.refused("mux_sockets", self.ip);
             return false;
         }
         let lim = &self.relay.cfg.limits;
@@ -204,7 +204,7 @@ impl Session {
             return;
         }
         if let Err(wait) = self.attach_budget() {
-            metrics::counter!("epicbox_limit_refusals_total", "limit" => "mux_attach").increment(1);
+            self.relay.limiter.refused("mux_attach", self.ip);
             self.send(ws, mux_error("rate_limited", "Too many Attach frames.", r#ref, Some(wait))).await;
             return;
         }
@@ -259,7 +259,7 @@ impl Session {
             return;
         };
         if let Err(wait) = self.attach_budget() {
-            metrics::counter!("epicbox_limit_refusals_total", "limit" => "mux_attach").increment(1);
+            self.relay.limiter.refused("mux_attach", self.ip);
             self.send(ws, mux_error("rate_limited", "Too many Resume frames.", r#ref, Some(wait))).await;
             return;
         }
@@ -286,6 +286,8 @@ impl Session {
 
     /// Answer Attach or Resume, with a new token when `issue` is set, then deliver.
     async fn attached_reply(&mut self, ws: &mut WebSocket, out: Vec<Value>, issue: bool, r#ref: &Option<String>) {
+        let taken = out.iter().filter(|v| v["ok"] == true).count();
+        tracing::debug!(socket = self.id, taken, refused = out.len() - taken, "attached");
         let mut reply = json!({"type":"Attached","mailboxes":out});
         if let Some(r) = r#ref {
             reply["ref"] = json!(r);
@@ -382,7 +384,7 @@ impl Session {
             match self.relay.store.made_in(attached, ids.clone()).await {
                 Ok(n) => metrics::counter!("epicbox_made_total", "mode" => "mux").increment(n),
                 Err(e) => {
-                    tracing::error!(error = %e, "ack failed");
+                    crate::sampled!(error, error = %e, "ack failed");
                     self.send(ws, mux_error("internal", "Internal error; try again.", r#ref, None)).await;
                     return;
                 }
@@ -438,7 +440,7 @@ impl Session {
         m.waiting_window.1 += 1;
         if m.waiting_window.1 > WAITING_PER_MIN {
             let wait = Duration::from_secs(60).saturating_sub(m.waiting_window.0.elapsed()).as_secs().max(1);
-            metrics::counter!("epicbox_limit_refusals_total", "limit" => "mux_waiting").increment(1);
+            self.relay.limiter.refused("mux_waiting", self.ip);
             self.send(ws, mux_error("rate_limited", "Too many Waiting frames.", r#ref, Some(wait))).await;
             return;
         }
@@ -539,7 +541,7 @@ impl Session {
                 {
                     Ok(v) => v,
                     Err(e) => {
-                        tracing::error!(error = %e, "mux claim failed");
+                        crate::sampled!(error, error = %e, "mux claim failed");
                         return;
                     }
                 };

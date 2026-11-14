@@ -87,7 +87,7 @@ pub(super) async fn post(
     // `str` pays in post_slate; the rest of the body pays here, as a websocket frame does.
     let outside = body.len().saturating_sub(m.get("str").and_then(|s| s.as_str()).map_or(0, str::len));
     if let Err(s) = relay.limiter.frame_bytes(ip, outside) {
-        metrics::counter!("epicbox_limit_refusals_total", "limit" => "bytes_per_ip").increment(1);
+        relay.limiter.refused("bytes_per_ip", ip);
         return too_many(R, format!("Rate limit exceeded; retry in {s} s."), s);
     }
     let req = PostReq::from_json(&Value::Object(m));
@@ -174,7 +174,7 @@ async fn prove(st: &AppState, ip: IpAddr, mb: &Value) -> Result<Proven, ProveErr
         Ok(true) => Ok(Proven { address, key: Ok(key) }),
         Ok(false) => Ok(Proven { address, key: Err("challenge was already used") }),
         Err(e) => {
-            tracing::error!(error = %e, "store use_challenge failed");
+            crate::sampled!(error, error = %e, "store use_challenge failed");
             Err(ProveError::Store)
         }
     }
@@ -226,12 +226,12 @@ pub(super) async fn pull(
         return err(R, StatusCode::SERVICE_UNAVAILABLE, "Relay storage is full; try again later.");
     }
     if let Some(s) = relay.limiter.sig_blocked(ip) {
-        metrics::counter!("epicbox_limit_refusals_total", "limit" => "failed_sigs").increment(1);
+        relay.limiter.refused("failed_sigs", ip);
         return too_many(R, format!("Too many failed signatures; retry in {s} s."), s);
     }
     // Every mailbox costs a signature check and a challenge write.
     if let Err(s) = relay.limiter.http_ip(ip, list.len()) {
-        metrics::counter!("epicbox_limit_refusals_total", "limit" => "http").increment(1);
+        relay.limiter.refused("http", ip);
         return too_many(R, format!("Rate limit exceeded; retry in {s} s."), s);
     }
 
@@ -261,7 +261,7 @@ pub(super) async fn pull(
                     WaitRefusal::PerIp => ("http_waiting_per_ip", "Too many waiting pulls from this network"),
                     WaitRefusal::Total => ("http_waiting", "Too many waiting pulls"),
                 };
-                metrics::counter!("epicbox_limit_refusals_total", "limit" => limit).increment(1);
+                relay.limiter.refused(limit, ip);
                 return too_many(R, format!("{text}; retry in {} s.", PULL_RECHECK.as_secs()), PULL_RECHECK.as_secs());
             }
         }
@@ -331,12 +331,12 @@ async fn claim_round(
                 Ok(true) => match relay.store.claim(key, now_ms(), take, vec![], ClaimMode::Offer { lease_ms }).await {
                     Ok(v) => v,
                     Err(e) => {
-                        tracing::error!(error = %e, "store claim failed");
+                        crate::sampled!(error, error = %e, "store claim failed");
                         return None;
                     }
                 },
                 Err(e) => {
-                    tracing::error!(error = %e, "store read failed");
+                    crate::sampled!(error, error = %e, "store read failed");
                     return None;
                 }
             }
@@ -391,11 +391,11 @@ pub(super) async fn made(
     };
     let ip = client_ip(peer, &headers, &relay.cfg.server.trusted_proxies);
     if let Some(s) = relay.limiter.sig_blocked(ip) {
-        metrics::counter!("epicbox_limit_refusals_total", "limit" => "failed_sigs").increment(1);
+        relay.limiter.refused("failed_sigs", ip);
         return too_many(R, format!("Too many failed signatures; retry in {s} s."), s);
     }
     if let Err(s) = relay.limiter.http_ip(ip, acks.len()) {
-        metrics::counter!("epicbox_limit_refusals_total", "limit" => "http").increment(1);
+        relay.limiter.refused("http", ip);
         return too_many(R, format!("Rate limit exceeded; retry in {s} s."), s);
     }
     let mut ids = Vec::with_capacity(acks.len());
@@ -416,7 +416,7 @@ pub(super) async fn made(
         match relay.store.made(&key, ids).await {
             Ok(v) => v.into_iter().filter(|x| *x).count() as u64,
             Err(e) => {
-                tracing::error!(error = %e, "store made failed");
+                crate::sampled!(error, error = %e, "store made failed");
                 return err(R, StatusCode::SERVICE_UNAVAILABLE, "Internal error; try again.");
             }
         }

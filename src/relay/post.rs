@@ -10,6 +10,7 @@ use super::{PostOutcome, PostReq, Refusal, Relay};
 use crate::address::{parse_address, EpicboxAddress};
 use crate::clock::now_ms;
 use crate::ids::{is_txid, rand_id};
+use crate::logging::short_addr;
 use crate::sig;
 use crate::store::{ForwardKind, NewForward, NewMessage, PutOutcome};
 
@@ -35,6 +36,10 @@ struct Slate {
 impl Relay {
     /// Validate, store or queue a slate. `allow_cancel` accepts the 3.1.0 fields.
     pub async fn post_slate(&self, ip: IpAddr, req: PostReq, allow_cancel: bool) -> PostOutcome {
+        let who = tracing::enabled!(tracing::Level::DEBUG).then(|| {
+            let addr = |a: &Option<String>| a.as_deref().map(short_addr).unwrap_or_default();
+            (addr(&req.from), addr(&req.to))
+        });
         let out = self.post_slate_inner(ip, req, allow_cancel).await;
         let label = match &out {
             PostOutcome::Stored { .. } => "stored",
@@ -46,6 +51,12 @@ impl Relay {
             PostOutcome::Refused(Refusal::Invalid(..)) => "invalid",
         };
         metrics::counter!("epicbox_posts_total", "result" => label).increment(1);
+        if let PostOutcome::Refused(Refusal::RateLimited(_)) = out {
+            self.limiter.refused("posts", ip);
+        }
+        if let Some((from, to)) = who {
+            tracing::debug!(from = %from, to = %to, result = label, "post");
+        }
         out
     }
 
@@ -135,10 +146,12 @@ impl Relay {
     /// A refusal when the store holds `store.max_bytes` of live data or more.
     fn store_full(&self) -> Option<Refusal> {
         let cap = self.cfg.store.max_bytes;
-        if cap == 0 || self.store.used_bytes()? < cap {
+        let used = self.store.used_bytes()?;
+        if cap == 0 || used < cap {
             return None;
         }
         metrics::counter!("epicbox_limit_refusals_total", "limit" => "store_bytes").increment(1);
+        crate::sampled!(warn, used_bytes = used, max_bytes = cap, "store is full; refusing posts");
         Some(Refusal::Full("Relay storage is full; try again later.".into()))
     }
 
@@ -188,7 +201,7 @@ impl Relay {
                 "Posting address is not a participant of epicboxtxid.".into(),
             )),
             Err(e) => {
-                tracing::error!(error = %e, "store put_message failed");
+                crate::sampled!(error, error = %e, "store put_message failed");
                 self.store_ok.store(false, Ordering::Relaxed);
                 Refused(Refusal::Internal)
             }
@@ -240,7 +253,7 @@ impl Relay {
                 PostOutcome::Forwarded { txid }
             }
             Err(e) => {
-                tracing::error!(error = %e, "store put_forward failed");
+                crate::sampled!(error, error = %e, "store put_forward failed");
                 Refused(Refusal::Internal)
             }
         }

@@ -372,6 +372,12 @@ impl Config {
         if (self.limits.http_per_min_per_ip as usize) < biggest_v1 {
             bail!("limits.http_per_min_per_ip must be at least http_api.max_mailboxes and http_api.max_per_mailbox");
         }
+        if !matches!(self.log.format.as_str(), "text" | "json") {
+            bail!("log.format must be \"text\" or \"json\"");
+        }
+        if let Err(e) = tracing_subscriber::EnvFilter::try_new(&self.log.level) {
+            bail!("log.level is not a valid filter: {e}");
+        }
         for (k, v) in &self.federation.peers {
             if !(v.starts_with("ws://") || v.starts_with("wss://")) {
                 bail!("federation.peers.{k}: URL must start with ws:// or wss://");
@@ -453,12 +459,14 @@ mod tests {
     #[test]
     fn defaults_validate_and_bad_values_are_refused() {
         base().validate().unwrap();
-        let cases: [fn(&mut Config); 8] = [
+        let cases: [fn(&mut Config); 10] = [
             |c| c.server.domain.clear(),
             |c| c.store.vacuum_hour_utc = 24,
             |c| c.store.readers = 0,
             |c| c.store.retention_days = 6,
             |c| c.limits.http_per_min_per_ip = 10,
+            |c| c.log.format = "jsn".into(),
+            |c| c.log.level = "epicmail=loud".into(),
             |c| {
                 c.federation.peers.insert("a.example:443".into(), "http://a.example".into());
             },

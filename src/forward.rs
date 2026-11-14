@@ -151,7 +151,7 @@ pub async fn run(relay: Arc<Relay>) {
                         });
                     }
                 }
-                Err(e) => tracing::error!(error = %e, "forward queue read failed"),
+                Err(e) => crate::sampled!(error, error = %e, "forward queue read failed"),
             }
         }
         metrics::gauge!("epicbox_forward_lanes").set(lanes.lock().len() as f64);
@@ -175,7 +175,7 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
             Ok(r) if !r.is_empty() => r,
             Ok(_) => return,
             Err(e) => {
-                tracing::error!(error = %e, "forward queue read failed");
+                crate::sampled!(error, error = %e, "forward queue read failed");
                 return;
             }
         };
@@ -183,11 +183,11 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
         // refuses: drop them instead of connecting.
         if !relay.peer_allowed(peer) {
             metrics::counter!("epicbox_forwards_total", "result" => "policy").increment(rows.len() as u64);
-            tracing::warn!(peer, rows = rows.len(), "dropping forwards the federation policy refuses");
+            crate::sampled!(warn, peer, rows = rows.len(), "dropping forwards the federation policy refuses");
             for row in rows {
                 if let Err(e) = relay.store.forward_failed(row.id, now_ms(), "refused by federation policy", true).await
                 {
-                    tracing::error!(error = %e, "forward bookkeeping failed");
+                    crate::sampled!(error, error = %e, "forward bookkeeping failed");
                     return;
                 }
             }
@@ -209,30 +209,30 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
                     let drop = attempts >= MAX_REFUSALS;
                     metrics::counter!("epicbox_forwards_total", "result" => "refused").increment(1);
                     // The text is the peer's: logged escaped, so it cannot add lines to our log.
-                    tracing::warn!(peer, error = ?e, attempts, dropped = drop, "peer refused forward");
+                    crate::sampled!(warn, peer, error = ?e, attempts, dropped = drop, "peer refused forward");
                     relay.store.forward_failed(row.id, now_ms() + backoff_ms(attempts), &e, drop).await
                 }
                 Err(Failure::Loop) => {
                     metrics::counter!("epicbox_forwards_total", "result" => "loop").increment(1);
-                    tracing::warn!(peer, "forward dropped: the peer is this relay under another name");
+                    crate::sampled!(warn, peer, "forward dropped: the peer is this relay under another name");
                     relay.store.forward_failed(row.id, now_ms(), "forward loop", true).await
                 }
                 Err(Failure::Transport(e)) => {
                     metrics::counter!("epicbox_forwards_total", "result" => "failed").increment(1);
                     // The whole peer waits, not only this row.
                     let next = backoff.failed(peer, now_ms());
-                    tracing::warn!(peer, error = ?e, attempts, retry_in_s = (next - now_ms()) / 1000, "forward failed");
+                    crate::sampled!(warn, peer, error = ?e, attempts, retry_in_s = (next - now_ms()) / 1000, "forward failed");
                     let r =
                         relay.store.forward_failed(row.id, next.max(now_ms() + backoff_ms(attempts)), &e, false).await;
                     // The peer is unreachable: leave the rest of the batch for the next round.
                     if let Err(e) = r {
-                        tracing::error!(error = %e, "forward bookkeeping failed");
+                        crate::sampled!(error, error = %e, "forward bookkeeping failed");
                     }
                     return;
                 }
             };
             if let Err(e) = r {
-                tracing::error!(error = %e, "forward bookkeeping failed");
+                crate::sampled!(error, error = %e, "forward bookkeeping failed");
                 return;
             }
         }
@@ -339,7 +339,7 @@ async fn deliver(relay: &Relay, peer: &str, row: &ForwardRow, tls: Arc<rustls::C
             "error" if sent => {
                 let _ = ws.close(None).await;
                 let d = v.get("description").and_then(|d| d.as_str()).unwrap_or("error");
-                return Err(Failure::Refused(d.chars().take(200).collect()));
+                return Err(Failure::Refused(crate::logging::clean(d)));
             }
             _ => {}
         }
