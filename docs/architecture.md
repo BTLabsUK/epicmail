@@ -59,7 +59,8 @@ handle does not block the rest of the mailbox. mux/1 and `/v1` have no such coun
 ## Federation
 
 If the destination is another relay, `post_slate` checks `federation.enabled`, the allow and
-deny lists, and the domain form, then stores the `PostSlate` frame as a forward row with
+deny lists, and the domain form (`Relay::forward_refusal`; CancelTx forwards and every delivery
+round apply the same checks), then stores the `PostSlate` frame as a forward row with
 `Store::put_forward` and answers `Ok` after that commit. The forward manager (`forward.rs`) is
 woken at once and also wakes every 5 s. It runs one lane per peer `domain:port`, at most
 `federation.max_lanes` at a time. A lane opens a fresh websocket per forward, waits for the
@@ -92,12 +93,16 @@ writer's latency and batch size.
 `X-Forwarded-For` only when the peer is in `server.trusted_proxies`. Sources in
 `shared_sources` get every per-prefix budget multiplied by `shared_multiplier`.
 
-- Token buckets per prefix: posts, posted bytes, failed signatures.
+- Token buckets per prefix: posts, posted bytes, failed signatures, mux/1 Attach and Resume
+  frames, and `/v1` work (one unit per pulled mailbox or acked id).
 - Token buckets per sender address: posts.
 - Counters: sockets per prefix, mux/1 sockets per prefix, sockets in total. A socket holds a
   `SocketPermit` that gives its slot back when dropped.
 - Per socket, in the session: frames per minute, frame and string size, mux/1 mailboxes,
-  attach frames and messages in flight.
+  attach frames and messages in flight. A write that the client does not take within
+  `protocol.idle_timeout_s` ends the session.
+- Memory: mux/1 resume tokens outlive their sockets, so the mailboxes they hold are capped
+  (`mux_token_mailboxes`); the oldest tokens go first.
 - In the store: `queue_cap` and `per_sender_cap`.
 
 A refusal increments `epicbox_limit_refusals_total{limit=...}`. Rate refusals tell the client

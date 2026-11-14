@@ -24,7 +24,7 @@ fn describe() {
     describe_gauge!("epicbox_tombstones", "Cancelled transactions remembered.");
     describe_gauge!("epicbox_db_bytes", "Size of the SQLite file.");
     describe_gauge!("epicbox_mux_tokens", "Live mux/1 resume tokens.");
-    describe_gauge!("epicbox_store_ok", "1 when the last store write succeeded.");
+    describe_gauge!("epicbox_store_ok", "1 when the last store check (/ready probe or expiry sweep) succeeded.");
     describe_counter!("epicbox_frames_in_total", "Websocket frames received.");
     describe_counter!("epicbox_frames_out_total", "Websocket frames sent.");
     describe_counter!("epicbox_posts_total", "PostSlate results.");
