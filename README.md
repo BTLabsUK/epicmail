@@ -138,7 +138,8 @@ supervisor. Everything below is covered step by step in [docs/operating.md](docs
    ```
 
    In the container config set `server.listen = "0.0.0.0:3423"` and
-   `store.path = "/data/epicmail.db"`.
+   `store.path = "/data/epicmail.db"`, and put the Docker bridge gateway (often `172.17.0.1`) in
+   `server.trusted_proxies`: the container does not see the proxy as `127.0.0.1`.
 5. **Monitoring.** Scrape `/metrics` from loopback (or set `server.metrics_listen`), probe
    `/ready`, and back up the database with `sqlite3 ... ".backup ..."` (see the operating guide).
 

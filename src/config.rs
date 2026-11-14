@@ -375,6 +375,15 @@ impl Config {
             if !(v.starts_with("ws://") || v.starts_with("wss://")) {
                 bail!("federation.peers.{k}: URL must start with ws:// or wss://");
             }
+            // Forward rows name peers as lower-case `domain:port`; any other spelling of a key
+            // would never match and be ignored without a word.
+            let normal = k
+                .rsplit_once(':')
+                .filter(|(_, p)| p.parse::<u16>().is_ok())
+                .and_then(|(d, p)| Some(format!("{}:{p}", normalize_domain(d)?)));
+            if normal.as_deref() != Some(k.as_str()) {
+                bail!("federation.peers: key \"{k}\" must be lower-case domain:port without a trailing dot");
+            }
         }
         Ok(())
     }
@@ -443,7 +452,7 @@ mod tests {
     #[test]
     fn defaults_validate_and_bad_values_are_refused() {
         base().validate().unwrap();
-        let cases: [fn(&mut Config); 6] = [
+        let cases: [fn(&mut Config); 8] = [
             |c| c.server.domain.clear(),
             |c| c.store.vacuum_hour_utc = 24,
             |c| c.store.readers = 0,
@@ -451,6 +460,12 @@ mod tests {
             |c| c.limits.http_per_min_per_ip = 10,
             |c| {
                 c.federation.peers.insert("a.example:443".into(), "http://a.example".into());
+            },
+            |c| {
+                c.federation.peers.insert("A.example:443".into(), "wss://a.example/".into());
+            },
+            |c| {
+                c.federation.peers.insert("a.example.:443".into(), "wss://a.example/".into());
             },
         ];
         for (i, f) in cases.iter().enumerate() {

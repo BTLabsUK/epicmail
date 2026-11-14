@@ -35,7 +35,7 @@ docker run -d --name relay --restart on-failure \
   epicmail
 ```
 
-In the container config set `server.listen = "0.0.0.0:3423"` and `store.path = "/data/epicmail.db"`. The image runs as uid 65532 on a `scratch` base and has no shell, so there is no HEALTHCHECK. Check from outside instead: `curl -fsS http://127.0.0.1:3423/ready` from the host or the reverse proxy, or a Compose/orchestrator probe on `/ready`. Stop with `docker stop -t 30`: the default 10 s equals `drain_seconds`.
+In the container config set `server.listen = "0.0.0.0:3423"` and `store.path = "/data/epicmail.db"`. Behind a reverse proxy on the host, the container sees connections from the Docker bridge gateway (often `172.17.0.1`), not `127.0.0.1`: put that address, or the bridge network such as `172.16.0.0/12`, in `server.trusted_proxies`. Otherwise the relay ignores `X-Forwarded-For` and every client shares one per-prefix budget, 256 sockets for the whole relay. The image runs as uid 65532 on a `scratch` base and has no shell, so there is no HEALTHCHECK. Check from outside instead: `curl -fsS http://127.0.0.1:3423/ready` from the host or the reverse proxy, or a Compose/orchestrator probe on `/ready`. Stop with `docker stop -t 30`: the default 10 s equals `drain_seconds`.
 
 ### systemd
 
