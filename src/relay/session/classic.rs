@@ -111,7 +111,8 @@ impl Session {
             self.send(ws, e).await;
             return Flow::Continue;
         }
-        if let Err(s) = r.limiter.sig_checks(self.ip, 1) {
+        // Over the current challenge and, failing that, the previous one: up to two checks.
+        if let Err(s) = r.limiter.sig_checks(self.ip, 1 + usize::from(self.prev_challenge.is_some())) {
             self.send(ws, Refusal::RateLimited(s).classic_frame()).await;
             return Flow::Continue;
         }
@@ -285,7 +286,8 @@ impl Session {
             // The stock relay ignores other Made frames without an answer.
             _ => return,
         };
-        if let Err(s) = r.limiter.sig_checks(self.ip, 1) {
+        let checks = 1 + usize::from(ver == Ver::V2 && self.prev_challenge.is_some());
+        if let Err(s) = r.limiter.sig_checks(self.ip, checks) {
             self.send(ws, Refusal::RateLimited(s).classic_frame()).await;
             return;
         }

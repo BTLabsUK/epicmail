@@ -36,7 +36,8 @@ impl Relay {
         if let Some(s) = self.limiter.sig_blocked(ip) {
             return R(Refusal::RateLimited(s));
         }
-        if let Err(s) = self.limiter.sig_checks(ip, 1) {
+        // The domain-separated form and, on a socket that proved the key, the bare one.
+        if let Err(s) = self.limiter.sig_checks(ip, 1 + usize::from(socket_key.is_some())) {
             return R(Refusal::RateLimited(s));
         }
         // A bare signature over the txid is what PostSlate's epicboxtxidsig already is, so anyone
