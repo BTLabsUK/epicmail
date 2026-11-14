@@ -1,40 +1,88 @@
 # epicmail
 
-An Epicbox-compatible relay for Epic Cash wallets, in one static binary with SQLite inside.
+An Epicbox-compatible relay for Epic Cash wallets: one Rust binary with an embedded SQLite
+store. Existing wallets use it without any change.
 
-Epic Cash transactions are built interactively: the sender's wallet and the receiver's wallet
-pass a transaction file (a *slate*) back and forth before it reaches the chain. When the two
-wallets are not online at the same time, they need a mailbox in between. Epicbox is that
-mailbox: a relay that holds encrypted slates until the receiving wallet collects them.
+Epic Cash transactions are built interactively. The sender's and the receiver's wallets pass a
+transaction file (a *slate*) back and forth before it goes on chain, and when the two are not
+online at the same time they need a mailbox in between. An Epicbox relay is that mailbox: it
+holds slates, encrypted by the wallets, until the receiver collects them. epicmail speaks the
+same websocket protocol as the existing Epicbox relays and federates with them.
 
-epicmail is a relay that speaks the Epicbox protocol, so existing wallets use it without any
-change. It is meant for anyone who wants to run one: a public relay for wallet users, a private
-relay for an exchange, a pool or a payment service, or a relay for a test network.
+This README is for developers, operators and wallet maintainers. It tries to answer the
+questions each of them will have; [docs/](docs/) holds the details.
 
-## Why another relay
+- [Why this relay](#why-this-relay)
+- [Compatibility at a glance](#compatibility-at-a-glance)
+- [How a slate moves](#how-a-slate-moves)
+- [Build and run](#build-and-run)
+- [Configuration](#configuration)
+- [Protocols](#protocols)
+- [Transaction cancel (3.1.0)](#transaction-cancel-310)
+- [Federation](#federation)
+- [Data and retention](#data-and-retention)
+- [Logging and metrics](#logging-and-metrics)
+- [Security model](#security-model)
+- [Known limits](#known-limits)
+- [Questions](#questions)
+- [Contributing](#contributing)
 
-- **One process, no database server.** The store is an embedded SQLite file. There is nothing
-  else to install, back up or keep in sync.
-- **Durable delivery.** A sender gets `Ok` only after its slate is committed to disk. A slate
-  waits until the receiver acknowledges it, or until the retention period ends (7 days by
-  default). A receiving socket that drops mid-delivery does not lose the slate.
-- **Compatible.** Websocket protocol 2.0.0, 3.0.0 and the 3.1.0 transaction cancel, with the
-  frames, error texts, address grammar and signature checks of the original relay. Signature
-  checking is tested against the original verifier on recorded cases.
-- **Bounded.** Rate limits and caps per IP prefix, per address, per socket and per mailbox, so
-  one client cannot exhaust the relay.
-- **Observable.** Prometheus metrics, liveness and readiness endpoints, a public status
-  document.
-- **Extensions that classic wallets never see.** `mux/1` (many mailboxes on one socket) and an
-  HTTPS pull API for clients that cannot hold a websocket open.
+## Why this relay
 
-## How it works
+The existing relays work and carry real traffic. epicmail was written to make a relay easy for
+anyone to run and to reason about, with these properties stated and tested:
+
+- **Durable delivery.** A sender gets `Ok` only after its slate is committed to disk with
+  `fsync`. Delivering a slate leases it instead of deleting it, so a receiver whose connection
+  drops mid-delivery gets it again. A slate is deleted when the receiver acknowledges it with a
+  signed `Made`, or when the retention period (7 days by default) ends. A slate that one wallet
+  cannot handle steps aside after three tries instead of blocking the rest of the mailbox.
+- **Bounded resources.** Every input has a limit: frame and slate size, posts and bytes per
+  network prefix and per sender, sockets per prefix and in total, mail per mailbox and per
+  sender, signature checks per prefix, and the live size of the database. A client that stops
+  reading is disconnected instead of holding memory. The limits are listed with their defaults
+  in [docs/operating.md](docs/operating.md#3-limits).
+- **Compatibility coverage.** The websocket protocol 2.0.0, 3.0.0 and the 3.1.0 transaction
+  cancel are implemented frame by frame, with the original error texts and address grammar.
+  Signature checking is compared against the original verifier on a recorded corpus of edge
+  cases (`tests/sigdiff.rs`), and `tools/compat-classic.sh` runs the real wallet CLI against
+  two local relays, including federation between them.
+- **Operations.** One static binary and one TOML file; no database server. Health and
+  readiness endpoints, Prometheus metrics, a graceful SIGTERM drain, a hardened systemd unit and
+  a container image on an empty base. Configuration is validated before start, and unknown keys
+  are refused.
+- **Privacy by default.** Every challenge is random, so a captured signature cannot be replayed.
+  Logs and metrics never hold full addresses, slates, signatures or client IPs, and repeated
+  log lines are sampled. Deleted slates are overwritten on disk where that costs no extra I/O.
+- **Room to grow without breaking wallets.** Two opt-in extensions, `mux/1` (many mailboxes on
+  one socket) and an HTTPS pull API, serve services and clients that cannot hold one socket
+  per mailbox. A classic wallet never sees either.
+
+How fast it is depends on the host. One measurement, on a shared 8-core development machine
+with an NVMe disk, sustained about 2,000 slates a second end to end (posted, stored,
+delivered, acknowledged, deleted) with no loss; an idle subscribed socket cost about 15 KiB of
+memory. [docs/loadtest.md](docs/loadtest.md) has the method, the full results and what was not
+measured. Measure your own host before relying on these figures.
+
+## Compatibility at a glance
+
+| Question | Answer |
+|---|---|
+| Wallet changes needed? | None. Point the wallet's Epicbox domain and port at the relay. |
+| Protocol versions | 2.0.0, 3.0.0 and 3.1.0 (transaction cancel). Pre-2.0.0 wallets (no `ver` in Subscribe) are served too; their slates are deleted on delivery since they send no `Made`. `GetVersion` answers `protocol.getversion`, `3.1.0` by default. |
+| Wallets that sign a fixed first challenge | Versions before 3.5.2 sign the same constant on every new socket. epicmail never sends or accepts it, so these wallets can post through epicmail but cannot receive from it. See [Security model](#security-model). |
+| Other relays | Federates both ways with relays that speak the same protocol. It forwards as a wallet would (wait for `Challenge`, send `PostSlate`, read `Ok`), and accepts forwarded slates like any post. |
+| Addresses | `[epicbox://]<base58check public key>[@domain[:port]]`, the original grammar. Port defaults to 443. |
+| Signatures | secp256k1 ECDSA over SHA-256 of the UTF-8 text, strict DER, low-S, hex as the original verifier decodes it. |
+| Migrating from a Postgres-backed relay | `tools/export-node-pg.py` exports its queue as JSON Lines; `epicmail import` loads it. |
+
+## How a slate moves
 
 ```
  sender wallet                    epicmail                       receiver wallet
       |  PostSlate (signed)          |                                 |
-      |----------------------------->|  check limits, address,         |
-      |                              |  signature; commit to SQLite    |
+      |----------------------------->|  limits, address and signature  |
+      |                              |  checks; commit to SQLite       |
       |<---------------- Ok ---------|                                 |
       |                              |-------- Slate (pushed) -------->|
       |                              |<------- Made (signed) ----------|
@@ -45,148 +93,106 @@ relay for an exchange, a pool or a payment service, or a relay for a test networ
    the rate limits, the sizes, both addresses and the sender's signature over the slate, then
    reads the destination from inside the signed slate.
 2. **Store.** If the destination is this relay, the slate is committed to SQLite. If it is
-   another relay and federation is on, it is committed to a forward queue instead. Either way,
+   another relay and federation is on, it is committed to a forward queue instead. Either way
    the sender gets `Ok` only after the commit.
 3. **Deliver.** The receiving wallet proves its key by signing a challenge (`Subscribe`). The
-   relay pushes waiting slates to it, one at a time on a classic socket. A delivered slate is
-   leased, not deleted, so a socket that dies does not lose it.
-4. **Acknowledge.** The wallet answers with `Made` (signed over the message id) and the relay
-   deletes the slate. Slates nobody collects expire after `store.retention_days`.
+   relay pushes waiting slates to it, one at a time on a classic socket, each leased for 60 s.
+4. **Acknowledge.** The wallet answers with `Made`, signed over the message id, and the relay
+   deletes the slate.
 
-A single writer thread owns the database and commits pending writes in groups, so many posts
-share one fsync. On an 8-core desktop with an NVMe disk, one relay held 2,000 messages per
-second end to end (stored, delivered, acknowledged, deleted) with p99 latency under 100 ms, and
-an idle socket cost about 15 KiB of memory. See [docs/loadtest.md](docs/loadtest.md) for the
-method and the limits of that measurement.
+One writer thread owns the database and commits pending writes in groups, so many posts share
+one `fsync`. [docs/architecture.md](docs/architecture.md) describes the modules, group commit,
+federation and the background tasks.
 
-[docs/architecture.md](docs/architecture.md) describes the modules, the message flow,
-federation, group commit and the background tasks in detail.
+## Build and run
 
-## Build
-
-Rust 1.85 or newer.
+Rust 1.89 or newer.
 
 ```sh
-cargo build --release
-# binary: target/release/epicmail
+cargo build --release                 # target/release/epicmail
+tools/build-static.sh                 # static x86_64 Linux binary (musl)
+docker build -t epicmail .            # static binary on an empty base, unprivileged user
 ```
 
-For a static Linux binary (musl), which runs on any x86_64 Linux host:
+Run locally. Only `server.domain` is required: the domain wallets write in their addresses.
 
 ```sh
-tools/build-static.sh
-# binary: target/x86_64-unknown-linux-musl/release/epicmail
-```
-
-Or build the container image (static binary on a `scratch` base, runs as an unprivileged user):
-
-```sh
-docker build -t epicmail .
-```
-
-## Run locally
-
-Only `server.domain` is required: the domain wallets write in their addresses for this relay.
-
-```sh
-cp packaging/epicmail.example.toml epicmail.toml
-# edit epicmail.toml: set server.domain, e.g. "relay.example.org"
+cp packaging/epicmail.example.toml epicmail.toml     # set server.domain
 target/release/epicmail check-config --config epicmail.toml
 target/release/epicmail selftest     --config epicmail.toml
 target/release/epicmail serve        --config epicmail.toml
-```
-
-By default it listens on `127.0.0.1:3423` and stores data in `epicmail.db` in the working
-directory. Check that it is up and that the store is writable:
-
-```sh
-curl -fsS http://127.0.0.1:3423/health
 curl -fsS http://127.0.0.1:3423/ready
 ```
 
-To point a wallet at a local relay, set its Epicbox domain to `localhost`, its port to `3423`
-and turn off TLS for Epicbox in the wallet's settings.
+It listens on `127.0.0.1:3423` and stores data in `epicmail.db` by default. To test with a
+wallet, set its Epicbox domain to `localhost`, port `3423`, and turn off TLS for Epicbox.
 
-## Run in production
-
-The relay does not terminate TLS. Put a reverse proxy in front of it and run it under a
-supervisor. Everything below is covered step by step in [docs/operating.md](docs/operating.md).
-
-1. **Binary and config.** Install the binary as `/usr/local/bin/epicmail` and the config as
-   `/etc/epicmail/epicmail.toml`, with `store.path = "/var/lib/epicmail/epicmail.db"` and
-   `server.trusted_proxies` listing the proxy (usually `["127.0.0.1/32"]`).
-2. **systemd.** `packaging/epicmail.service` runs the relay as a dynamic, unprivileged user with
-   a hardened sandbox, a state directory and a file limit that fits `limits.max_sockets`.
-
-   ```sh
-   install -m 0644 packaging/epicmail.service /etc/systemd/system/
-   systemctl daemon-reload
-   systemctl enable --now epicmail
-   ```
-
-3. **Reverse proxy.** `packaging/nginx.example.conf` and `packaging/Caddyfile.example` pass the
-   websocket upgrade, keep connections open for an hour (wallets hold sockets that long), set
-   `X-Forwarded-For` to the client address and keep `/metrics` private.
-4. **Docker** instead of systemd:
-
-   ```sh
-   docker run -d --name epicmail --restart on-failure \
-     -p 127.0.0.1:3423:3423 \
-     -v epicmail-data:/data \
-     -v /etc/epicmail/epicmail.toml:/etc/epicmail/epicmail.toml:ro \
-     epicmail
-   ```
-
-   In the container config set `server.listen = "0.0.0.0:3423"` and
-   `store.path = "/data/epicmail.db"`, and put the Docker bridge gateway (often `172.17.0.1`) in
-   `server.trusted_proxies`: the container does not see the proxy as `127.0.0.1`.
-5. **Monitoring.** Scrape `/metrics` from loopback (or set `server.metrics_listen`), probe
-   `/ready`, and back up the database with `sqlite3 ... ".backup ..."` (see the operating guide).
-
-Commands:
+Run in production behind a reverse proxy that ends TLS, under systemd or Docker.
+[docs/operating.md](docs/operating.md) covers it step by step: install, the systemd unit
+(`packaging/epicmail.service`), nginx and Caddy examples (`packaging/`), limits, health
+endpoints, backup and restore, logging, upgrade and roll back.
 
 | Command | What it does |
 |---|---|
 | `epicmail serve` | Run the relay. |
 | `epicmail check-config` | Load and validate the config, print it, exit. |
-| `epicmail selftest` | Check signatures and that the store is writable, exit. |
-| `epicmail export [--out FILE]` | Write waiting messages and queued forwards as JSON Lines (read only). |
-| `epicmail import FILE` | Load messages from JSON Lines, skipping ones already present. |
+| `epicmail selftest` | Check signing and verification and that the store is writable, exit. |
+| `epicmail export [--out FILE]` | Write waiting messages (with their 3.1.0 transaction ids) and queued forwards as JSON Lines. Opens the store read only. |
+| `epicmail import FILE` | Load messages and forwards from JSON Lines; ones already present are skipped, so it can be repeated. |
 
-All take `--config FILE` (default `/etc/epicmail/epicmail.toml`). `tools/export-node-pg.py`
-exports the queue of a Postgres-backed Epicbox relay in the same format, for moving to epicmail.
+All take `--config FILE` (default `/etc/epicmail/epicmail.toml`).
 
 ## Configuration
 
-One TOML file. Every setting except `server.domain` has a default, unknown keys are refused, and
-`check-config` validates a file before you restart. The full list, with defaults and a comment
-on each line, is [packaging/epicmail.example.toml](packaging/epicmail.example.toml); the
-reference is `src/config.rs`.
+One TOML file. Every setting except `server.domain` has a default; unknown keys and invalid
+values are refused at load, and `check-config` checks a file before a restart. Every setting,
+with its default and a comment, is in
+[packaging/epicmail.example.toml](packaging/epicmail.example.toml); `src/config.rs` is the
+reference.
 
 | Section | Holds |
 |---|---|
-| `[server]` | Listener, identity (`domain`, `port`, `aliases`), trusted proxies, metrics listener, drain time |
-| `[store]` | Database path, retention, size cap, group commit size, reader connections, vacuum hour |
-| `[protocol]` | Challenge interval, version answered to `GetVersion`, cancel and mux/1 switches, ping and idle timeouts |
-| `[limits]` | Frame and slate sizes, rates per IP prefix and per address, socket caps, mailbox caps, mux/1 and `/v1` budgets |
-| `[federation]` | Forwarding to other relays: on/off, allow and deny lists, timeouts |
-| `[http_api]` | The `/v1` HTTPS API: on/off, batch sizes, long-poll time and how many may wait at once, challenge window, lease |
-| `[log]` | `text` or `json`, and a log filter (the `RUST_LOG` variable overrides it) |
+| `[server]` | Listener, identity (`domain`, `port`, `aliases`), trusted proxies, metrics listener, drain time, display name |
+| `[store]` | Database path, retention, live-size cap, group commit size, reader connections, vacuum hour |
+| `[protocol]` | Challenge interval, `GetVersion` answer, cancel and mux/1 switches, ping and idle timeouts, watchdog |
+| `[limits]` | Sizes, rates per network prefix and per sender, socket caps, mailbox caps, mux/1 and `/v1` budgets |
+| `[federation]` | Forwarding to other relays: on/off, allow and deny lists, explicit peer URLs, timeouts, parallel lanes |
+| `[http_api]` | The `/v1` API: on/off, batch sizes, long-poll time and caps, challenge window, lease |
+| `[log]` | `text` or `json`, and the log filter (`RUST_LOG` overrides it) |
 
-Per-IP limits apply per network prefix (`/24` for IPv4, `/48` for IPv6). List addresses many
-users share, such as a Tor onion service's local address, in `limits.shared_sources` so they get
-a larger budget.
+Per-IP limits apply per network prefix (`/24` for IPv4, `/48` for IPv6). Addresses many users
+share, such as a Tor onion service's local address, go in `limits.shared_sources` for a larger
+budget. `server.trusted_proxies` must list the reverse proxy, or every client is counted as
+the proxy.
 
-## Protocols and API
+## Protocols
 
 ### Epicbox websocket (2.0.0, 3.0.0, 3.1.0)
 
-Wallets connect with a websocket to any path. The relay sends a `Challenge`; a wallet proves a
-mailbox by signing it in `Subscribe`, posts with `PostSlate`, receives `Slate` frames and
-acknowledges them with `Made`. Version 3.1.0 adds a stable transaction id to `PostSlate`, and
-`CancelTx`, which removes every waiting state of a transaction and tells the other party with
-`TransactionCancelled`. Signatures are secp256k1 ECDSA over SHA-256 of the UTF-8 text, as DER
-hex. Addresses are `[epicbox://]<base58check public key>[@domain[:port]]`.
+Wallets connect with a websocket to any path. The relay sends a `Challenge`, and then a new one
+every `protocol.challenge_interval_s` (60 s). A wallet proves a mailbox by signing the current
+challenge in `Subscribe`, posts with `PostSlate`, receives `Slate` frames and acknowledges each
+with `Made`. Version differences:
+
+| | 2.0.0 | 3.0.0 | 3.1.0 |
+|---|---|---|---|
+| `Made` signed over | the current challenge | the message id | the message id |
+| `Slate` carries | `epicboxmsgid`, `ver` | `epicboxmsgid`, `ver` | also `epicboxtxid` when the slate has one |
+| Cancel | no | no | `epicboxtxid` and `epicboxtxidsig` on `PostSlate`, `CancelTx`, `TransactionCancelled` |
+
+Differences from the original relay that a wallet can observe, all within what wallets accept:
+
+- Every challenge is random, the first one included.
+- A `Subscribe` signed over the previous challenge is still accepted until the next successful
+  one, because the interval challenge can cross a `Subscribe` in flight.
+- A delivered slate is leased for 60 s rather than holding the mailbox until `Made`. After three
+  `Subscribe`s without a `Made` for it, the slate goes behind the other waiting ones.
+- A socket that leaves three interval challenges unanswered while mail waits for it is closed
+  with 1001 so the wallet reconnects (the watchdog).
+- A malformed frame closes only its own socket (code 3000, as before); other sockets are not
+  affected.
+- Only the newest classic socket of a mailbox receives pushes; older ones stay open, up to
+  `limits.sockets_per_address`, and collect on their next `Subscribe`.
 
 The cancel follows the reference 3.1.0 relay, so cancels pass between it and this relay in
 both directions: a `CancelTx` is accepted from a wallet's own socket or from another relay on a
@@ -202,16 +208,17 @@ only that form.
 
 ### mux/1
 
-An opt-in extension: a wallet sends `ClientDetails` with `"ext":["mux/1"]` and then carries any
-number of mailboxes on one socket, with several messages in flight, signature-free `Ack`, `Hold`
-for messages it cannot handle yet, and a resume token for reconnecting without signing again.
-Classic wallets never see a mux/1 frame. The specification is [docs/mux-1.md](docs/mux-1.md).
+Opt-in: a client sends `ClientDetails` with `"ext":["mux/1"]` before its first `Subscribe`, then
+carries many mailboxes on one socket, each proven once with `Attach`. It gets several messages
+in flight, signature-free `Ack`, `Hold` for a message it cannot handle yet, `Waiting` counts, and
+a single-use resume token for reconnecting without signing again. Specification:
+[docs/mux-1.md](docs/mux-1.md). The protocol is frozen at version 1; a change needs a new name.
 
 ### HTTPS pull API (`/v1`, `epicbox-https/0.1`)
 
-For clients that cannot hold a websocket. A client makes its own challenge,
-`ebh-<unix seconds>-<random lowercase hex>`, and signs it with the mailbox key; each challenge
-is accepted once and only inside `http_api.challenge_window_s`.
+For clients that cannot hold a websocket. The client makes its own challenge,
+`ebh-<unix seconds>-<random lowercase hex>`, and signs it with the mailbox key. A challenge is
+accepted once per key and only inside `http_api.challenge_window_s`.
 
 | Endpoint | Body | Answer |
 |---|---|---|
@@ -220,66 +227,186 @@ is accepted once and only inside `http_api.challenge_window_s`.
 | `POST /v1/pull` | `{"mailboxes":[{"address","challenge","signature"}],"limit":20,"wait":0..25}` | Waiting messages per mailbox; with `wait`, a long poll that returns when mail arrives |
 | `POST /v1/made` | `{"address","acks":[{"id","signature"}]}`, each signature over the id | `{"removed":n,"refused":n}` |
 
-Pulled messages are leased for `http_api.lease_s` seconds and offered again if not acknowledged.
-One reply carries at most about 4 MiB of slates; when mailboxes or messages were left for the next
-pull it has `"more": true`, and the client should pull again.
-A long poll returns as soon as mail for one of its mailboxes is stored. One prefix may have
-`http_api.max_waiting_per_ip` long polls waiting at once (64 by default); more get 429 with
-`Retry-After`, while pulls with `wait: 0` are not affected.
+Pulled messages are leased for `http_api.lease_s` seconds and offered again if not
+acknowledged. Long polls are capped per prefix and in total; over the cap a pull gets 429 with
+`Retry-After`.
 
 ### Other HTTP endpoints
 
 | Path | Use |
 |---|---|
 | `/health` | Liveness: the process answers. |
-| `/ready` | Readiness: the store is writable (checked at most every 5 s). 503 while draining. |
+| `/ready` | Readiness: the store is writable (written at most every 5 s). 503 while draining. |
 | `/metrics` | Prometheus text, names start with `epicbox_`. Only to loopback requests without `X-Forwarded-For`, or on `server.metrics_listen`. |
 | `/status.json` | Public totals: sockets, waiting messages, uptime. No per-address data. |
 | `/.well-known/epicbox.json` | Software, version, identity, protocol versions, federation, features and their limits. |
 
-### Federation
+## Transaction cancel (3.1.0)
 
-A slate whose destination is another relay's domain is queued and forwarded to that relay over
-`wss://`, with retries and exponential backoff for up to the retention period. Peer names are
-resolved by the relay and private, loopback and other special addresses are refused, so a
-crafted destination cannot make the relay connect to internal services. `federation.allow`
-restricts forwarding to listed relays; `federation.enabled = false` turns it off.
+A 3.1.0 `PostSlate` carries `epicboxtxid`, a 32-character transaction id, and
+`epicboxtxidsig`, the sender's signature over it. The relay links the transaction to its
+participants (the sender's and the receiver's keys) and, when the sender is on another relay,
+to that relay.
 
-## Security
+- **Who may cancel.** `CancelTx {address, epicboxtxid, signature}` from a participant. The
+  signature is over `epicbox-cancel/1:<txid>`, or, on a socket that has proven the key with
+  `Subscribe`, over the bare txid. A bare signature alone is not enough from an unproven socket:
+  the slate's `epicboxtxidsig` already is one, so anyone who saw the slate holds it.
+- **What happens.** Every waiting state of the transaction is deleted, a cancel record is kept
+  for the retention period, and the requester gets `TransactionCancelled`. The receiver's 3.1.0
+  sockets get `TransactionCancelled` pushed; a receiver offline at the time gets it on its next
+  `Subscribe`, and the following successful `Subscribe` acknowledges it. A later `PostSlate`
+  with the same txid gets `TransactionCancelled` instead of `Ok`.
+- **Non-participants** get a plain `Ok` and change nothing, so the answer does not reveal
+  whether the transaction exists.
+- **Across relays.** A cancel signed over `epicbox-cancel/1:<txid>` is forwarded to the other
+  relays that hold states of the transaction, under the same federation policy as slates. A
+  cancel signed over the bare txid is kept local unless `protocol.forward_bare_cancel` is set,
+  because it does not show that the sender asked to cancel.
+- **`Made` on a 3.1.0 slate** also removes the other waiting states of that transaction in the
+  same mailbox.
 
-- **Report vulnerabilities privately**, through the repository's private vulnerability
-  reporting, not in a public issue.
-- **What the relay can and cannot see.** Slates are encrypted by the wallets for the receiver;
-  the relay stores and forwards ciphertext. It does see metadata: sender and receiver addresses,
-  sizes, timing and client IP addresses. A mux/1 socket also shows which mailboxes belong
-  together. Operators should treat the database and the proxy logs as private.
-- **Logs and metrics** carry no addresses, keys, IPs, tokens or payloads. The proxy's access
-  log does carry client IPs; configure it to your privacy policy.
-- **Authentication.** Reading or acknowledging a mailbox needs a signature by its key: over a
-  relay challenge (websocket `Subscribe`, mux/1 `Attach`), over a single-use client challenge
-  (`/v1`), or over the message id (`Made`). A mux/1 socket that proved a mailbox may then `Ack`
-  without signatures, and its resume token (a bearer secret, valid 24 hours, single use) takes
-  the mailboxes back after a reconnect. Failed signatures are rate-limited per IP prefix.
-- **Every challenge is random.** The original relay sends one fixed challenge on every new
-  socket, so a wallet's first `Subscribe` signature never expires, and anyone who has seen it
-  (the operator of any relay that sends the fixed value, for one) could replay it to collect
-  that mailbox. epicmail sends a fresh random challenge on every socket and every round, and
-  accepts no signature over the fixed value. Wallets older than 3.5.2 always sign the fixed
-  value, so they cannot receive through epicmail; they can still post. A replayed signature is
-  byte for byte what an old wallet sends, so the two cannot be told apart safely.
-- **Trusted proxies.** `X-Forwarded-For` is honoured only from addresses in
-  `server.trusted_proxies`. List only your own proxy there, and make the proxy replace the
-  header rather than append to it (the examples do).
+`protocol.cancel = false` turns all of this off; the relay then behaves as a 3.0.0 relay.
+
+## Federation
+
+A slate whose destination is another relay's domain is queued and forwarded over `wss://`. The
+relay resolves the peer's name itself and refuses private, loopback, link-local and other
+special addresses (unless `federation.allow_private` is set for a test rig), connects to the
+checked address and verifies the certificate against the peer's domain, so a crafted
+destination cannot reach internal services. `federation.allow` restricts forwarding to listed
+relays, `federation.deny` excludes some, `federation.peers` maps a name to an explicit URL, and
+`federation.enabled = false` refuses posts for other relays.
+
+A failed delivery is retried with exponential backoff from 5 s to 1 hour, per peer: an
+unreachable peer waits as a whole. A peer that answers `Error` three times for one frame has
+refused it and the forward is dropped. Forwards expire with the retention period. Incoming
+forwards are ordinary `PostSlate`s from another relay's connection and pass the same checks as
+a wallet's.
+
+## Data and retention
+
+| Data | Kept until |
+|---|---|
+| Waiting slate | Acknowledged (`Made`, mux/1 `Ack`, `/v1/made`), or `store.retention_days` after posting (default and minimum 7) |
+| Queued forward | Delivered, refused three times, or the retention period |
+| Cancel record and transaction links (participant keys, peer relay) | The retention period |
+| Used `/v1` challenge | The end of its challenge window |
+| mux/1 resume token | Used, replaced, or 24 hours; memory only, gone on restart |
+| Rate-limit state | Memory only |
+
+The store is one SQLite file. It holds what a relay needs to deliver: the slate (ciphertext
+encrypted by the wallets for the receiver), the sender and recipient addresses, signatures,
+timestamps and delivery counts. It holds no client IP addresses. Deleted slates are overwritten
+in place where SQLite can do so without extra I/O (`secure_delete=FAST`), and free pages are
+returned to the file system by a daily vacuum. `store.max_bytes` (2 GiB by default) caps the
+live data; above it posts are refused while collecting continues.
+
+## Logging and metrics
+
+Logs go to stderr (journald under systemd). Levels: `error` when the relay cannot do its job,
+`warn` when something outside it misbehaves (a peer relay, a full store), `info` for lifecycle,
+expiry sweeps and limit refusals, `debug` for one line per socket, post, subscribe, attach and
+cancel.
+
+- Keys, addresses and txids appear only shortened to their first and last six characters,
+  clients only by network prefix (on limit refusals, and at debug on socket open), peer relays
+  by host name. Slates, signatures, challenges, message ids, resume tokens and client IPs are
+  never logged; `tests/log_privacy.rs` checks this at debug level.
+- Lines a client can make repeat are sampled to 10 a minute per call site, each with a
+  `suppressed` count, so an attack or a failing disk cannot flood the log.
+- Rotation and retention are left to journald or the container log driver; the settings are in
+  [docs/operating.md](docs/operating.md#8-logging).
+
+Metrics are Prometheus counters and gauges named `epicbox_*`; labels carry outcomes and limit
+names only. The ones to watch first are listed in
+[docs/operating.md](docs/operating.md#4-reading-the-health-endpoints).
+
+## Security model
+
+- **What the relay sees.** Slates are encrypted by the wallets; the relay stores and forwards
+  ciphertext. It does see metadata: sender and receiver addresses, sizes, timing, and client IP
+  addresses on connections. A mux/1 socket also shows which mailboxes belong together. Treat the
+  database, and the reverse proxy's access log, as private.
+- **What it trusts.** Reading or acknowledging a mailbox needs a signature by its key: over a
+  relay challenge (`Subscribe`, mux/1 `Attach`), over a single-use client challenge (`/v1`), or
+  over the message id (`Made`). A mux/1 socket that proved a mailbox may `Ack` without
+  signatures, and its resume token is a bearer secret (24 hours, single use, stored only as a
+  hash). Posting needs the sender's signature over the slate; the relay cannot forge or alter a
+  slate, and a wallet checks the slate itself.
+- **Random challenges.** The original protocol has the relay send one fixed challenge on every
+  new socket, so a first `Subscribe` signature never expires and can be replayed by anyone who
+  has seen it. epicmail sends a fresh random challenge on every socket and every round and
+  accepts no signature over the fixed value. A replayed signature and an older wallet's
+  signature are byte for byte the same, so the relay cannot accept one and refuse the other;
+  that is why wallets before 3.5.2 cannot receive here.
+- **Federation** cannot be pointed at internal addresses (see [Federation](#federation)).
+- **Trusted proxies.** `X-Forwarded-For` is read only from addresses in
+  `server.trusted_proxies`, from the right. List only your own proxy, and make it replace the
+  header (the examples do).
 - **Keep private:** `/metrics` (the proxy examples return 404 for it) and the test switch
   `test.stall_endpoint`, which must stay off on a public relay.
-- **Resource limits.** Every input is bounded: frame and slate size, frames per socket, posts
-  and bytes per IP prefix and per address, sockets per prefix and in total, waiting messages per
-  mailbox and per sender, mux/1 mailboxes and in-flight messages, `/v1` work per prefix, waiting
-  `/v1` long polls per prefix and in total, and the memory held by mux/1 resume tokens. A socket whose client stops reading is closed after
-  `protocol.idle_timeout_s`.
-- **Sandbox.** The systemd unit runs with a dynamic user, no capabilities, a read-only system,
-  a private `/tmp` and a system call filter. The container runs as an unprivileged user on an
-  empty base image.
+- **Sandbox.** The systemd unit runs with a dynamic user, no capabilities, a read-only system
+  and a system call filter; the container runs as an unprivileged user on an empty base.
+- **Dependencies.** `deny.toml` fails the dependency check on any RustSec advisory,
+  non-permissive licence, unknown source or OpenSSL; TLS is rustls with ring. Signatures use
+  the `secp256k1` crate, the Rust binding of Bitcoin Core's libsecp256k1.
+- **Reporting.** Report vulnerabilities privately through the repository's private
+  vulnerability reporting, not in a public issue.
+
+## Known limits
+
+- **One node.** The store is SQLite with one writer. One process serves everything; there is
+  no clustering or shared store. A standby restored from backup covers most availability needs;
+  [docs/operating.md](docs/operating.md#7-when-to-switch-to-postgres) says when that stops
+  being enough.
+- **No TLS of its own.** It expects a reverse proxy in front.
+- **Wallets before 3.5.2 cannot receive** (see above).
+- **Per-prefix limits are coarse.** Many users behind one carrier NAT or Tor exit share a budget
+  unless their source is listed in `limits.shared_sources`; one user with many prefixes gets
+  many budgets. `store.max_bytes` bounds the total in any case.
+- **Metadata.** Addresses and timing are visible to the operator, as on any Epicbox relay.
+- **Export** carries waiting slates and forwards, not cancel records, so a cancel made before a
+  migration is not known to the new store.
+- **Extensions are epicmail's own.** mux/1 and `/v1` are not served by other relays; clients that
+  use them should fall back to the classic protocol.
+
+## Questions
+
+**I maintain a wallet. Do I need to change anything?** No. A wallet that speaks Epicbox 2.0.0,
+3.0.0 or 3.1.0 and signs the random first challenge works unchanged. If your wallet still signs
+the fixed constant on a new socket, it needs the change that 3.5.2 made.
+
+**Which version should my wallet announce?** `3.1.0` if it implements cancel, otherwise
+`3.0.0`. A `3.1.0` `Subscribe` makes the relay push `TransactionCancelled`; a wallet that does
+not understand that frame should not announce 3.1.0.
+
+**What does a wallet see when the relay is overloaded?** An `Error` frame with
+`Rate limit exceeded; retry in N s.` for rate limits, `Recipient mailbox is full; try again
+later.` for a full mailbox, and `Relay storage is full; try again later.` when the store is at
+its cap. Nothing is half-stored.
+
+**Can a slate be delivered twice?** A slate is deleted only on `Made`, so a wallet that does not
+send `Made` (or whose `Made` is lost) receives it again after the lease. Wallets already handle
+a repeated slate. The same slate posted twice is stored once.
+
+**How do I run a private relay for one service?** Set `federation.enabled = false` (or an
+`allow` list), put the service's address in `limits.shared_sources` if it holds many mailboxes,
+and consider mux/1 or `/v1` for it.
+
+**How do I monitor it?** Probe `/ready`, scrape `/metrics`, and alert on `error` log lines.
+[docs/operating.md](docs/operating.md) lists the metrics to watch.
+
+**How do I upgrade or roll back?** Back up, `check-config` with the new binary, replace,
+restart. The database carries a schema version and a binary refuses a version it does not know.
+Details in [docs/operating.md](docs/operating.md#9-upgrade-and-roll-back).
+
+**How do I move from another relay?** Export its queue with `tools/export-node-pg.py` (Node and
+Python Postgres-backed relays) and `epicmail import` the file into the new store. Change DNS
+when the import is done; wallets reconnect on their own.
+
+**What is logged about my users?** See [Logging and metrics](#logging-and-metrics): shortened
+keys at debug level, network prefixes on limit refusals, never full addresses or IPs.
 
 ## Contributing
 
@@ -289,22 +416,23 @@ Issues and pull requests are welcome. Before sending a change:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+cargo deny check
 ```
 
-`cargo test` runs the unit tests, `tests/loopback.rs` (relays on loopback ports, driven over
-websocket and HTTP, including federation between two relays) and the signature differential
-test against recorded cases ([tools/sigdiff/README.md](tools/sigdiff/README.md)).
-`tools/compat-classic.sh` runs real classic wallets against two local relays; its header lists
-what it needs.
+`cargo test` runs the unit tests, `tests/loopback.rs` (relays on loopback ports driven over
+websocket and HTTP, including federation between two relays), `tests/log_privacy.rs` and the
+signature differential test against recorded cases
+([tools/sigdiff/README.md](tools/sigdiff/README.md)). `tools/compat-classic.sh` runs real
+classic wallets against two local relays; its header lists what it needs.
 
-Some guidance:
-
-- Keep wire compatibility. A classic wallet must never receive a frame it cannot parse, and the
-  error texts match the original relay. mux/1 is frozen; a wire change needs a new version.
+- Keep wire compatibility: a classic wallet must never receive a frame it cannot parse, and
+  error texts match the original relay. mux/1 is frozen.
 - Add a test with each fix, preferably one that fails without it.
 - Keep commits small, with a subject of the form `Area: what changed` and the reason in the
   body.
-- Never log addresses, keys, tokens, IPs or payloads, and never put them in metric labels.
+- Log through the helpers in `src/logging.rs`: shorten keys with `short`, sample anything a
+  client can repeat with `sampled!`, and never log addresses, slates, signatures, tokens or IPs.
+  Never put them in metric labels.
 
 ### Source map
 
@@ -313,18 +441,19 @@ Some guidance:
 | `src/main.rs` | CLI, startup, housekeeping, shutdown |
 | `src/config.rs` | Configuration file, defaults and checks |
 | `src/http/` | HTTP routes and the websocket upgrade (`mod.rs`), the `/v1` API (`v1.rs`) |
-| `src/relay/` | Shared state, posting, cancel, resume tokens, the socket registry and the websocket sessions |
+| `src/relay/` | Shared state, posting, cancel, resume tokens, the socket registry, long-poll waiters and the websocket sessions |
 | `src/store/` | The `Store` trait and the SQLite store |
 | `src/forward.rs` | Forwarding to other relays |
 | `src/limits.rs` | Rate limits and socket counts |
 | `src/address.rs`, `src/sig.rs` | Epicbox addresses and signatures |
-| `src/metrics.rs` | Prometheus metric descriptions |
+| `src/logging.rs`, `src/metrics.rs` | Log setup and helpers, Prometheus metric descriptions |
 | `src/migrate.rs` | JSON Lines import and export |
 | `src/clock.rs`, `src/ids.rs` | Wall-clock milliseconds, random ids and id checks |
-| `examples/loadgen.rs` | Load generator used for docs/loadtest.md |
+| `examples/` | Load generator, day simulation, live check of a deployed relay, route check between relays |
 | `src/bin/sigdiff-gen.rs`, `tests/sigdiff.rs` | Signature differential test |
 | `packaging/` | systemd unit, nginx and Caddy examples, example config |
 | `tools/` | Static build, classic wallet compatibility run, export from Postgres-backed relays |
+| `deny.toml` | Dependency policy for `cargo deny` |
 
 ## Licence
 
