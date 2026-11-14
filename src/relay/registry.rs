@@ -18,6 +18,8 @@ pub enum Cmd {
     Detached { mailbox: String, reason: &'static str },
     /// 3.1.0: a transaction this socket's mailbox takes part in was cancelled.
     Cancelled { txid: String },
+    /// txcancel/1: a transaction `mailbox` takes part in was cancelled.
+    MuxCancelled { mailbox: String, txid: String },
     /// Close the socket.
     Close { code: u16, reason: &'static str },
 }
@@ -134,6 +136,11 @@ impl Registry {
             }
             None => false,
         }
+    }
+
+    /// The mux/1 socket holding `key`, when it negotiated txcancel/1.
+    pub fn txcancel_holder(&self, key: &str) -> Option<SockHandle> {
+        self.shard(key).lock().get(key).and_then(|e| e.mux.clone()).filter(|h| h.cancel)
     }
 
     /// Every 3.0.0 socket subscribed to `key`.

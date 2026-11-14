@@ -123,6 +123,9 @@ impl Relay {
                     h.send(Cmd::Cancelled { txid: txid.clone() });
                 }
             }
+            if let Some(h) = self.registry.txcancel_holder(r) {
+                h.send(Cmd::MuxCancelled { mailbox: r.clone(), txid: txid.clone() });
+            }
         }
         tracing::debug!(
             txid = %short(&txid),
