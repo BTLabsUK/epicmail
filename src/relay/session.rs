@@ -197,7 +197,12 @@ impl Session {
         }
 
         let flow = loop {
+            // A held message goes back out when its hold ends, not at the next pump tick.
+            let hold_ends = self.next_hold_end();
             tokio::select! {
+                () = tokio::time::sleep(hold_ends.unwrap_or(MUX_PUMP_TICK)), if hold_ends.is_some() => {
+                    self.mux_timer(&mut ws).await;
+                }
                 m = ws.recv() => {
                     let Some(Ok(m)) = m else { break Flow::Continue };
                     self.last_seen = Instant::now();
@@ -994,6 +999,12 @@ impl Session {
         }
         let v = with_ref(json!({"type":"Ok","waiting":w,"inflight":inflight,"held":held}), r#ref);
         self.send(ws, v).await;
+    }
+
+    /// How long until the first hold on this socket ends, if any.
+    fn next_hold_end(&self) -> Option<Duration> {
+        let first = self.mux.as_ref()?.held.values().map(|(_, until)| *until).min()?;
+        Some(Duration::from_millis(first.saturating_sub(now_ms()).max(0) as u64))
     }
 
     async fn mux_timer(&mut self, ws: &mut WebSocket) {

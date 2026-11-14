@@ -297,6 +297,35 @@ async fn mux_attach_mail_ack_resume() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mux_hold_comes_back_when_it_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    send(&mut a, post_frame(&alice, "relay.test", &bob, "relay.test", 1)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+
+    let mut m = connect(&n).await;
+    recv_type(&mut m, "Challenge").await;
+    send(&mut m, json!({"type":"ClientDetails","wallet_version":"t","wallet_mode":"listener","protocol_version":"3.0.0","ext":["mux/1"]})).await;
+    let ch = recv(&mut m).await["challenge"].as_str().unwrap().to_string();
+    send(&mut m, json!({"type":"Attach","ref":"a1","mailboxes":[{"address":bob.pk,"signature":bob.sign(&ch)}]})).await;
+    assert_eq!(recv(&mut m).await["type"], "Attached");
+    let mail = recv(&mut m).await;
+    assert_eq!(mail["type"], "Mail", "{mail}");
+
+    // Held for 2 s: it comes back after the hold, well before the 15 s pump tick.
+    let held = std::time::Instant::now();
+    send(&mut m, json!({"type":"Hold","ref":"h1","id":mail["id"],"seconds":2})).await;
+    assert_eq!(recv(&mut m).await, json!({"type":"Ok","ref":"h1"}));
+    let again = recv(&mut m).await;
+    assert_eq!(again["id"], mail["id"], "{again}");
+    let after = held.elapsed();
+    assert!(after >= Duration::from_millis(1900) && after < Duration::from_secs(5), "back after {after:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn https_post_pull_made() {
     let dir = tempfile::tempdir().unwrap();
     let n = start(dir.path(), "relay.test", |_| {}).await;
