@@ -190,13 +190,14 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
                 Ok(()) => {
                     backoff.ok(peer);
                     metrics::counter!("epicbox_forwards_total", "result" => "ok").increment(1);
-                    tracing::info!(peer, kind = ?row.kind, "forwarded");
+                    tracing::debug!(peer, kind = ?row.kind, "forwarded");
                     relay.store.forward_done(row.id).await
                 }
                 Err(Failure::Refused(e)) => {
                     let drop = attempts >= MAX_REFUSALS;
                     metrics::counter!("epicbox_forwards_total", "result" => "refused").increment(1);
-                    tracing::warn!(peer, error = %e, attempts, dropped = drop, "peer refused forward");
+                    // The text is the peer's: logged escaped, so it cannot add lines to our log.
+                    tracing::warn!(peer, error = ?e, attempts, dropped = drop, "peer refused forward");
                     relay.store.forward_failed(row.id, now_ms() + backoff_ms(attempts), &e, drop).await
                 }
                 Err(Failure::Loop) => {
@@ -208,7 +209,7 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
                     metrics::counter!("epicbox_forwards_total", "result" => "failed").increment(1);
                     // The whole peer waits, not only this row.
                     let next = backoff.failed(peer, now_ms());
-                    tracing::warn!(peer, error = %e, attempts, retry_in_s = (next - now_ms()) / 1000, "forward failed");
+                    tracing::warn!(peer, error = ?e, attempts, retry_in_s = (next - now_ms()) / 1000, "forward failed");
                     let r =
                         relay.store.forward_failed(row.id, next.max(now_ms() + backoff_ms(attempts)), &e, false).await;
                     // The peer is unreachable: leave the rest of the batch for the next round.
