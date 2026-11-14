@@ -253,6 +253,7 @@ async fn well_known(State(st): State<AppState>) -> Response {
                     "inflight_per_socket": l.mux_inflight,
                     "ids_per_ack": session::MAX_ACK_IDS,
                     "hold_max_s": session::HOLD_MAX_S,
+                    "waiting_frames_per_min": session::WAITING_PER_MIN,
                     "attach_frames_per_min": l.mux_attach_frames_per_min,
                     "failed_sigs_per_min_per_ip": l.failed_sigs_per_min_per_ip,
                     "mux_sockets_per_ip": l.mux_sockets_per_ip,

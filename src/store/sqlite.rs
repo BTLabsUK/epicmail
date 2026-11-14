@@ -392,6 +392,21 @@ impl Store for SqliteStore {
         .await
     }
 
+    async fn waiting_many(&self, queues: Vec<String>, now: i64) -> Result<std::collections::HashMap<String, i64>> {
+        if queues.is_empty() {
+            return Ok(Default::default());
+        }
+        let list = serde_json::to_string(&queues).map_err(|e| anyhow!(e))?;
+        self.read(move |c| {
+            let mut st = c.prepare_cached(
+                "SELECT queue, count(*) FROM messages                  WHERE queue IN (SELECT value FROM json_each(?1)) AND not_before<=?2 AND expires_at>?2                  GROUP BY queue",
+            )?;
+            let rows = st.query_map(params![list, now], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+            rows.collect()
+        })
+        .await
+    }
+
     async fn claim(
         &self,
         queue: &str,
@@ -773,6 +788,10 @@ mod tests {
         assert_eq!(got2.iter().map(|m| m.msgid.as_str()).collect::<Vec<_>>(), ["m2", "m3"]);
         assert!(!s.has_offerable("q", 22, vec![]).await.unwrap());
         assert!(s.has_offerable("q", 200, vec![]).await.unwrap());
+        let w = s.waiting_many(vec!["q".into(), "empty".into()], 22).await.unwrap();
+        assert_eq!((w.get("q"), w.get("empty")), (None, None), "all three are leased at 22");
+        let w = s.waiting_many(vec!["q".into(), "empty".into()], 200).await.unwrap();
+        assert_eq!((w.get("q"), w.len()), (Some(&3), 1));
         assert_eq!(s.made("q", vec!["m1".into(), "nope".into()]).await.unwrap(), [true, false]);
         assert_eq!(s.made("other", vec!["m2".into()]).await.unwrap(), [false]);
         let st = s.stats(30).await.unwrap();

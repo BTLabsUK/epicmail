@@ -159,6 +159,10 @@ pub trait Store: Send + Sync + 'static {
     /// Offerable messages count (Attached `waiting`).
     async fn waiting(&self, queue: &str, now: i64) -> Result<i64>;
 
+    /// Offerable message counts for several queues in one read (mux/1 `Waiting`). Queues
+    /// with nothing offerable are absent from the map.
+    async fn waiting_many(&self, queues: Vec<String>, now: i64) -> Result<std::collections::HashMap<String, i64>>;
+
     /// Take up to `limit` offerable messages, oldest first; messages offered three times or more
     /// go after the others, so one poisoned message cannot block a mailbox.
     async fn claim(

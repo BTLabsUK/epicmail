@@ -28,7 +28,7 @@ use crate::limits::SocketPermit;
 use classic::{Inflight, Ver};
 use mux::{mux_error, ref_of, Mux, MUX_PUMP_TICK};
 
-pub use mux::{HOLD_MAX_S, MAX_ACK_IDS};
+pub use mux::{HOLD_MAX_S, MAX_ACK_IDS, WAITING_PER_MIN};
 
 /// What the event loop does after a frame or command.
 enum Flow {

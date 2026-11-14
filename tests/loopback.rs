@@ -739,3 +739,37 @@ async fn a_subscribe_over_the_fixed_challenge_is_refused() {
     }
     assert_eq!(waiting(&n).await, 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mux_waiting_counts_every_mailbox_and_has_a_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| c.limits.mux_inflight = 1).await;
+    let (alice, bob, carol) = (Key::new(), Key::new(), Key::new());
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    for i in 0..3 {
+        send(&mut a, post_frame(&alice, "relay.test", &bob, "relay.test", i)).await;
+        assert_eq!(recv(&mut a).await["type"], "Ok");
+    }
+    let (mut m, ch) = mux_socket(&n).await;
+    send(
+        &mut m,
+        json!({"type":"Attach","ref":"a","mailboxes":[
+            {"address":bob.pk,"signature":bob.sign(&ch)},{"address":carol.pk,"signature":carol.sign(&ch)}]}),
+    )
+    .await;
+    assert_eq!(recv(&mut m).await["type"], "Attached");
+    assert_eq!(recv(&mut m).await["type"], "Mail");
+    // One of bob's three is in flight; carol has none.
+    send(&mut m, json!({"type":"Waiting","ref":"w"})).await;
+    let w = recv(&mut m).await;
+    assert_eq!(w["waiting"], json!({bob.pk.clone(): 2, carol.pk.clone(): 0}), "{w}");
+    assert_eq!((w["inflight"].as_u64(), w["ref"].as_str()), (Some(1), Some("w")));
+    for _ in 1..60 {
+        send(&mut m, json!({"type":"Waiting"})).await;
+        assert_eq!(recv(&mut m).await["type"], "Ok");
+    }
+    send(&mut m, json!({"type":"Waiting","ref":"x"})).await;
+    let e = recv(&mut m).await;
+    assert_eq!(e["code"], "rate_limited", "{e}");
+}

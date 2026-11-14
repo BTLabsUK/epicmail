@@ -21,6 +21,8 @@ pub const MAX_ACK_IDS: usize = 256;
 pub const HOLD_MAX_S: u64 = 3600;
 /// How often every attached mailbox is checked, to catch leases that ended on other sockets.
 const MUX_SWEEP: Duration = Duration::from_secs(120);
+/// `Waiting` frames per socket per minute. The spec asks clients to send it rarely.
+pub const WAITING_PER_MIN: u32 = 60;
 /// How often a mux/1 socket runs its timer work.
 pub(super) const MUX_PUMP_TICK: Duration = Duration::from_secs(15);
 
@@ -39,6 +41,8 @@ pub(super) struct Mux {
     token: Option<[u8; 32]>,
     /// Attach/Resume budget window: (start, frames counted in it).
     attach_window: (Instant, u32),
+    /// Waiting budget window: (start, frames counted in it).
+    waiting_window: (Instant, u32),
     last_sweep: Instant,
 }
 
@@ -94,6 +98,7 @@ impl Session {
             dirty: HashSet::new(),
             token: None,
             attach_window: (Instant::now(), 0),
+            waiting_window: (Instant::now(), 0),
             last_sweep: Instant::now(),
         });
         metrics::counter!("epicbox_mux_sessions_total").increment(1);
@@ -401,25 +406,32 @@ impl Session {
         }
     }
 
-    /// Waiting: message counts per attached mailbox.
+    /// Waiting: message counts per attached mailbox, read in one query.
     async fn waiting(&mut self, ws: &mut WebSocket, r#ref: &Option<String>) {
-        let Some(m) = self.mux.as_ref() else { return };
+        let Some(m) = self.mux.as_mut() else { return };
+        if m.waiting_window.0.elapsed() >= Duration::from_secs(60) {
+            m.waiting_window = (Instant::now(), 0);
+        }
+        m.waiting_window.1 += 1;
+        if m.waiting_window.1 > WAITING_PER_MIN {
+            let wait = Duration::from_secs(60).saturating_sub(m.waiting_window.0.elapsed()).as_secs().max(1);
+            metrics::counter!("epicbox_limit_refusals_total", "limit" => "mux_waiting").increment(1);
+            self.send(ws, mux_error("rate_limited", "Too many Waiting frames.", r#ref, Some(wait))).await;
+            return;
+        }
         let keys: Vec<String> = m.attached.iter().cloned().collect();
         let inflight = m.inflight.len();
         let now = now_ms();
         let held = m.held.values().filter(|(_, u)| *u > now).count();
-        let mut w = serde_json::Map::new();
-        for k in keys {
-            match self.relay.store.waiting(&k, now).await {
-                Ok(n) => {
-                    w.insert(k, json!(n));
-                }
-                Err(_) => {
-                    self.send(ws, mux_error("internal", "Internal error; try again.", r#ref, None)).await;
-                    return;
-                }
+        let counts = match self.relay.store.waiting_many(keys.clone(), now).await {
+            Ok(c) => c,
+            Err(_) => {
+                self.send(ws, mux_error("internal", "Internal error; try again.", r#ref, None)).await;
+                return;
             }
-        }
+        };
+        let w: serde_json::Map<String, Value> =
+            keys.into_iter().map(|k| (k.clone(), json!(counts.get(&k).copied().unwrap_or(0)))).collect();
         let v = with_ref(json!({"type":"Ok","waiting":w,"inflight":inflight,"held":held}), r#ref);
         self.send(ws, v).await;
     }
