@@ -3,7 +3,7 @@
 //! one transaction, commits once, and only then answers the callers. Readers use a small pool of
 //! read-only connections; WAL lets them read while the writer commits.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -86,7 +86,6 @@ pub struct SqliteStore {
     tx: mpsc::Sender<Job>,
     readers: Arc<Vec<Mutex<Connection>>>,
     next_reader: AtomicUsize,
-    path: PathBuf,
 }
 
 fn open(path: &Path, flags: OpenFlags) -> Result<Connection> {
@@ -96,7 +95,7 @@ fn open(path: &Path, flags: OpenFlags) -> Result<Connection> {
     Ok(conn)
 }
 
-pub fn dedupe_message(queue: &str, sender: &str, body: &str, signature: &str) -> Vec<u8> {
+fn dedupe_message(queue: &str, sender: &str, body: &str, signature: &str) -> Vec<u8> {
     let mut h = Sha256::new();
     for part in [queue, sender, body, signature] {
         h.update((part.len() as u64).to_le_bytes());
@@ -151,7 +150,7 @@ impl SqliteStore {
         std::thread::Builder::new()
             .name("store-writer".into())
             .spawn(move || writer_loop(writer, rx, group_max.max(1)))?;
-        Ok(Self { tx, readers: Arc::new(pool), next_reader: AtomicUsize::new(0), path: path.to_path_buf() })
+        Ok(Self { tx, readers: Arc::new(pool), next_reader: AtomicUsize::new(0) })
     }
 
     async fn write<T, F>(&self, f: F) -> Result<T>
@@ -186,10 +185,6 @@ impl SqliteStore {
             f(&conn).map_err(anyhow::Error::from)
         })
         .await?
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 }
 
