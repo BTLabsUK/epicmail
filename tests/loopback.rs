@@ -482,8 +482,17 @@ async fn stall_knob_and_watchdog() {
     recv_type(&mut a, "Challenge").await;
     send(&mut a, post_frame(&alice, "relay.test", &bob, "relay.test", 1)).await;
     assert_eq!(recv(&mut a).await["type"], "Ok");
-    // Stalled: nothing is pushed.
-    assert!(tokio::time::timeout(Duration::from_millis(800), b.next()).await.is_err());
+    // Stalled: nothing is pushed (control frames such as the early ping do not count).
+    let quiet = tokio::time::timeout(Duration::from_millis(800), async {
+        loop {
+            match b.next().await {
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                other => return other,
+            }
+        }
+    })
+    .await;
+    assert!(quiet.is_err(), "pushed while stalled: {quiet:?}");
     // Unstall: the message is pushed.
     http(&n, "POST", "/test/stall", Some(json!({"address":bob.pk,"seconds":0}))).await;
     let slate = recv_type(&mut b, "Slate").await;
@@ -984,8 +993,9 @@ async fn an_unreachable_peer_costs_one_attempt_per_backoff_not_one_per_row() {
         send(&mut a, post_frame(&alice, "relay.test", &Key::new(), "dead.test", i)).await;
         assert_eq!(recv(&mut a).await["type"], "Ok");
     }
-    // Two manager ticks (5 s each) pass; the peer failed once and is held back as a whole.
-    tokio::time::sleep(Duration::from_secs(11)).await;
+    // A manager tick (every 5 s) passes inside the peer's first 10 s backoff: per-row backoff
+    // would have tried the second row by now, per-peer backoff waits.
+    tokio::time::sleep(Duration::from_secs(7)).await;
     let rows = n.relay.store.forwards_due("dead.test:443", now_ms() + 7_200_000, 50).await.unwrap();
     assert_eq!(rows.len(), 3);
     let attempts: i64 = rows.iter().map(|r| r.attempts).sum();
