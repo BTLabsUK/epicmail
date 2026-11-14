@@ -1,0 +1,18 @@
+#!/bin/sh
+# Build a static x86_64 Linux binary of epicmail against musl, and check that it is static.
+#
+# Usage: tools/build-static.sh   (from any directory)
+# Needs: rustup (adds the x86_64-unknown-linux-musl target if missing) and musl-gcc for the
+# bundled SQLite (Debian/Ubuntu: apt install musl-tools).
+# Output: target/x86_64-unknown-linux-musl/release/epicmail
+set -eu
+cd "$(dirname "$0")/.."
+T=x86_64-unknown-linux-musl
+if command -v rustup >/dev/null 2>&1 && ! rustup target list --installed | grep -qx "$T"; then
+  rustup target add "$T"
+fi
+command -v musl-gcc >/dev/null 2>&1 || echo "warning: musl-gcc not found; rusqlite (bundled SQLite) needs it (apt install musl-tools)" >&2
+cargo build --release --locked --target "$T" --bin epicmail
+BIN=target/$T/release/epicmail
+file "$BIN"
+if ldd "$BIN" 2>&1 | grep -Eq 'not a dynamic|statically linked'; then echo "static: yes"; else echo "static: NO" >&2; exit 1; fi

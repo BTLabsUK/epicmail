@@ -1,0 +1,8 @@
+target
+.git
+docs
+tests
+tools
+*.db
+*.db-wal
+*.db-shm

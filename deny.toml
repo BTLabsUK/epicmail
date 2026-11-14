@@ -1,0 +1,45 @@
+# cargo-deny policy: `cargo deny check`. Run it before every release and after any change to
+# Cargo.lock.
+
+[graph]
+all-features = false
+
+[advisories]
+# Every RustSec advisory, unmaintained and yanked crates included, fails the check. A waiver
+# goes in `ignore` with the advisory id and the reason it does not apply.
+yanked = "deny"
+unmaintained = "all"
+ignore = []
+
+[licenses]
+# Permissive licences only. Nothing copyleft is linked into the binary.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# OpenSSL stays out: TLS is rustls with ring, so one TLS stack and no system library.
+deny = [
+  { crate = "openssl" },
+  { crate = "openssl-sys" },
+  { crate = "native-tls" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

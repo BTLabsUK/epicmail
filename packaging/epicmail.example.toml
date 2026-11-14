@@ -1,0 +1,86 @@
+# Every setting with its default. Only server.domain has no default and must be set.
+# Check a file with: epicmail check-config --config epicmail.toml
+
+[server]
+listen = "127.0.0.1:3423"        # websocket and HTTP listener (use "0.0.0.0:3423" in Docker)
+# metrics_listen = "127.0.0.1:9423"  # separate /metrics listener; unset = /metrics on `listen`, loopback without X-Forwarded-For only
+domain = "relay.example.org"     # domain wallets write in their addresses (epicbox_domain); required
+port = 443                       # port wallets write in their addresses (epicbox_port)
+aliases = []                     # other "domain" or "domain:port" names that mean this relay
+trusted_proxies = ["127.0.0.1/32"]  # default []; peers whose X-Forwarded-For is trusted (your reverse proxy)
+drain_seconds = 10               # seconds a SIGTERM drain waits for sockets to close
+name = "epicmail"                # name shown in the info document and status.json
+
+[store]
+path = "epicmail.db"             # SQLite file; /var/lib/epicmail/... under systemd, /data/... in Docker
+retention_days = 7               # days an uncollected message is kept; 7 is the minimum
+group_commit_max = 256           # most writes per commit
+readers = 4                      # reader connections
+vacuum_hour_utc = 3              # UTC hour of the daily incremental vacuum
+max_bytes = 2147483648           # refuse posts while this much live data is stored (2 GiB); 0 = no cap
+
+[protocol]
+challenge_interval_s = 60        # seconds between Challenge rounds on 3.0.0 sockets (minimum 5)
+getversion = "3.1.0"             # version answered to GetVersion
+cancel = true                    # accept the 3.1.0 cancel fields and CancelTx
+mux = true                       # offer mux/1
+ping_interval_s = 30             # websocket ping interval, seconds
+idle_timeout_s = 90              # close a socket with no pong or frame for this long, seconds
+watchdog_misses = 3              # unanswered Challenges, with mail waiting, before close 1001
+forward_bare_cancel = true       # forward CancelTx signed over the bare txid, as wallets sign it
+
+[limits]
+max_frame_bytes = 1048576        # largest websocket frame (1 MiB)
+max_str_bytes = 131072           # largest string field (128 KiB); not above max_frame_bytes
+posts_per_min_per_address = 60   # PostSlate rate per sender address
+posts_burst_per_address = 120    # burst allowance for the above
+posts_per_min_per_ip = 240       # PostSlate rate per IP prefix
+posts_burst_per_ip = 480         # burst allowance for the above
+bytes_per_min_per_ip = 16777216  # bytes per IP prefix per minute: posted slates plus all other frames (16 MiB)
+frames_per_min_per_socket = 1200 # frames one socket may send per minute
+queue_cap = 2000                 # pending messages per address
+per_sender_cap = 200             # pending messages per address from one sender
+sockets_per_ip = 256             # open sockets per IP prefix
+sockets_per_address = 4          # open sockets per subscribed address
+failed_sigs_per_min_per_ip = 120 # bad signatures per IP prefix per minute
+sig_checks_per_min_per_ip = 1200 # signature checks per IP prefix per minute: Subscribe, Made, CancelTx, each mux/1 Attach mailbox
+mux_mailboxes_per_socket = 256   # mailboxes one mux/1 socket may attach
+mux_attach_per_frame = 64        # mailboxes per attach frame
+mux_inflight = 32                # Mail pushed per mux/1 socket and not yet acked or held
+mux_attach_frames_per_min = 30   # Attach/Resume frames per socket per minute; 8x this per IP prefix
+ipv4_prefix = 24                 # prefix length grouping IPv4 clients (8..32)
+ipv6_prefix = 48                 # prefix length grouping IPv6 clients (16..128)
+max_sockets = 150000             # open sockets in total
+shared_sources = []              # sources many users share (Tor exits, onion loopback); example ["127.0.0.1/32"]
+shared_multiplier = 16           # per-prefix limits are multiplied by this for shared_sources
+mux_sockets_per_ip = 64          # mux/1 sockets per IP prefix
+http_per_min_per_ip = 1200       # /v1 work per IP prefix per minute: one per mailbox pulled, one per id acked
+mux_token_mailboxes = 1000000    # mailboxes held by all mux/1 resume tokens; oldest tokens dropped past it
+
+[federation]
+enabled = true                   # forward mail for other relays' domains
+allow = []                       # only these "domain" or "domain:port" are forwarded to; empty = any public domain
+deny = []                        # never forward to these
+allow_private = false            # allow private, loopback, link-local destinations; test rigs only
+timeout_s = 15                   # seconds to wait for connect, Challenge and Ok
+max_lanes = 64                   # parallel peers being delivered to
+# [federation.peers]             # map "domain:port" to an explicit ws:// or wss:// URL
+# "relay.example.net:443" = "wss://relay.example.net/"
+
+[http_api]
+enabled = true                   # the /v1/* HTTPS pull API
+max_mailboxes = 64               # mailboxes per request
+max_per_mailbox = 50             # messages per mailbox per request
+max_wait_s = 25                  # longest long-poll, seconds
+challenge_window_s = 1200        # seconds a /v1 challenge stays valid
+lease_s = 30                     # seconds a pulled message stays leased
+max_waiting_per_ip = 64          # long polls waiting at once per IP prefix (x shared_multiplier for shared_sources)
+max_waiting = 10000              # long polls waiting at once in total
+
+[log]
+format = "text"                  # "text" or "json"
+level = "info"                   # tracing filter; to trace a problem "info,epicmail=debug"
+                                 # (docs/operating.md, section 8; RUST_LOG overrides it)
+
+[test]
+stall_endpoint = false           # POST /test/stall on loopback; never enable on a public relay

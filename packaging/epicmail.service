@@ -1,0 +1,59 @@
+[Unit]
+Description=epicmail (Epicbox-compatible relay)
+Documentation=https://example.org/docs/operating.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/epicmail serve --config /etc/epicmail/epicmail.toml
+# Config sets store.path = "/var/lib/epicmail/epicmail.db"
+DynamicUser=yes
+StateDirectory=epicmail
+StateDirectoryMode=0750
+ConfigurationDirectory=epicmail
+Restart=on-failure
+RestartSec=2
+
+# 150k sockets plus store and DNS descriptors.
+LimitNOFILE=262144
+TasksMax=4096
+
+# SIGTERM drains sockets with close 1001 within server.drain_seconds (default 10).
+# Keep TimeoutStopSec above it.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Logs go to journald. The relay samples lines that repeat; this is a backstop. Rotation and
+# retention are journald's (docs/operating.md, section 8).
+SyslogIdentifier=epicmail
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=2000
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

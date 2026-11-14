@@ -1,0 +1,18 @@
+# Caddy in front of the relay. TLS certificates are automatic.
+# server.trusted_proxies in epicmail.toml must list this proxy (here 127.0.0.1/32),
+# or the relay sees every client as the proxy address.
+relay.example.org {
+	# Websocket upgrade, /health, /ready, /status.json, /.well-known/epicbox.json and /v1/* all go to the relay.
+	# /metrics is not proxied. Scrape it on 127.0.0.1:3423 or set server.metrics_listen.
+	@metrics path /metrics /metrics/*
+	respond @metrics 404
+
+	reverse_proxy 127.0.0.1:3423 {
+		# Caddy sets X-Forwarded-For itself. Wallets hold a socket open up to an hour:
+		# never lower this. (Caddy has no read timeout by default; this keeps it explicit.)
+		transport http {
+			read_timeout 3600s
+			write_timeout 3600s
+		}
+	}
+}
