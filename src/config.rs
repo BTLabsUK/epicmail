@@ -88,7 +88,8 @@ pub struct Protocol {
     pub mux: bool,
     /// Websocket ping interval, seconds.
     pub ping_interval_s: u64,
-    /// Close a socket with no pong (or any frame) for this long, seconds.
+    /// Close a socket with no pong (or any frame) for this long, seconds. Also the longest one
+    /// write may wait for a client that does not read.
     pub idle_timeout_s: u64,
     /// Unanswered Challenges, with mail waiting, before the watchdog closes a socket with 1001.
     pub watchdog_misses: u32,

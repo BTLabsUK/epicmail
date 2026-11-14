@@ -38,6 +38,7 @@ fn describe() {
         "Sockets closed because Challenges went unanswered while mail waited."
     );
     describe_counter!("epicbox_limit_refusals_total", "Requests refused by a limit.");
+    describe_counter!("epicbox_send_timeouts_total", "Sockets closed because the client stopped reading.");
     describe_counter!("epicbox_mux_sessions_total", "Sockets that switched to mux/1.");
     describe_counter!("epicbox_mux_resumes_total", "mux/1 Resume frames that found their token.");
     describe_counter!(

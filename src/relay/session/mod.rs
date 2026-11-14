@@ -76,6 +76,10 @@ pub struct Session {
     frames: (Instant, u32),
     /// When the last frame arrived, for the idle timeout.
     last_seen: Instant,
+    /// Longest a single write may wait for the client to read (`protocol.idle_timeout_s`).
+    send_timeout: Duration,
+    /// A write failed or timed out: the socket is gone and the event loop ends.
+    dead: bool,
 }
 
 /// Serve one upgraded websocket until it closes.
@@ -102,6 +106,8 @@ pub async fn run(relay: Arc<Relay>, ws: WebSocket, ip: IpAddr, permit: SocketPer
         mux: None,
         frames: (Instant::now(), 0),
         last_seen: Instant::now(),
+        send_timeout: Duration::ZERO,
+        dead: false,
     };
     metrics::gauge!("epicbox_sockets").increment(1.0);
     s.serve(ws, rx).await;
@@ -129,9 +135,30 @@ fn with_ref(mut v: Value, r#ref: &Option<String>) -> Value {
 
 impl Session {
     /// Send one frame. False when the socket is gone.
-    async fn send(&self, ws: &mut WebSocket, v: Value) -> bool {
+    async fn send(&mut self, ws: &mut WebSocket, v: Value) -> bool {
         metrics::counter!("epicbox_frames_out_total").increment(1);
-        ws.send(text(&v)).await.is_ok()
+        self.send_raw(ws, text(&v)).await
+    }
+
+    /// Write one message, waiting at most `send_timeout` for the client to take it. A client
+    /// that stops reading would otherwise block this task, and with it the idle timeout, for
+    /// as long as the TCP connection lives. On failure the session is marked dead.
+    async fn send_raw(&mut self, ws: &mut WebSocket, m: Message) -> bool {
+        if self.dead {
+            return false;
+        }
+        match tokio::time::timeout(self.send_timeout, ws.send(m)).await {
+            Ok(Ok(())) => true,
+            Ok(Err(_)) => {
+                self.dead = true;
+                false
+            }
+            Err(_) => {
+                metrics::counter!("epicbox_send_timeouts_total").increment(1);
+                self.dead = true;
+                false
+            }
+        }
     }
 
     /// The event loop: frames in, commands from other tasks, timers and shutdown.
@@ -140,6 +167,7 @@ impl Session {
         let challenge_every = Duration::from_secs(p.challenge_interval_s);
         let ping_every = Duration::from_secs(p.ping_interval_s.max(1));
         let idle = Duration::from_secs(p.idle_timeout_s.max(p.ping_interval_s + 1));
+        self.send_timeout = idle;
         let mut challenge_tick = interval_at(tokio::time::Instant::now() + challenge_every, challenge_every);
         challenge_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut ping_tick = interval_at(tokio::time::Instant::now() + ping_every, ping_every);
@@ -160,6 +188,9 @@ impl Session {
         }
 
         let flow = loop {
+            if self.dead {
+                break Flow::Continue;
+            }
             // A held message goes back out when its hold ends, not at the next pump tick.
             let hold_ends = self.next_hold_end();
             tokio::select! {
@@ -193,7 +224,7 @@ impl Session {
                     if self.last_seen.elapsed() > idle {
                         break Flow::Close(1001, "Idle timeout.");
                     }
-                    if ws.send(Message::Ping(Default::default())).await.is_err() {
+                    if !self.send_raw(&mut ws, Message::Ping(Default::default())).await {
                         break Flow::Continue;
                     }
                 }
@@ -212,7 +243,8 @@ impl Session {
             }
         };
         if let Flow::Close(code, reason) = flow {
-            let _ = ws.send(Message::Close(Some(CloseFrame { code, reason: Utf8Bytes::from_static(reason) }))).await;
+            let close = Message::Close(Some(CloseFrame { code, reason: Utf8Bytes::from_static(reason) }));
+            self.send_raw(&mut ws, close).await;
         }
     }
 
@@ -288,10 +320,10 @@ impl Session {
         match ty.as_str() {
             // Stock behaviour: answer a JSON ping with the bare text.
             "ping" => {
-                let _ = ws.send(Message::Text(Utf8Bytes::from_static("pong"))).await;
+                self.send_raw(ws, Message::Text(Utf8Bytes::from_static("pong"))).await;
             }
             "pong" => {
-                let _ = ws.send(Message::Text(Utf8Bytes::from_static("ping"))).await;
+                self.send_raw(ws, Message::Text(Utf8Bytes::from_static("ping"))).await;
             }
             "challenge" => self.new_challenge(ws).await,
             "subscribe" => return self.subscribe(ws, &msg).await,

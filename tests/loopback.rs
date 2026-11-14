@@ -653,3 +653,49 @@ async fn ready_and_status_answer_without_store_work_per_request() {
     assert!(v["store"].is_null(), "{v}");
     assert_eq!(v["identity"], "relay.test:443");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_that_stops_reading_is_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| {
+        c.protocol.ping_interval_s = 1;
+        c.protocol.idle_timeout_s = 2;
+        c.limits.mux_inflight = 256;
+        c.limits.bytes_per_min_per_ip = 1 << 30;
+    })
+    .await;
+    let (alice, bob) = (Key::new(), Key::new());
+    // About 12 MB of mail: more than the kernel buffers on both ends of a loopback socket.
+    let pad = "0".repeat(100_000);
+    for i in 0..120u32 {
+        let body = json!({
+            "destination": {"public_key": bob.pk, "domain": "relay.test", "port": 443},
+            "encrypted_message": format!("{i:08x}{pad}"), "salt": "00", "nonce": "00"
+        })
+        .to_string();
+        let post =
+            json!({"from":alice.at("relay.test"),"to":bob.at("relay.test"),"str":body,"signature":alice.sign(&body)});
+        let (st, v) = http(&n, "POST", "/v1/post", Some(post)).await;
+        assert_eq!(st, 200, "{v}");
+    }
+
+    // A mux/1 listener with a tiny receive buffer that attaches and then never reads again.
+    let sock = tokio::net::TcpSocket::new_v4().unwrap();
+    sock.set_recv_buffer_size(4096).unwrap();
+    let tcp = sock.connect(n.addr).await.unwrap();
+    let (mut m, _) =
+        tokio_tungstenite::client_async(format!("ws://{}/", n.addr), MaybeTlsStream::Plain(tcp)).await.unwrap();
+    recv_type(&mut m, "Challenge").await;
+    send(&mut m, json!({"type":"ClientDetails","wallet_version":"t","wallet_mode":"listener","protocol_version":"3.0.0","ext":["mux/1"]})).await;
+    let ch = recv(&mut m).await["challenge"].as_str().unwrap().to_string();
+    send(&mut m, json!({"type":"Attach","ref":"a","mailboxes":[{"address":bob.pk,"signature":bob.sign(&ch)}]})).await;
+    assert_eq!(n.relay.limiter.sockets_open(), 1);
+
+    // The relay's writes stall; within a few idle timeouts it gives up and frees the socket.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while n.relay.limiter.sockets_open() > 0 {
+        assert!(std::time::Instant::now() < deadline, "the socket of a client that stopped reading stayed open");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    drop(m);
+}
