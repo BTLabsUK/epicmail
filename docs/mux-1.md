@@ -252,7 +252,7 @@ R: {"type":"Attached","ref":"r1","mailboxes":[...],"token":"Hk...","token_expire
 {"type":"Ok","ext":["mux/1","txcancel/1"],"challenge":"...","limits":{...}}
 ```
 
-The relay lists `txcancel/1` in `ext` only when the client asked for it, the socket became mux/1, and the relay runs the 3.1.0 cancel (`protocol.cancel`). Otherwise `ext` is `["mux/1"]` and none of the frames below apply. On a mux/1 session without `txcancel/1`:
+The relay lists `txcancel/1` in `ext` only when the client asked for it, the socket became mux/1, and the relay runs the 3.1.0 cancel (`protocol.cancel`). The info document lists it as `features.txcancel/1` (an empty object) on such a relay. Otherwise `ext` is `["mux/1"]` and none of the frames below apply. On a mux/1 session without `txcancel/1`:
 
 - `epicboxtxid` and `epicboxtxidsig` in `PostSlate` are ignored (unknown fields are ignored, as everywhere in mux/1), the `Ok` carries no txid and `Mail` carries none.
 - `CancelTx` and `CancelAck` get `Error` with `code: "unknown_type"`.
