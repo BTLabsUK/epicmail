@@ -585,3 +585,29 @@ async fn mux_attach_budget_is_shared_by_a_prefix() {
         socks.push(m);
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_is_not_forwarded_against_federation_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| c.federation.enabled = false).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    // The sender names another relay in its own address; the slate signature does not cover it.
+    let txid = "abcdefghijklmnopqrstuvwxyz012345";
+    let mut f = post_frame(&alice, "elsewhere.example", &bob, "relay.test", 1);
+    f["epicboxtxid"] = json!(txid);
+    f["epicboxtxidsig"] = json!(alice.sign(txid));
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    send(&mut a, f).await;
+    let ok = recv(&mut a).await;
+    assert_eq!(ok["type"], "Ok", "{ok}");
+
+    let cancel = json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":txid,
+        "signature":alice.sign(&format!("epicbox-cancel/1:{txid}"))});
+    send(&mut a, cancel).await;
+    let r = recv(&mut a).await;
+    assert_eq!(r, json!({"type":"TransactionCancelled","epicboxtxid":txid}));
+    assert_eq!(waiting(&n).await, 0);
+    // Federation is off: nothing may be queued for elsewhere.example.
+    assert_eq!(n.relay.store.stats(now_ms()).await.unwrap().forwards_waiting, 0);
+}

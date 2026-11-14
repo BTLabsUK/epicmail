@@ -126,6 +126,20 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>) {
                 return;
             }
         };
+        // Rows queued under an older config (or imported) may name a peer the policy now
+        // refuses: drop them instead of connecting.
+        if !relay.peer_allowed(peer) {
+            metrics::counter!("epicbox_forwards_total", "result" => "policy").increment(rows.len() as u64);
+            tracing::warn!(peer, rows = rows.len(), "dropping forwards the federation policy refuses");
+            for row in rows {
+                if let Err(e) = relay.store.forward_failed(row.id, now_ms(), "refused by federation policy", true).await
+                {
+                    tracing::error!(error = %e, "forward bookkeeping failed");
+                    return;
+                }
+            }
+            continue;
+        }
         for row in rows {
             let timeout = Duration::from_secs(relay.cfg.federation.timeout_s.max(1));
             let res = tokio::time::timeout(timeout, deliver(relay, peer, &row, tls.clone())).await;

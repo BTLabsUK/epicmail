@@ -245,6 +245,17 @@ impl Relay {
     }
 }
 
+impl Relay {
+    /// True when federation policy allows forwarding to `peer` (`domain:port`). Forward rows
+    /// are checked again with this before every delivery round.
+    pub fn peer_allowed(&self, peer: &str) -> bool {
+        match peer.rsplit_once(':').and_then(|(d, p)| Some((d, p.parse::<u16>().ok()?))) {
+            Some((domain, port)) => !self.cfg.is_local(domain, port) && self.forward_refusal(domain, port).is_none(),
+            None => false,
+        }
+    }
+}
+
 fn endpoint_of(domain: Option<&str>, port: Option<u16>) -> Option<String> {
     domain.map(|d| format!("{}:{}", d.to_ascii_lowercase(), port.unwrap_or(443)))
 }

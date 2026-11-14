@@ -67,10 +67,13 @@ impl Relay {
         };
         metrics::counter!("epicbox_cancels_total").increment(1);
         if separated || self.cfg.protocol.forward_bare_cancel {
-            for peer in &info.endpoints {
+            // Endpoints come from the sender's address, which the slate signature does not
+            // cover, so they get the same federation policy as a posted slate.
+            let peers: Vec<&String> = info.endpoints.iter().filter(|p| self.peer_allowed(p)).collect();
+            for peer in &peers {
                 let frame = json!({"type":"CancelTx","address":requester,"epicboxtxid":txid,"signature":signature});
                 let f = NewForward {
-                    peer: peer.clone(),
+                    peer: (*peer).clone(),
                     kind: ForwardKind::CancelTx,
                     frame: frame.to_string(),
                     txid: None,
@@ -83,7 +86,7 @@ impl Relay {
                     return R(Refusal::Internal);
                 }
             }
-            if !info.endpoints.is_empty() {
+            if !peers.is_empty() {
                 self.forward_notify.notify_one();
             }
         }
