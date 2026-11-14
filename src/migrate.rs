@@ -298,7 +298,7 @@ mod tests {
 
     fn input() -> String {
         let now_s = NOW / 1000;
-        let l = vec![
+        let l = [
             format!(
                 r#"{{"kind":"slate","queue":"{Q1}","from":"epicbox://{Q2}@old.example:443","str":"body1","signature":"s1","challenge":"c1","messageid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_at":{},"expires_at":{},"deliveries":2}}"#,
                 now_s - 10,
