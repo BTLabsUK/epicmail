@@ -2,7 +2,7 @@
 name = "epicmail"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "Apache-2.0"
 description = "epicmail: an Epicbox-compatible relay. One binary, SQLite inside, wire-compatible with Epicbox 2.0.0/3.0.0"
 publish = false
@@ -24,7 +24,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
 secp256k1 = { version = "0.29", features = ["global-context"] }
 sha2 = "0.10"
 bs58 = "0.5"
