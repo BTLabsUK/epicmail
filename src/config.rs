@@ -238,7 +238,7 @@ impl Default for Protocol {
         Self {
             first_challenge: FirstChallenge::Static,
             challenge_interval_s: 60,
-            getversion: "3.0.0".into(),
+            getversion: "3.1.0".into(),
             cancel: true,
             mux: true,
             ping_interval_s: 30,

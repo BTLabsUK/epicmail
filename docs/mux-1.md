@@ -59,7 +59,7 @@ A relay that offers mux/1 answers:
 - `ClientDetails` must come before any `Subscribe`. If it comes after one, the relay answers plain `Ok` and the socket stays 3.0.0.
 - The relay may already have sent its first `Challenge` when the socket opened. A mux/1 client ignores it. On a mux/1 socket that first `Challenge` is never a signing input: only the 22-character `challenge` from this `Ok` is.
 - mux/1 is offered for any `wallet_mode`, not only `listener`.
-- `GetVersion` still answers `3.0.0`.
+- `GetVersion` answers `protocol.getversion` (default `3.1.0`), as on a classic socket.
 
 ## 3. Client frames
 
@@ -158,7 +158,7 @@ The relay answers `{"type":"Ok","ref":"6"}` after the message is committed, or a
 
 ### Not allowed on a mux/1 socket
 
-`Subscribe`, `Made`, `Unsubscribe` and `Challenge` get `Error` with `code: "classic_only"`. `GetVersion` and `ClientDetails` are answered as in 3.0.0.
+`Subscribe`, `Made`, `Unsubscribe` and `Challenge` get `Error` with `code: "classic_only"`. `GetVersion` and `ClientDetails` are answered as on a classic socket.
 
 ## 4. Relay frames
 

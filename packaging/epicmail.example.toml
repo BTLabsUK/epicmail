@@ -21,7 +21,7 @@ vacuum_hour_utc = 3              # UTC hour of the daily incremental vacuum
 [protocol]
 first_challenge = "static"       # "static" (needed by wallets older than 3.5.2) or "random"
 challenge_interval_s = 60        # seconds between Challenge rounds on 3.0.0 sockets (minimum 5)
-getversion = "3.0.0"             # version answered to GetVersion
+getversion = "3.1.0"             # version answered to GetVersion
 cancel = true                    # accept the 3.1.0 cancel fields and CancelTx
 mux = true                       # offer mux/1
 ping_interval_s = 30             # websocket ping interval, seconds
