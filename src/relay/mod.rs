@@ -64,6 +64,8 @@ pub struct Relay {
     /// Random per process. Forwards carry it in [`INSTANCE_HEADER`]; a socket that arrives with
     /// our own value is this relay forwarding to itself under another name, and is refused.
     pub instance_id: String,
+    /// `txid:cancelrequestid` of recent cancels, with when to forget each (unix ms).
+    pub(crate) cancel_requests: Mutex<HashMap<String, i64>>,
 }
 
 /// Handshake header that carries the forwarding relay's `instance_id`.
@@ -178,6 +180,7 @@ impl Relay {
             last_ready_probe: Mutex::new(None),
             last_stats: Mutex::new(None),
             instance_id: crate::ids::rand_id(32),
+            cancel_requests: Mutex::new(HashMap::new()),
         })
     }
 

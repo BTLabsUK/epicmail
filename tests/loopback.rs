@@ -33,6 +33,17 @@ struct Node {
 }
 
 async fn start(dir: &Path, domain: &str, tweak: impl FnOnce(&mut Config)) -> Node {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    start_on(dir, domain, listener, tweak).await
+}
+
+/// `start` on a listener the caller bound, so its address is known before the config is.
+async fn start_on(
+    dir: &Path,
+    domain: &str,
+    listener: tokio::net::TcpListener,
+    tweak: impl FnOnce(&mut Config),
+) -> Node {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut cfg = Config::default();
     cfg.server.domain = domain.into();
@@ -43,7 +54,6 @@ async fn start(dir: &Path, domain: &str, tweak: impl FnOnce(&mut Config)) -> Nod
     let cfg = Arc::new(cfg);
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&cfg.store.path, 2, 64).unwrap());
     let relay = Relay::new(cfg.clone(), store);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = http::router(AppState { relay: relay.clone(), metrics: None, metrics_on_main: false })
         .into_make_service_with_connect_info::<SocketAddr>();
@@ -517,8 +527,10 @@ async fn older_sockets_beyond_cap_are_closed() {
 /// 3.1.0 cancel: a bare txid signature (which every receiver of the slate holds) cannot cancel from
 /// an unauthenticated socket, a non-participant cannot cancel, and the sender's domain-separated
 /// signature cancels, removes the slate and tells the receiver.
+/// The cancel follows the reference 3.1.0 relay: strangers get Ok, a forged signature is refused,
+/// and the bare txid signature cancels from any socket (it is the PostSlate's epicboxtxidsig).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancel_forged_refused_real_cancel_works() {
+async fn cancel_follows_the_reference_relay() {
     let dir = tempfile::tempdir().unwrap();
     let n = start(dir.path(), "relay.test", |_| {}).await;
     let (alice, bob, mallory) = (Key::new(), Key::new(), Key::new());
@@ -534,24 +546,34 @@ async fn cancel_forged_refused_real_cancel_works() {
     assert_eq!(recv(&mut a).await["type"], "Ok");
     assert_eq!(waiting(&n).await, 1);
 
-    // Replaying the sender's bare txid signature from a socket that proved no key.
+    // A socket that never subscribed, as a forwarding relay's is.
     let mut m = connect(&n).await;
     recv_type(&mut m, "Challenge").await;
-    send(&mut m, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":txid,"signature":alice.sign(txid)})).await;
+    // A signature that is not Alice's is refused.
+    send(&mut m, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":txid,"signature":mallory.sign(txid)})).await;
     assert_eq!(recv(&mut m).await["kind"], "InvalidSignature");
-    assert_eq!(waiting(&n).await, 1);
-
-    // A valid signature from someone who is not a participant changes nothing.
+    // Someone who is not a participant gets the same Ok as an unknown transaction, both forms.
+    send(&mut m, json!({"type":"CancelTx","address":mallory.pk,"epicboxtxid":txid,"signature":mallory.sign(txid)}))
+        .await;
+    assert_eq!(recv(&mut m).await, json!({"type":"Ok"}));
     let msig = mallory.sign(&format!("{}{txid}", epicmail::relay::CANCEL_SIG_PREFIX));
     send(&mut m, json!({"type":"CancelTx","address":mallory.pk,"epicboxtxid":txid,"signature":msig})).await;
     assert_eq!(recv(&mut m).await, json!({"type":"Ok"}));
+    let other = "ffffffffffffffffffffffffffffffff";
+    send(&mut m, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":other,"signature":alice.sign(other)})).await;
+    assert_eq!(recv(&mut m).await, json!({"type":"Ok"}));
     assert_eq!(waiting(&n).await, 1);
 
-    // The sender cancels with the domain-separated signature.
-    let asig = alice.sign(&format!("{}{txid}", epicmail::relay::CANCEL_SIG_PREFIX));
-    send(&mut a, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":txid,"signature":asig})).await;
-    assert_eq!(recv(&mut a).await, json!({"type":"TransactionCancelled","epicboxtxid":txid}));
+    // Alice's bare signature over the txid, from that unsubscribed socket, cancels.
+    send(&mut m, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":txid,"signature":alice.sign(txid)})).await;
+    assert_eq!(recv(&mut m).await, json!({"type":"TransactionCancelled","epicboxtxid":txid}));
     assert_eq!(waiting(&n).await, 0);
+    // Asking again is answered from the tombstone; a stranger still gets Ok.
+    send(&mut a, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":txid,"signature":alice.sign(txid)})).await;
+    assert_eq!(recv(&mut a).await, json!({"type":"TransactionCancelled","epicboxtxid":txid}));
+    send(&mut m, json!({"type":"CancelTx","address":mallory.pk,"epicboxtxid":txid,"signature":mallory.sign(txid)}))
+        .await;
+    assert_eq!(recv(&mut m).await, json!({"type":"Ok"}));
 
     // The receiver on 3.1.0 hears about it instead of getting the slate.
     let mut b = connect(&n).await;
@@ -1183,4 +1205,119 @@ async fn a_first_subscribe_gets_a_ping_soon_after() {
     let m = tokio::time::timeout(Duration::from_secs(3), b.next()).await.expect("no frame").unwrap().unwrap();
     assert!(matches!(m, Message::Ping(_)), "{m:?}");
     assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+}
+
+/// A 3.1.0 slate from `from` on `from_domain` to `to` on `to_domain`, under `txid`.
+fn post_tx_frame(from: &Key, from_domain: &str, to: &Key, to_domain: &str, txid: &str) -> Value {
+    let mut f = post_frame(from, from_domain, to, to_domain, 1);
+    f["epicboxtxid"] = json!(txid);
+    f["epicboxtxidsig"] = json!(from.sign(txid));
+    f
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forwarded_cancel_carries_the_request_id_and_is_sent_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| {
+        // Nothing listens there, so forward rows stay queued and can be read.
+        c.federation.peers.insert("remote.test:443".into(), "ws://127.0.0.1:9/".into());
+    })
+    .await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let rows_of = |kind: &'static str| {
+        let relay = n.relay.clone();
+        async move {
+            let rows = relay.store.forwards_due("remote.test:443", now_ms() + 7_200_000, 50).await.unwrap();
+            rows.into_iter()
+                .map(|r| serde_json::from_str::<Value>(&r.frame).unwrap())
+                .filter(|f| f["type"] == kind)
+                .collect::<Vec<Value>>()
+        }
+    };
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+
+    // With a request id: it is passed on unchanged.
+    let tx1 = "0123456789abcdef0123456789abcdef";
+    send(&mut a, post_tx_frame(&alice, "relay.test", &bob, "remote.test", tx1)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    let crid = "requestidrequestidrequestid12345";
+    let mut c = connect(&n).await;
+    recv_type(&mut c, "Challenge").await;
+    let cancel = json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":tx1,"signature":alice.sign(tx1),"cancelrequestid":crid});
+    send(&mut c, cancel.clone()).await;
+    assert_eq!(recv(&mut c).await, json!({"type":"TransactionCancelled","epicboxtxid":tx1}));
+    let cancels = rows_of("CancelTx").await;
+    assert_eq!(cancels.len(), 1, "{cancels:?}");
+    assert_eq!(cancels[0]["cancelrequestid"], crid);
+    assert_eq!(cancels[0]["signature"], alice.sign(tx1), "the bare signature is forwarded by default");
+    // The same request again (a loop) and a new one (a retry) are confirmed and not sent on.
+    send(&mut c, cancel).await;
+    assert_eq!(recv(&mut c).await["type"], "TransactionCancelled");
+    send(&mut c, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":tx1,"signature":alice.sign(tx1)})).await;
+    assert_eq!(recv(&mut c).await["type"], "TransactionCancelled");
+    assert_eq!(rows_of("CancelTx").await.len(), 1);
+
+    // Without a request id: one is made, 32 characters like the reference relay's.
+    let tx2 = "fedcba9876543210fedcba9876543210";
+    send(&mut a, post_tx_frame(&alice, "relay.test", &bob, "remote.test", tx2)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    send(&mut c, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":tx2,"signature":alice.sign(tx2)})).await;
+    assert_eq!(recv(&mut c).await["type"], "TransactionCancelled");
+    let made: Vec<Value> = rows_of("CancelTx").await.into_iter().filter(|f| f["epicboxtxid"] == tx2).collect();
+    assert_eq!(made.len(), 1);
+    let id = made[0]["cancelrequestid"].as_str().unwrap();
+    assert!(id.len() == 32 && id.chars().all(|ch| ch.is_ascii_alphanumeric()), "{id}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancel_crosses_two_relays_and_the_loop_back_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    // Both relays know each other's address before either starts.
+    let la = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let lb = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (a_url, b_url) = (format!("ws://{}", la.local_addr().unwrap()), format!("ws://{}", lb.local_addr().unwrap()));
+    let b = start_on(dir.path(), "relayb.test", lb, |c| {
+        c.federation.peers.insert("relaya.test:443".into(), a_url.clone());
+    })
+    .await;
+    let a = start_on(dir.path(), "relaya.test", la, |c| {
+        c.federation.peers.insert("relayb.test:443".into(), b_url.clone());
+    })
+    .await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let txid = "0123456789abcdef0123456789abcdef";
+
+    // Alice on A sends to Bob on B; Bob is offline, so the slate waits on B.
+    let mut asock = connect(&a).await;
+    recv_type(&mut asock, "Challenge").await;
+    send(&mut asock, post_tx_frame(&alice, "relaya.test", &bob, "relayb.test", txid)).await;
+    assert_eq!(recv(&mut asock).await["type"], "Ok");
+    assert_eq!(forwards_waiting_settles(&a, 0).await, 0);
+    assert_eq!(waiting(&b).await, 1);
+
+    // Alice cancels on A, signing the bare txid as wallets do. A forwards it to B; B, which
+    // got the slate from A, forwards it back to A, which ends it.
+    send(&mut asock, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":txid,"signature":alice.sign(txid)}))
+        .await;
+    assert_eq!(recv(&mut asock).await, json!({"type":"TransactionCancelled","epicboxtxid":txid}));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while waiting(&b).await != 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(waiting(&b).await, 0, "the cancel did not reach the relay holding the slate");
+    assert!(b.relay.store.tx_info(txid).await.unwrap().tombstone.is_some());
+    assert_eq!(forwards_waiting_settles(&a, 0).await, 0);
+    assert_eq!(forwards_waiting_settles(&b, 0).await, 0);
+    // Nothing keeps bouncing.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(a.relay.store.stats(now_ms()).await.unwrap().forwards_waiting, 0);
+    assert_eq!(b.relay.store.stats(now_ms()).await.unwrap().forwards_waiting, 0);
+
+    // Bob, coming online on B with 3.1.0, is told; posting under the txid on B is refused.
+    let mut bs = connect(&b).await;
+    subscribe(&mut bs, &bob, "3.1.0").await;
+    assert_eq!(recv_type(&mut bs, "TransactionCancelled").await["epicboxtxid"], txid);
+    send(&mut bs, post_tx_frame(&bob, "relayb.test", &alice, "relaya.test", txid)).await;
+    assert_eq!(recv(&mut bs).await["type"], "TransactionCancelled");
 }

@@ -88,10 +88,11 @@ pub struct Protocol {
     pub idle_timeout_s: u64,
     /// Unanswered Challenges, with mail waiting, before the watchdog closes a socket with 1001.
     pub watchdog_misses: u32,
-    /// Also forward CancelTx signed over the bare txid (the 3.1.0 form) to other relays. When
-    /// off, only CancelTx signed over `epicbox-cancel/1:<txid>` is forwarded: a signature over
-    /// the bare txid is the same one the PostSlate carried, so it does not show that the sender
-    /// asked to cancel.
+    /// Forward CancelTx signed over the bare txid (the 3.1.0 form wallets use) to the other
+    /// relays that hold the transaction. On by default, as the reference cancel relay does:
+    /// without it a wallet's cancel never reaches a relay holding a forwarded slate. Off
+    /// forwards only CancelTx signed over `epicbox-cancel/1:<txid>`; a bare signature is the
+    /// same one the PostSlate carried, so it does not show that the sender asked to cancel.
     pub forward_bare_cancel: bool,
 }
 
@@ -259,7 +260,7 @@ impl Default for Protocol {
             ping_interval_s: 30,
             idle_timeout_s: 90,
             watchdog_misses: 3,
-            forward_bare_cancel: false,
+            forward_bare_cancel: true,
         }
     }
 }

@@ -188,6 +188,18 @@ acknowledges them with `Made`. Version 3.1.0 adds a stable transaction id to `Po
 `TransactionCancelled`. Signatures are secp256k1 ECDSA over SHA-256 of the UTF-8 text, as DER
 hex. Addresses are `[epicbox://]<base58check public key>[@domain[:port]]`.
 
+The cancel follows the reference 3.1.0 relay, so cancels pass between it and this relay in
+both directions: a `CancelTx` is accepted from a wallet's own socket or from another relay on a
+socket that never subscribed (with `address`), signed over the bare `epicboxtxid`; it is
+forwarded to every relay that holds the transaction, with a `cancelrequestid` that stops relay
+loops; a participant gets `TransactionCancelled`, anyone else and an unknown transaction get
+`Ok`. Note what the bare signature proves: it is the same signature a `PostSlate` carries as
+`epicboxtxidsig`, so anyone who saw the slate (its recipient, a relay on the path) can cancel the
+transaction. A protocol improvement would be for wallets to sign `epicbox-cancel/1:<epicboxtxid>`
+instead, which only the sender produces for a cancel; this relay already accepts that form
+(it reaches only relays that accept it too) and `protocol.forward_bare_cancel = false` forwards
+only that form.
+
 ### mux/1
 
 An opt-in extension: a wallet sends `ClientDetails` with `"ext":["mux/1"]` and then carries any
