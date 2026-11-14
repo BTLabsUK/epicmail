@@ -116,7 +116,25 @@ impl SqliteStore {
     /// Open or create the database, apply the schema, start the writer thread and open
     /// `readers` read connections. `group_max` caps the writes in one commit. Fails on a database
     /// whose schema is newer than this binary.
+    ///
+    /// If the writer thread panics, the process exits with status 70: every later write would
+    /// fail, and a supervisor (systemd `Restart=on-failure`, Docker `--restart`) restarts a
+    /// process that exits, not one that stays up. Uncommitted work is rolled back by SQLite
+    /// and no caller got `Ok` for it.
     pub fn open(path: &Path, readers: usize, group_max: usize) -> Result<Self> {
+        Self::open_with(path, readers, group_max, || {
+            tracing::error!("store writer thread panicked; exiting so the relay is restarted");
+            std::process::exit(70);
+        })
+    }
+
+    /// `open`, with what to do when the writer thread panics.
+    fn open_with(
+        path: &Path,
+        readers: usize,
+        group_max: usize,
+        on_writer_panic: impl FnOnce() + Send + 'static,
+    ) -> Result<Self> {
         let rw = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let writer = open(path, rw)?;
         // auto_vacuum must be set before the first table exists.
@@ -144,9 +162,12 @@ impl SqliteStore {
         }
 
         let (tx, rx) = mpsc::channel::<Job>(8192);
-        std::thread::Builder::new()
-            .name("store-writer".into())
-            .spawn(move || writer_loop(writer, rx, group_max.max(1)))?;
+        std::thread::Builder::new().name("store-writer".into()).spawn(move || {
+            let run = std::panic::AssertUnwindSafe(|| writer_loop(writer, rx, group_max.max(1)));
+            if std::panic::catch_unwind(run).is_err() {
+                on_writer_panic();
+            }
+        })?;
         Ok(Self { tx, readers: Arc::new(pool), next_reader: AtomicUsize::new(0) })
     }
 
@@ -801,6 +822,25 @@ mod tests {
         assert_eq!(sw.messages_expired, 2);
         s.check_writable().await.unwrap();
         s.vacuum().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_panicking_writer_calls_the_hook_and_fails_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let f = fired.clone();
+        let s =
+            SqliteStore::open_with(&dir.path().join("t.db"), 1, 64, move || f.store(true, Ordering::SeqCst)).unwrap();
+        let r = s.write(|_| -> rusqlite::Result<()> { panic!("test panic in a store job") }).await;
+        assert!(r.is_err());
+        for _ in 0..100 {
+            if fired.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(fired.load(Ordering::SeqCst), "the panic hook did not run");
+        assert!(s.check_writable().await.is_err());
     }
 
     #[tokio::test]
