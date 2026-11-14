@@ -217,7 +217,7 @@ IP prefixes are /24 for IPv4 and /48 for IPv6. Every user of one Tor exit, and e
 ## 6. Privacy
 
 - The relay operator sees which mailboxes share a socket, and so belong to one wallet. With 3.0.0 the same can be seen from timing and IP, but less directly. Clients that care can split mailboxes over several sockets, for example one per mailbox group when Tor is on.
-- A stolen token lets its holder receive and ack the session's mail for at most 24 h, or until the owner resumes or attaches again, which spends it. Payloads stay encrypted to the recipient key. The token travels only inside TLS.
+- A stolen token lets its holder receive and ack the session's mail for at most 24 h from the session's last signed Attach (a token issued on Resume keeps the expiry of the token it replaced), or until the owner attaches those mailboxes with signatures again, which takes them out of every other live token. Payloads stay encrypted to the recipient key. The token travels only inside TLS.
 - The relay keeps no token, session or mailbox set on disk. Logs carry no mailbox keys, tokens or payloads.
 - Push timing tells an observer of the socket when mail arrives. This is no different from a 3.0.0 listener.
 

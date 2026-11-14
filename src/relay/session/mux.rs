@@ -11,6 +11,7 @@ use super::{ok, with_ref, Flow, Session};
 use crate::address::parse_address;
 use crate::clock::now_ms;
 use crate::ids::{is_msgid, rand_b64url};
+use crate::relay::tokens::TOKEN_TTL_MS;
 use crate::relay::{Cmd, PostOutcome, PostReq, Refusal, OFFER_LEASE_MS};
 use crate::sig;
 use crate::store::ClaimMode;
@@ -39,6 +40,9 @@ pub(super) struct Mux {
     pub(super) dirty: HashSet<String>,
     /// Hash of the live resume token.
     token: Option<[u8; 32]>,
+    /// Expiry (unix ms) of tokens this session issues: 24 h from its last signed Attach, or the
+    /// expiry of the token it resumed from. Resume never extends it.
+    token_expires: i64,
     /// Attach/Resume budget window: (start, frames counted in it).
     attach_window: (Instant, u32),
     /// Waiting budget window: (start, frames counted in it).
@@ -97,6 +101,7 @@ impl Session {
             held: HashMap::new(),
             dirty: HashSet::new(),
             token: None,
+            token_expires: now_ms() + TOKEN_TTL_MS,
             attach_window: (Instant::now(), 0),
             waiting_window: (Instant::now(), 0),
             last_sweep: Instant::now(),
@@ -213,6 +218,7 @@ impl Session {
         }
         let challenge = self.mux.as_ref().map(|m| m.challenge.clone()).unwrap_or_default();
         let mut out = Vec::with_capacity(list.len());
+        let mut proven = Vec::new();
         let mut any = false;
         for e in list {
             let address = e.get("address").and_then(|a| a.as_str()).unwrap_or("");
@@ -229,9 +235,18 @@ impl Session {
             match self.take_mailbox(&key).await {
                 Ok(waiting) => {
                     any = true;
+                    proven.push(key.clone());
                     out.push(json!({"mailbox":key,"ok":true,"waiting":waiting}));
                 }
                 Err(code) => out.push(json!({"mailbox":key,"ok":false,"code":code})),
+            }
+        }
+        if let Some(m) = self.mux.as_mut() {
+            // Signatures prove the keys: tokens issued before for these mailboxes, to this
+            // socket's earlier sessions or to anyone who took one, no longer resume them.
+            self.relay.revoke_token_mailboxes(&proven, m.token);
+            if any {
+                m.token_expires = now_ms() + TOKEN_TTL_MS;
             }
         }
         self.attached_reply(ws, out, any, r#ref).await;
@@ -248,10 +263,13 @@ impl Session {
             self.send(ws, mux_error("rate_limited", "Too many Resume frames.", r#ref, Some(wait))).await;
             return;
         }
-        let Some(set) = self.relay.take_token(token) else {
+        let Some((set, expires_at)) = self.relay.take_token(token) else {
             self.send(ws, mux_error("token_unknown", "Token unknown, used or expired.", r#ref, None)).await;
             return;
         };
+        if let Some(m) = self.mux.as_mut() {
+            m.token_expires = expires_at;
+        }
         let mut out = Vec::with_capacity(set.len());
         for key in set {
             match self.take_mailbox(&key).await {
@@ -275,7 +293,7 @@ impl Session {
         if issue {
             let m = self.mux.as_mut().expect("mux");
             let set: Vec<String> = m.attached.iter().cloned().collect();
-            let (token, hash, expires) = self.relay.issue_token(m.token, set);
+            let (token, hash, expires) = self.relay.issue_token(m.token, set, m.token_expires);
             m.token = Some(hash);
             reply["token"] = json!(token);
             reply["token_expires"] = json!(expires);

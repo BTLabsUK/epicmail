@@ -4,8 +4,13 @@
 //! Tokens outlive their socket, so their number is not bounded by the socket limits. The
 //! mailboxes held by all tokens together are capped at `limits.mux_token_mailboxes`; past the
 //! cap the oldest tokens are dropped. A dropped token only costs its client one signed Attach.
+//!
+//! A token can be stolen. Two rules bound what a thief can do with one: a signed Attach of a
+//! mailbox takes that mailbox out of every other live token, and a token issued on Resume keeps
+//! the expiry of the token it replaced, so Resume alone never extends access past 24 h from the
+//! last signed Attach.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use sha2::{Digest, Sha256};
 
@@ -13,7 +18,7 @@ use super::Relay;
 use crate::clock::now_ms;
 use crate::ids::rand_b64url;
 
-const TOKEN_TTL_MS: i64 = 24 * 3600 * 1000;
+pub(crate) const TOKEN_TTL_MS: i64 = 24 * 3600 * 1000;
 
 /// The mailboxes a token resumes, and when it expires (unix ms).
 struct TokenEntry {
@@ -27,6 +32,8 @@ pub(super) struct Tokens {
     /// Hashes in issue order. May hold hashes already spent; they are skipped on eviction and
     /// dropped by `prune`.
     order: VecDeque<([u8; 32], i64)>,
+    /// The live tokens holding each mailbox.
+    holders: HashMap<String, HashSet<[u8; 32]>>,
     /// Mailboxes held by every entry in `map`.
     mailboxes: usize,
     cap: usize,
@@ -34,12 +41,30 @@ pub(super) struct Tokens {
 
 impl Tokens {
     pub(super) fn new(cap: usize) -> Self {
-        Self { map: HashMap::new(), order: VecDeque::new(), mailboxes: 0, cap: cap.max(1) }
+        Self { map: HashMap::new(), order: VecDeque::new(), holders: HashMap::new(), mailboxes: 0, cap: cap.max(1) }
+    }
+
+    fn index_add(&mut self, hash: &[u8; 32], boxes: &[String]) {
+        for b in boxes {
+            self.holders.entry(b.clone()).or_default().insert(*hash);
+        }
+    }
+
+    fn index_del(&mut self, hash: &[u8; 32], boxes: &[String]) {
+        for b in boxes {
+            if let Some(s) = self.holders.get_mut(b) {
+                s.remove(hash);
+                if s.is_empty() {
+                    self.holders.remove(b);
+                }
+            }
+        }
     }
 
     fn remove(&mut self, hash: &[u8; 32]) -> Option<TokenEntry> {
         let e = self.map.remove(hash)?;
         self.mailboxes -= e.mailboxes.len();
+        self.index_del(hash, &e.mailboxes);
         Some(e)
     }
 
@@ -58,6 +83,7 @@ impl Tokens {
         self.make_room(mailboxes.len());
         self.mailboxes += mailboxes.len();
         self.order.push_back((hash, expires_at));
+        self.index_add(&hash, &mailboxes);
         self.map.insert(hash, TokenEntry { mailboxes, expires_at });
     }
 
@@ -65,12 +91,37 @@ impl Tokens {
         let Some(e) = self.map.get_mut(hash) else { return };
         let old = std::mem::take(&mut e.mailboxes);
         self.mailboxes -= old.len();
+        self.index_del(hash, &old);
         self.make_room(mailboxes.len());
         // When this token is the oldest, making room may drop it; its session then attaches
         // with signatures on the next reconnect.
-        if let Some(e) = self.map.get_mut(hash) {
+        if self.map.contains_key(hash) {
             self.mailboxes += mailboxes.len();
-            e.mailboxes = mailboxes;
+            self.index_add(hash, &mailboxes);
+            self.map.get_mut(hash).expect("present").mailboxes = mailboxes;
+        }
+    }
+
+    /// Take `keys` out of every live token except `keep`.
+    fn revoke(&mut self, keys: &[String], keep: Option<&[u8; 32]>) {
+        for k in keys {
+            let Some(hashes) = self.holders.remove(k) else { continue };
+            let mut kept = HashSet::new();
+            for h in hashes {
+                if Some(&h) == keep {
+                    kept.insert(h);
+                    continue;
+                }
+                if let Some(e) = self.map.get_mut(&h) {
+                    if let Some(i) = e.mailboxes.iter().position(|m| m == k) {
+                        e.mailboxes.swap_remove(i);
+                        self.mailboxes -= 1;
+                    }
+                }
+            }
+            if !kept.is_empty() {
+                self.holders.insert(k.clone(), kept);
+            }
         }
     }
 
@@ -85,11 +136,16 @@ impl Tokens {
 }
 
 impl Relay {
-    /// Issue a token for `mailboxes`, ending `old`. Returns (token, hash, expires unix seconds).
-    pub fn issue_token(&self, old: Option<[u8; 32]>, mailboxes: Vec<String>) -> (String, [u8; 32], i64) {
+    /// Issue a token for `mailboxes` that expires at `expires_at` (unix ms), ending `old`.
+    /// Returns (token, hash, expires unix seconds).
+    pub fn issue_token(
+        &self,
+        old: Option<[u8; 32]>,
+        mailboxes: Vec<String>,
+        expires_at: i64,
+    ) -> (String, [u8; 32], i64) {
         let token = rand_b64url(32);
         let hash = sha256(token.as_bytes());
-        let expires_at = now_ms() + TOKEN_TTL_MS;
         let mut t = self.tokens.lock();
         if let Some(o) = old {
             t.remove(&o);
@@ -103,11 +159,18 @@ impl Relay {
         self.tokens.lock().update(hash, mailboxes);
     }
 
-    /// Spend a token. None when unknown, spent, expired or dropped for room.
-    pub fn take_token(&self, token: &str) -> Option<Vec<String>> {
+    /// A signed Attach proved `keys`: take them out of every live token but `keep`, so a stolen
+    /// token stops working for those mailboxes.
+    pub fn revoke_token_mailboxes(&self, keys: &[String], keep: Option<[u8; 32]>) {
+        self.tokens.lock().revoke(keys, keep.as_ref());
+    }
+
+    /// Spend a token: its mailboxes and its expiry (unix ms). None when unknown, spent, expired
+    /// or dropped for room.
+    pub fn take_token(&self, token: &str) -> Option<(Vec<String>, i64)> {
         let hash = sha256(token.as_bytes());
         let e = self.tokens.lock().remove(&hash)?;
-        (e.expires_at > now_ms()).then_some(e.mailboxes)
+        (e.expires_at > now_ms()).then_some((e.mailboxes, e.expires_at))
     }
 
     /// Tokens issued and not yet spent (expired ones count until the next prune).
@@ -152,6 +215,24 @@ mod tests {
         t.update(&[4; 32], boxes(8));
         assert!(t.map.contains_key(&[4; 32]) && !t.map.contains_key(&[3; 32]));
         assert_eq!(t.mailboxes, 8);
+    }
+
+    #[test]
+    fn a_signed_attach_revokes_the_mailbox_from_other_tokens() {
+        let mut t = Tokens::new(100);
+        t.insert([1; 32], vec!["a".into(), "b".into()], 100);
+        t.insert([2; 32], vec!["a".into()], 100);
+        t.revoke(&["a".to_string()], Some(&[2; 32]));
+        assert_eq!(t.map[&[1; 32]].mailboxes, vec!["b".to_string()]);
+        assert_eq!(t.map[&[2; 32]].mailboxes, vec!["a".to_string()]);
+        assert_eq!(t.mailboxes, 2);
+        assert_eq!(t.holders["a"].len(), 1);
+        // The index follows updates and removals.
+        t.update(&[1; 32], vec!["c".into()]);
+        assert!(!t.holders.contains_key("b"));
+        t.remove(&[2; 32]);
+        assert!(!t.holders.contains_key("a"));
+        assert_eq!(t.mailboxes, 1);
     }
 
     #[test]

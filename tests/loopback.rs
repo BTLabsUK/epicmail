@@ -894,3 +894,45 @@ async fn signature_checks_have_a_budget_per_prefix() {
     let r = recv(&mut m).await;
     assert_eq!(r["code"], "rate_limited", "{r}");
 }
+
+/// Open a mux/1 socket; returns it with its Attach challenge.
+async fn mux_open(n: &Node) -> (Ws, String) {
+    let mut m = connect(n).await;
+    recv_type(&mut m, "Challenge").await;
+    send(&mut m, json!({"type":"ClientDetails","wallet_version":"t","wallet_mode":"listener","protocol_version":"3.0.0","ext":["mux/1"]})).await;
+    let ok = recv(&mut m).await;
+    let ch = ok["challenge"].as_str().unwrap().to_string();
+    (m, ch)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stolen_resume_token_is_revoked_by_the_owners_next_attach() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let bob = Key::new();
+    // The owner attaches and gets a token; a thief takes it.
+    let (mut a, ch) = mux_open(&n).await;
+    send(&mut a, json!({"type":"Attach","ref":"a","mailboxes":[{"address":bob.pk,"signature":bob.sign(&ch)}]})).await;
+    let at = recv(&mut a).await;
+    let stolen = at["token"].as_str().unwrap().to_string();
+    let first_expiry = at["token_expires"].as_i64().unwrap();
+    // The thief resumes: it holds the mailbox, and its new token keeps the old expiry.
+    let (mut t, _) = mux_open(&n).await;
+    send(&mut t, json!({"type":"Resume","ref":"r","token":stolen})).await;
+    let at = recv(&mut t).await;
+    assert_eq!(at["mailboxes"][0]["ok"], true, "{at}");
+    assert_eq!(at["token_expires"].as_i64().unwrap(), first_expiry, "Resume extended the token: {at}");
+    let thief_token = at["token"].as_str().unwrap().to_string();
+    drop(t);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The owner proves the key again on a new socket.
+    let (mut c, ch) = mux_open(&n).await;
+    send(&mut c, json!({"type":"Attach","ref":"a","mailboxes":[{"address":bob.pk,"signature":bob.sign(&ch)}]})).await;
+    assert_eq!(recv(&mut c).await["mailboxes"][0]["ok"], true);
+    // The thief's token no longer resumes that mailbox.
+    let (mut t2, _) = mux_open(&n).await;
+    send(&mut t2, json!({"type":"Resume","ref":"r","token":thief_token})).await;
+    let at = recv(&mut t2).await;
+    assert_eq!(at["type"], "Attached", "{at}");
+    assert_eq!(at["mailboxes"].as_array().unwrap().len(), 0, "stolen token still resumes the mailbox: {at}");
+}
