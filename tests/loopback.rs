@@ -1159,3 +1159,18 @@ async fn a_socket_that_missed_its_detached_can_no_longer_ack() {
     assert_eq!(recv(&mut m).await, json!({"type":"Ok","ref":"k"}));
     assert_eq!(waiting(&n).await, 1, "the ack of a mailbox this socket no longer holds deleted mail");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_subscribe_gets_a_ping_soon_after() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let bob = Key::new();
+    let mut b = connect(&n).await;
+    subscribe(&mut b, &bob, "3.0.0").await;
+    assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+    // epic-wallet's send path waits for any frame from the relay; a ping frees it.
+    let t0 = std::time::Instant::now();
+    let m = tokio::time::timeout(Duration::from_secs(3), b.next()).await.expect("no frame").unwrap().unwrap();
+    assert!(matches!(m, Message::Ping(_)), "{m:?}");
+    assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+}

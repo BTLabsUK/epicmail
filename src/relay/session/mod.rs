@@ -76,7 +76,18 @@ pub struct Session {
     send_timeout: Duration,
     /// A write failed or timed out: the socket is gone and the event loop ends.
     dead: bool,
+    /// When to send the one early ping after the first Subscribe (see `EARLY_PING`).
+    early_ping: Option<Instant>,
+    /// A Subscribe has succeeded on this socket.
+    subscribed_once: bool,
 }
+
+/// Delay of the ping sent once after a socket's first successful Subscribe. epic-wallet (3.6 to
+/// 4.1, and Stack Wallet and Epic Pay through the same library) reads its socket while holding
+/// the lock its send path needs, so a `send -m epicbox` cannot post its slate until the relay
+/// sends some frame. Without this, that wait is the ping interval (30 s); with it, about a
+/// second.
+pub(super) const EARLY_PING: Duration = Duration::from_millis(800);
 
 /// Serve one upgraded websocket until it closes.
 pub async fn run(relay: Arc<Relay>, ws: WebSocket, ip: IpAddr, permit: SocketPermit) {
@@ -104,6 +115,8 @@ pub async fn run(relay: Arc<Relay>, ws: WebSocket, ip: IpAddr, permit: SocketPer
         last_seen: Instant::now(),
         send_timeout: Duration::ZERO,
         dead: false,
+        early_ping: None,
+        subscribed_once: false,
     };
     metrics::gauge!("epicbox_sockets").increment(1.0);
     s.serve(ws, rx).await;
@@ -187,7 +200,14 @@ impl Session {
             }
             // A held message goes back out when its hold ends, not at the next pump tick.
             let hold_ends = self.next_hold_end();
+            let early_ping = self.early_ping;
             tokio::select! {
+                () = tokio::time::sleep_until(early_ping.unwrap_or_else(Instant::now).into()), if early_ping.is_some() => {
+                    self.early_ping = None;
+                    if !self.send_raw(&mut ws, Message::Ping(Default::default())).await {
+                        break Flow::Continue;
+                    }
+                }
                 () = tokio::time::sleep(hold_ends.unwrap_or(MUX_PUMP_TICK)), if hold_ends.is_some() => {
                     self.mux_timer(&mut ws).await;
                 }

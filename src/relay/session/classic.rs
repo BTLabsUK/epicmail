@@ -94,6 +94,13 @@ impl Session {
         self.send(ws, ok()).await;
     }
 
+    /// True the first time this socket subscribes successfully.
+    fn key_subscribed_once(&mut self) -> bool {
+        let first = !self.subscribed_once;
+        self.subscribed_once = true;
+        first
+    }
+
     /// Subscribe: prove the key over the current or previous challenge, register the socket
     /// and deliver.
     pub(super) async fn subscribe(&mut self, ws: &mut WebSocket, msg: &Value) -> Flow {
@@ -169,6 +176,9 @@ impl Session {
         } else if self.handle.cancel != (self.ver == Some(Ver::V31)) {
             self.handle.cancel = self.ver == Some(Ver::V31);
             r.registry.subscribe_classic(&key, self.handle.clone(), r.cfg.limits.sockets_per_address as usize);
+        }
+        if self.key_subscribed_once() {
+            self.early_ping = Some(Instant::now() + super::EARLY_PING);
         }
         self.last_sub = Instant::now();
         self.pending_challenge = false;
