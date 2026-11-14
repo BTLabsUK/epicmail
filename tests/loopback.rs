@@ -1107,3 +1107,20 @@ async fn a_post_padded_outside_str_pays_for_the_padding() {
     f["junk"] = json!("a".repeat(60_000));
     assert_eq!(http(&n, "POST", "/v1/post", Some(f)).await.0, 429);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slate_reposted_with_another_from_is_still_one_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    let f = post_frame(&alice, "relay.test", &bob, "relay.test", 1);
+    for from in [alice.at("relay.test"), alice.pk.clone(), alice.at("other.test"), alice.at("relay.test:443")] {
+        let mut g = f.clone();
+        g["from"] = json!(from);
+        send(&mut a, g).await;
+        assert_eq!(recv(&mut a).await["type"], "Ok");
+    }
+    assert_eq!(waiting(&n).await, 1, "the same signed slate was stored more than once");
+}

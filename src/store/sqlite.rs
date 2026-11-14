@@ -107,6 +107,9 @@ fn open(path: &Path, flags: OpenFlags) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Dedupe key of a message: the mailbox, the key that signed it, the body and the signature.
+/// Not the `from` text, which nobody signs: the same slate re-posted with `from` written
+/// another way (`K`, `K@x`, `K@y:1`) is still the same message.
 fn dedupe_message(queue: &str, sender: &str, body: &str, signature: &str) -> Vec<u8> {
     let mut h = Sha256::new();
     for part in [queue, sender, body, signature] {
@@ -344,7 +347,7 @@ impl Store for SqliteStore {
                     return Ok(PutOutcome::NotParticipant);
                 }
             }
-            let dedupe = dedupe_message(&m.queue, &m.sender, &m.body, &m.signature);
+            let dedupe = dedupe_message(&m.queue, &m.sender_key, &m.body, &m.signature);
             if let Some(msgid) = c
                 .prepare_cached("SELECT msgid FROM messages WHERE dedupe=?1")?
                 .query_row([&dedupe], |r| r.get::<_, String>(0))
