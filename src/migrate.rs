@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::address;
 use crate::config::Config;
-use crate::ids::is_msgid;
+use crate::ids::{is_msgid, is_txid};
 use crate::store::{ForwardKind, NewForward, NewMessage, PutOutcome, Store};
 
 const MAX_ERRORS: usize = 100;
@@ -70,6 +70,11 @@ struct SlateLine {
     expires_at: i64,
     #[serde(default)]
     deliveries: i64,
+    /// 3.1.0 transaction id and its signature; absent for legacy slates.
+    #[serde(default)]
+    epicboxtxid: Option<String>,
+    #[serde(default)]
+    epicboxtxidsig: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,6 +100,26 @@ fn random_msgid() -> String {
 
 fn secs_to_ms(s: i64) -> Option<i64> {
     s.checked_mul(1000)
+}
+
+/// `domain:port` of the relay named in a `from` address, when that is not this relay.
+fn sender_endpoint(cfg: &Config, from: &str) -> Option<String> {
+    let a = address::parse_address(from).ok()?;
+    let domain = a.domain?.to_ascii_lowercase();
+    let port = a.port.unwrap_or(443);
+    (!cfg.is_local(&domain, port)).then(|| format!("{domain}:{port}"))
+}
+
+/// A queued forward is a CancelTx when its frame is one; anything else is a PostSlate.
+fn forward_kind(frame: &str) -> ForwardKind {
+    let ty = serde_json::from_str::<serde_json::Value>(frame)
+        .ok()
+        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_ascii_lowercase));
+    if ty.as_deref() == Some("canceltx") {
+        ForwardKind::CancelTx
+    } else {
+        ForwardKind::PostSlate
+    }
 }
 
 /// Reads JSON Lines from `input` into the store: `slate` lines become queued messages, `forward`
@@ -140,6 +165,17 @@ pub async fn import_jsonl<R: BufRead>(store: &dyn Store, cfg: &Config, input: R,
                     Some(m) if is_msgid(&m) => m,
                     _ => random_msgid(),
                 };
+                let (txid, txidsig) = match (s.epicboxtxid, s.epicboxtxidsig) {
+                    (None, None) => (None, None),
+                    (Some(t), Some(ts)) if is_txid(&t) => (Some(t), Some(ts)),
+                    _ => {
+                        st.skip(n, "epicboxtxid and epicboxtxidsig must both be valid or both absent");
+                        continue;
+                    }
+                };
+                // As for a posted slate: the sender's relay, when it is another one, is where a
+                // cancel of this transaction must be forwarded.
+                let remote_endpoint = txid.as_ref().and_then(|_| sender_endpoint(cfg, &s.from));
                 let m = NewMessage {
                     sender_key: sender_key(&s.from),
                     recipient: format!("{}@{}", s.queue, recipient_suffix),
@@ -148,9 +184,9 @@ pub async fn import_jsonl<R: BufRead>(store: &dyn Store, cfg: &Config, input: R,
                     body: s.str,
                     signature: s.signature,
                     challenge: s.challenge,
-                    txid: None,
-                    txidsig: None,
-                    remote_endpoint: None,
+                    txid,
+                    txidsig,
+                    remote_endpoint,
                     msgid,
                     created_at: created,
                     expires_at: expires,
@@ -181,7 +217,7 @@ pub async fn import_jsonl<R: BufRead>(store: &dyn Store, cfg: &Config, input: R,
                 }
                 let nf = NewForward {
                     peer: format!("{}:{}", f.target_host, f.target_port).to_lowercase(),
-                    kind: ForwardKind::PostSlate,
+                    kind: forward_kind(&f.frame),
                     frame: f.frame,
                     txid: None,
                     tx_keys: vec![],
@@ -218,6 +254,10 @@ struct SlateOut<'a> {
     created_at: i64,
     expires_at: i64,
     deliveries: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epicboxtxid: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epicboxtxidsig: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -230,21 +270,22 @@ struct ForwardOut<'a> {
     created_at: i64,
 }
 
-/// Write every waiting message and PostSlate forward of the SQLite file at `db_path` as JSON
-/// Lines. The file is opened read only.
+/// Write every waiting message and queued forward of the SQLite file at `db_path` as JSON Lines.
+/// The file is opened read only. Cancel tombstones are not exported.
 pub fn export_jsonl<W: Write>(db_path: &Path, mut out: W) -> Result<ExportStats> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
         .with_context(|| format!("opening {} read only", db_path.display()))?;
     let mut st = ExportStats::default();
 
     let mut q = conn.prepare(
-        "SELECT queue,sender,body,signature,challenge,msgid,created_at,expires_at,deliveries \
+        "SELECT queue,sender,body,signature,challenge,msgid,created_at,expires_at,deliveries,txid,txidsig \
          FROM messages ORDER BY created_at, id",
     )?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
         let (queue, sender, body, sig, ch, msgid): (String, String, String, String, String, String) =
             (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?);
+        let (txid, txidsig): (Option<String>, Option<String>) = (r.get(9)?, r.get(10)?);
         let rec = SlateOut {
             kind: "slate",
             queue: &queue,
@@ -256,6 +297,8 @@ pub fn export_jsonl<W: Write>(db_path: &Path, mut out: W) -> Result<ExportStats>
             created_at: r.get::<_, i64>(6)? / 1000,
             expires_at: r.get::<_, i64>(7)? / 1000,
             deliveries: r.get(8)?,
+            epicboxtxid: txid.as_deref(),
+            epicboxtxidsig: txidsig.as_deref(),
         };
         serde_json::to_writer(&mut out, &rec)?;
         out.write_all(b"\n")?;
@@ -263,8 +306,7 @@ pub fn export_jsonl<W: Write>(db_path: &Path, mut out: W) -> Result<ExportStats>
     }
     drop(rows);
 
-    let mut q =
-        conn.prepare("SELECT peer,frame,attempts,created_at FROM forwards WHERE kind=0 ORDER BY created_at, id")?;
+    let mut q = conn.prepare("SELECT peer,frame,attempts,created_at FROM forwards ORDER BY created_at, id")?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
         let peer: String = r.get(0)?;
@@ -376,6 +418,47 @@ mod tests {
         assert_eq!(g2[0].msgid, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         assert_eq!(g2[0].body, "body1");
         assert_eq!(g2[0].sender, format!("epicbox://{Q2}@old.example:443"));
+    }
+
+    #[tokio::test]
+    async fn transaction_ids_survive_export_and_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("a.db");
+        let s = SqliteStore::open(&db, 1, 64).unwrap();
+        let now_s = NOW / 1000;
+        let txid = "T".repeat(32);
+        let lines = [
+            format!(
+                r#"{{"kind":"slate","queue":"{Q1}","from":"{Q2}@other.example:443","str":"b","signature":"s","messageid":null,"created_at":{now_s},"expires_at":{},"epicboxtxid":"{txid}","epicboxtxidsig":"ts"}}"#,
+                now_s + 1000
+            ),
+            format!(
+                r#"{{"kind":"slate","queue":"{Q1}","from":"","str":"c","signature":"s","created_at":{now_s},"expires_at":{},"epicboxtxid":"short","epicboxtxidsig":"ts"}}"#,
+                now_s + 1000
+            ),
+        ];
+        let st = import_jsonl(&s, &cfg(), Cursor::new(lines.join("\n")), NOW).await.unwrap();
+        assert_eq!((st.slates, st.skipped), (1, 1));
+        let info = s.tx_info(&txid).await.unwrap();
+        assert_eq!(info.participants.len(), 2);
+        assert_eq!(info.endpoints, ["other.example:443"]);
+
+        let mut buf = Vec::new();
+        export_jsonl(&db, &mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains(&format!(r#""epicboxtxid":"{txid}","epicboxtxidsig":"ts""#)), "{text}");
+
+        let s2 = SqliteStore::open(&dir.path().join("b.db"), 1, 64).unwrap();
+        assert_eq!(import_jsonl(&s2, &cfg(), Cursor::new(text), NOW).await.unwrap().slates, 1);
+        let got = s2.claim(Q1, NOW, 1, vec![], ClaimMode::Consume).await.unwrap();
+        assert_eq!(got[0].txid.as_deref(), Some(txid.as_str()));
+    }
+
+    #[test]
+    fn forward_kind_follows_the_frame() {
+        assert_eq!(forward_kind(r#"{"type":"CancelTx","epicboxtxid":"x"}"#), ForwardKind::CancelTx);
+        assert_eq!(forward_kind(r#"{"type":"PostSlate"}"#), ForwardKind::PostSlate);
+        assert_eq!(forward_kind("not json"), ForwardKind::PostSlate);
     }
 
     #[tokio::test]
