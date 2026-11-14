@@ -118,6 +118,12 @@ async fn recv_type(ws: &mut Ws, ty: &str) -> Value {
 }
 
 async fn http(n: &Node, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
+    let (status, _, v) = http_with_head(n, method, path, body).await;
+    (status, v)
+}
+
+/// Like `http`, and also returns the response head (status line and headers).
+async fn http_with_head(n: &Node, method: &str, path: &str, body: Option<Value>) -> (u16, String, Value) {
     let mut s = TcpStream::connect(n.addr).await.unwrap();
     let b = body.map(|b| b.to_string()).unwrap_or_default();
     let req = format!(
@@ -130,7 +136,7 @@ async fn http(n: &Node, method: &str, path: &str, body: Option<Value>) -> (u16, 
     let text = String::from_utf8_lossy(&out);
     let (head, body) = text.split_once("\r\n\r\n").unwrap();
     let status: u16 = head.split(' ').nth(1).unwrap().parse().unwrap();
-    (status, serde_json::from_str(body).unwrap_or(Value::String(body.to_string())))
+    (status, head.to_string(), serde_json::from_str(body).unwrap_or(Value::String(body.to_string())))
 }
 
 async fn waiting(n: &Node) -> u64 {
@@ -390,6 +396,26 @@ async fn https_post_pull_made() {
     let (st, wk) = http(&n, "GET", "/.well-known/epicbox.json", None).await;
     assert_eq!(st, 200);
     assert!(wk["features"]["mux/1"].is_object(), "{wk}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn https_made_says_when_to_retry_after_failed_signatures() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| c.limits.failed_sigs_per_min_per_ip = 2).await;
+    let (bob, eve) = (Key::new(), Key::new());
+    let id = "0123456789abcdef0123456789abcdef";
+    let bad = json!({"address":bob.pk,"acks":[{"id":id,"signature":eve.sign(id)},{"id":id,"signature":eve.sign(id)}]});
+    let (st, v) = http(&n, "POST", "/v1/made", Some(bad.clone())).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["refused"], 2, "{v}");
+
+    let (st, head, v) = http_with_head(&n, "POST", "/v1/made", Some(bad)).await;
+    assert_eq!(st, 429, "{v}");
+    let retry = head
+        .lines()
+        .find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("retry-after")))
+        .map(|(_, v)| v.trim().parse::<u64>().unwrap());
+    assert!(matches!(retry, Some(s) if s >= 1), "no Retry-After in {head}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

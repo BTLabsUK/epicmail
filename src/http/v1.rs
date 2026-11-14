@@ -311,7 +311,8 @@ pub(super) async fn made(
     };
     let ip = client_ip(peer, &headers, &relay.cfg.server.trusted_proxies);
     if let Some(s) = relay.limiter.sig_blocked(ip) {
-        return err(R, StatusCode::TOO_MANY_REQUESTS, format!("Too many failed signatures; retry in {s} s."));
+        metrics::counter!("epicbox_limit_refusals_total", "limit" => "failed_sigs").increment(1);
+        return too_many(R, format!("Too many failed signatures; retry in {s} s."), s);
     }
     let mut ids = Vec::with_capacity(acks.len());
     let mut refused = 0u64;
