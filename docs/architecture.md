@@ -32,8 +32,8 @@ All of it shares one `Relay` value (`src/relay/mod.rs`).
    slate.
 2. **Store.** If the destination is this relay (`server.domain`, `server.port` or an alias),
    the message goes to `Store::put_message`. The store enforces `queue_cap` and
-   `per_sender_cap`, keeps one copy of a slate posted twice, and links the message to its 3.1.0 transaction. The call
-   returns after the commit; only then does the wallet get `Ok`.
+   `per_sender_cap`, keeps one copy of a slate posted twice, and links the message to its 3.1.0
+   transaction. The call returns after the commit; only then does the wallet get `Ok`.
 3. **Wake.** After the commit the relay wakes the mailbox's holder through the registry and
    publishes `MailStored` on the bus. The registry pushes to one socket per mailbox: the mux/1
    holder if there is one, else the newest classic subscriber. `/v1` long polls listen on the
