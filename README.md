@@ -166,7 +166,7 @@ reference is `src/config.rs`.
 |---|---|
 | `[server]` | Listener, identity (`domain`, `port`, `aliases`), trusted proxies, metrics listener, drain time |
 | `[store]` | Database path, retention, group commit size, reader connections, vacuum hour |
-| `[protocol]` | First challenge (static for wallets older than 3.5.2, or random), challenge interval, version answered to `GetVersion`, cancel and mux/1 switches, ping and idle timeouts |
+| `[protocol]` | Challenge interval, version answered to `GetVersion`, cancel and mux/1 switches, ping and idle timeouts |
 | `[limits]` | Frame and slate sizes, rates per IP prefix and per address, socket caps, mailbox caps, mux/1 and `/v1` budgets |
 | `[federation]` | Forwarding to other relays: on/off, allow and deny lists, timeouts |
 | `[http_api]` | The `/v1` HTTPS API: on/off, batch sizes, long-poll time, challenge window, lease |
@@ -242,13 +242,13 @@ restricts forwarding to listed relays; `federation.enabled = false` turns it off
   (`/v1`), or over the message id (`Made`). A mux/1 socket that proved a mailbox may then `Ack`
   without signatures, and its resume token (a bearer secret, valid 24 hours, single use) takes
   the mailboxes back after a reconnect. Failed signatures are rate-limited per IP prefix.
-- **Static first challenge.** For wallets older than 3.5.2, the default
-  `protocol.first_challenge = "static"` sends the fixed challenge of the original relay on
-  every new socket, and wallets sign it in their first `Subscribe`. That signature never
-  expires: anyone who has seen it, including the operator of any other relay that uses the same
-  fixed challenge, can replay it to receive the mailbox's (encrypted) slates, and by leaving out
-  `ver` have them deleted on delivery, so the real wallet never gets them. Set
-  `first_challenge = "random"` as soon as your users' wallets no longer need the fixed value.
+- **Every challenge is random.** The original relay sends one fixed challenge on every new
+  socket, so a wallet's first `Subscribe` signature never expires, and anyone who has seen it
+  (the operator of any relay that sends the fixed value, for one) could replay it to collect
+  that mailbox. epicmail sends a fresh random challenge on every socket and every round, and
+  accepts no signature over the fixed value. Wallets older than 3.5.2 always sign the fixed
+  value, so they cannot receive through epicmail; they can still post. A replayed signature is
+  byte for byte what an old wallet sends, so the two cannot be told apart safely.
 - **Trusted proxies.** `X-Forwarded-For` is honoured only from addresses in
   `server.trusted_proxies`. List only your own proxy there, and make the proxy replace the
   header rather than append to it (the examples do).

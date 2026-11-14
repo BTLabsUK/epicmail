@@ -6,10 +6,9 @@ use std::time::{Duration, Instant};
 use axum::extract::ws::WebSocket;
 use serde_json::{json, Value};
 
-use super::{ok, Flow, Session, STATIC_CHALLENGE};
+use super::{ok, Flow, Session};
 use crate::address::parse_address;
 use crate::clock::now_ms;
-use crate::config::FirstChallenge;
 use crate::ids::{is_msgid, rand_id};
 use crate::relay::{CancelOutcome, Cmd, PostOutcome, PostReq, Refusal, OFFER_LEASE_MS};
 use crate::sig;
@@ -48,18 +47,8 @@ impl Session {
     /// Send a fresh Challenge. The one it replaces stays valid until the next successful
     /// Subscribe.
     pub(super) async fn new_challenge(&mut self, ws: &mut WebSocket) {
-        let fresh = match self.ver {
-            None | Some(Ver::V2) | Some(Ver::Legacy)
-                if self.relay.cfg.protocol.first_challenge == FirstChallenge::Static =>
-            {
-                STATIC_CHALLENGE.to_string()
-            }
-            _ => rand_id(32),
-        };
-        let old = std::mem::replace(&mut self.challenge, fresh);
-        if old != self.challenge {
-            self.prev_challenge = Some(old);
-        }
+        let old = std::mem::replace(&mut self.challenge, rand_id(32));
+        self.prev_challenge = Some(old);
         self.pending_challenge = true;
         let v = json!({"type":"Challenge","str":self.challenge});
         self.send(ws, v).await;

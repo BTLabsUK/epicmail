@@ -23,16 +23,12 @@ use tokio::sync::mpsc;
 use tokio::time::{interval_at, MissedTickBehavior};
 
 use super::{Cmd, Relay, SockHandle};
-use crate::config::FirstChallenge;
 use crate::ids::rand_id;
 use crate::limits::SocketPermit;
 use classic::{Inflight, Ver};
 use mux::{mux_error, ref_of, Mux, MUX_PUMP_TICK};
 
 pub use mux::{HOLD_MAX_S, MAX_ACK_IDS};
-
-/// The stock relay's fixed first challenge. Wallets older than 3.5.2 sign it.
-pub const STATIC_CHALLENGE: &str = "7WUDtkSaKyGRUnQ22rE3QUXChV8DmA6NnunDYP4vheTpc";
 
 /// What the event loop does after a frame or command.
 enum Flow {
@@ -176,11 +172,9 @@ impl Session {
         pump_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut shutdown = self.relay.shutdown.subscribe();
 
-        // First Challenge, as the stock relay sends on connect.
-        self.challenge = match p.first_challenge {
-            FirstChallenge::Static => STATIC_CHALLENGE.to_string(),
-            FirstChallenge::Random => rand_id(32),
-        };
+        // First Challenge, sent on connect as the stock relay does, but always random: the
+        // stock relay's fixed first challenge made every first Subscribe replayable forever.
+        self.challenge = rand_id(32);
         self.pending_challenge = true;
         let first = json!({"type":"Challenge","str":self.challenge});
         if !self.send(&mut ws, first).await {

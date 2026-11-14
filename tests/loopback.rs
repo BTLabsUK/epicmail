@@ -22,6 +22,7 @@ use epicmail::sig;
 use epicmail::store::sqlite::SqliteStore;
 use epicmail::store::Store;
 
+/// The original relay's fixed first challenge, which wallets older than 3.5.2 always sign.
 const STATIC: &str = "7WUDtkSaKyGRUnQ22rE3QUXChV8DmA6NnunDYP4vheTpc";
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -170,8 +171,10 @@ async fn classic_post_push_made() {
 
     let mut b = connect(&n).await;
     let first = recv(&mut b).await;
-    assert_eq!(first, json!({"type":"Challenge","str":STATIC}));
-    send(&mut b, json!({"type":"Subscribe","address":bob.pk,"ver":"3.0.0","signature":bob.sign(STATIC)})).await;
+    assert_eq!(first["type"], "Challenge");
+    let first = first["str"].as_str().unwrap().to_string();
+    assert!(first.len() == 32 && first != STATIC, "{first}");
+    send(&mut b, json!({"type":"Subscribe","address":bob.pk,"ver":"3.0.0","signature":bob.sign(&first)})).await;
     assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
 
     let mut a = connect(&n).await;
@@ -201,7 +204,7 @@ async fn classic_post_push_made() {
     .await;
     assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
     let c = recv_type(&mut b, "Challenge").await;
-    assert_ne!(c["str"], STATIC);
+    assert_ne!(c["str"], first.as_str());
     assert_eq!(waiting(&n).await, 0);
 
     // Subscribing again finds nothing.
@@ -711,4 +714,28 @@ async fn mux_detach_list_is_capped() {
     send(&mut m, json!({"type":"Detach","ref":"d2","mailboxes":keys})).await;
     let e = recv(&mut m).await;
     assert_eq!((e["code"].as_str(), e["ref"].as_str()), (Some("too_many_mailboxes"), Some("d2")), "{e}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_subscribe_over_the_fixed_challenge_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    send(&mut a, post_frame(&alice, "relay.test", &bob, "relay.test", 1)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+
+    // A signature over the fixed constant is what an old wallet sends, and what anyone who has
+    // seen one can replay. Neither with nor without `ver` may it open the mailbox.
+    for frame in [
+        json!({"type":"Subscribe","address":bob.pk,"ver":"3.0.0","signature":bob.sign(STATIC)}),
+        json!({"type":"Subscribe","address":bob.pk,"signature":bob.sign(STATIC)}),
+    ] {
+        let mut s = connect(&n).await;
+        recv_type(&mut s, "Challenge").await;
+        send(&mut s, frame).await;
+        assert_eq!(recv(&mut s).await["kind"], "InvalidSignature");
+    }
+    assert_eq!(waiting(&n).await, 1);
 }

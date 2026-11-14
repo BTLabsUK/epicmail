@@ -53,7 +53,7 @@ A relay that offers mux/1 answers:
 {"type":"Ok","ext":["mux/1"],"challenge":"b3JkKQ1y0f5C3cS0nVb1zw","limits":{"attach_per_frame":64,"mailboxes_per_socket":256,"inflight_per_socket":32,"hold_max_s":3600}}
 ```
 
-- `challenge` is fresh for this socket: 16 random bytes in base64url without padding, so exactly 22 characters of `[A-Za-z0-9_-]`. It is never sent again and never reused. Attach signatures are over this string. It replaces the first `Challenge` frame, which may be the fixed constant in compatible mode, so mux/1 signatures cannot be replayed on another socket.
+- `challenge` is fresh for this socket: 16 random bytes in base64url without padding, so exactly 22 characters of `[A-Za-z0-9_-]`. It is never sent again and never reused. Attach signatures are over this string. It replaces the first `Challenge` frame for signing, so mux/1 signatures cannot be replayed on another socket.
 - From this `Ok` on, the socket is in mux/1 mode. The relay sends no `Challenge` or `Slate` frames on it.
 - If the relay does not offer mux/1, it answers a plain `{"type":"Ok"}` and the socket stays 3.0.0.
 - `ClientDetails` must come before any `Subscribe`. If it comes after one, the relay answers plain `Ok` and the socket stays 3.0.0.

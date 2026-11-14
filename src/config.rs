@@ -62,22 +62,13 @@ pub struct StoreCfg {
     pub vacuum_hour_utc: u8,
 }
 
-/// The Challenge sent when a socket opens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FirstChallenge {
-    /// The fixed constant of the stock relay. Needed by wallets older than 3.5.2.
-    Static,
-    /// A fresh random challenge per socket.
-    Random,
-}
-
-/// `[protocol]`: the websocket protocol.
+/// `[protocol]`: the websocket protocol. Every Challenge, the first included, is fresh and
+/// random. Wallets older than 3.5.2 sign the original relay's fixed constant instead and so
+/// cannot subscribe; a signature over a fixed value never expires and anyone who has seen it
+/// could replay it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Protocol {
-    /// The Challenge sent when a socket opens.
-    pub first_challenge: FirstChallenge,
     /// Seconds between Challenge rounds on 3.0.0 sockets.
     pub challenge_interval_s: u64,
     /// Version answered to GetVersion.
@@ -242,7 +233,6 @@ impl Default for StoreCfg {
 impl Default for Protocol {
     fn default() -> Self {
         Self {
-            first_challenge: FirstChallenge::Static,
             challenge_interval_s: 60,
             getversion: "3.1.0".into(),
             cancel: true,
