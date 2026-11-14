@@ -2,9 +2,7 @@
 //! of its mailboxes, so storing a message wakes only the pulls for that mailbox. The number of
 //! waiting pulls is capped per IP prefix and in total.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -48,9 +46,7 @@ impl PullWaiters {
     }
 
     fn shard(&self, key: &str) -> &Shard {
-        let mut h = DefaultHasher::new();
-        key.hash(&mut h);
-        &self.shards[(h.finish() as usize) % SHARDS]
+        &self.shards[super::shard_of(key, SHARDS)]
     }
 
     /// Register a pull waiting on `keys`, from IP prefix `prefix`, if it is under `per_ip` for

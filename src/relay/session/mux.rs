@@ -371,7 +371,8 @@ impl Session {
             return;
         };
         if ids.len() > MAX_ACK_IDS {
-            self.send(ws, mux_error("bad_frame", "At most 256 ids per Ack.", r#ref, None)).await;
+            let d = format!("At most {MAX_ACK_IDS} ids per Ack.");
+            self.send(ws, mux_error("bad_frame", &d, r#ref, None)).await;
             return;
         }
         let ids: Vec<String> =

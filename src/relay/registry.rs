@@ -2,9 +2,7 @@
 //! is one, else the newest 3.0.0 subscriber. Older 3.0.0 sockets stay open (they still collect on
 //! Subscribe) until there are more than `sockets_per_address`.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
@@ -64,9 +62,7 @@ impl Registry {
     }
 
     fn shard(&self, key: &str) -> &Mutex<HashMap<String, Entry>> {
-        let mut h = DefaultHasher::new();
-        key.hash(&mut h);
-        &self.shards[(h.finish() as usize) % SHARDS]
+        &self.shards[super::shard_of(key, SHARDS)]
     }
 
     /// Register a 3.0.0 subscriber as the newest. Returns sockets beyond `cap` to close.

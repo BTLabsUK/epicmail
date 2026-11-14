@@ -11,8 +11,9 @@ mod tokens;
 pub mod waiters;
 
 use std::collections::HashMap;
+use std::hash::{BuildHasher, RandomState};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use parking_lot::Mutex;
@@ -30,6 +31,13 @@ pub use registry::{Cmd, Registry, SockHandle};
 pub const OFFER_LEASE_MS: i64 = 60_000;
 /// Domain separation prefix for cancel signatures that may travel between relays.
 pub const CANCEL_SIG_PREFIX: &str = "epicbox-cancel/1:";
+
+/// The shard, of `shards`, that holds mailbox `key`. Keys are chosen by clients, so the hash is
+/// keyed with a random seed per process: nobody can pick keys that all land on one shard.
+pub(crate) fn shard_of(key: &str, shards: usize) -> usize {
+    static SEED: LazyLock<RandomState> = LazyLock::new(RandomState::new);
+    (SEED.hash_one(key) as usize) % shards
+}
 
 /// Everything the entry points share. One per process, behind an `Arc`.
 pub struct Relay {

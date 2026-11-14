@@ -439,7 +439,9 @@ impl Store for SqliteStore {
         let list = serde_json::to_string(&queues).map_err(|e| anyhow!(e))?;
         self.read(move |c| {
             let mut st = c.prepare_cached(
-                "SELECT queue, count(*) FROM messages                  WHERE queue IN (SELECT value FROM json_each(?1)) AND not_before<=?2 AND expires_at>?2                  GROUP BY queue",
+                "SELECT queue, count(*) FROM messages \
+                 WHERE queue IN (SELECT value FROM json_each(?1)) AND not_before<=?2 AND expires_at>?2 \
+                 GROUP BY queue",
             )?;
             let rows = st.query_map(params![list, now], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
             rows.collect()

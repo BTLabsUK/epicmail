@@ -132,15 +132,27 @@ fn challenge_issued(challenge: &str, now_s: i64, window_s: i64) -> Option<i64> {
     (issued <= now_s + CHALLENGE_FUTURE_S && now_s - issued <= window_s).then_some(issued)
 }
 
+/// One mailbox of a pull: its address as sent, and its key or why it was not proven.
 struct Proven {
     address: String,
     key: Result<String, &'static str>,
 }
 
-async fn prove(st: &AppState, ip: IpAddr, mb: &Value) -> Result<Proven, String> {
+/// Why a whole pull is refused while proving its mailboxes.
+enum ProveError {
+    /// A mailbox entry lacks a string field: 400.
+    Shape,
+    /// The challenge could not be recorded: 503.
+    Store,
+}
+
+/// Check one mailbox entry: address, challenge window, signature, then record the challenge as
+/// used. A mailbox that fails is reported in the answer; only a malformed entry or a store
+/// error fails the whole pull.
+async fn prove(st: &AppState, ip: IpAddr, mb: &Value) -> Result<Proven, ProveError> {
     let s = |k: &str| mb.get(k).and_then(|v| v.as_str());
     let (Some(address), Some(challenge), Some(signature)) = (s("address"), s("challenge"), s("signature")) else {
-        return Err("each mailbox needs address, challenge and signature strings".into());
+        return Err(ProveError::Shape);
     };
     let relay = &st.relay;
     let address = address.to_string();
@@ -163,7 +175,7 @@ async fn prove(st: &AppState, ip: IpAddr, mb: &Value) -> Result<Proven, String> 
         Ok(false) => Ok(Proven { address, key: Err("challenge was already used") }),
         Err(e) => {
             tracing::error!(error = %e, "store use_challenge failed");
-            Err("internal".into())
+            Err(ProveError::Store)
         }
     }
 }
@@ -227,8 +239,11 @@ pub(super) async fn pull(
     for mb in list {
         match prove(&st, ip, mb).await {
             Ok(p) => proven.push(p),
-            Err(e) if e == "internal" => return err(R, StatusCode::SERVICE_UNAVAILABLE, "Internal error; try again."),
-            Err(e) => return err(R, StatusCode::BAD_REQUEST, format!("{shape}: {e}")),
+            Err(ProveError::Store) => return err(R, StatusCode::SERVICE_UNAVAILABLE, "Internal error; try again."),
+            Err(ProveError::Shape) => {
+                let e = "each mailbox needs address, challenge and signature strings";
+                return err(R, StatusCode::BAD_REQUEST, format!("{shape}: {e}"));
+            }
         }
     }
     let keys: HashSet<String> = proven.iter().filter_map(|p| p.key.clone().ok()).collect();
