@@ -36,6 +36,8 @@ pub struct Buckets {
 struct Bucket {
     tokens: f64,
     at: i64,
+    /// The multiplier of the last `take`, so `prune` knows this bucket's real capacity.
+    mult: f64,
 }
 
 impl Buckets {
@@ -48,6 +50,7 @@ impl Buckets {
         let cap = self.burst * mult;
         b.tokens = (b.tokens + (now - b.at).max(0) as f64 * self.per_ms * mult).min(cap);
         b.at = now;
+        b.mult = mult;
     }
 
     /// Take `cost` tokens from `key`; `mult` scales both the rate and the burst. Err holds the
@@ -55,7 +58,7 @@ impl Buckets {
     pub fn take(&self, key: &str, cost: f64, mult: f64) -> Result<(), u64> {
         let now = now_ms();
         let mut map = self.map.lock();
-        let b = map.entry(key.to_string()).or_insert(Bucket { tokens: self.burst * mult, at: now });
+        let b = map.entry(key.to_string()).or_insert(Bucket { tokens: self.burst * mult, at: now, mult });
         self.refill(b, now, mult);
         if b.tokens >= cost {
             b.tokens -= cost;
@@ -81,21 +84,17 @@ impl Buckets {
         }
     }
 
-    /// Drop buckets that have refilled; they hold no information.
+    /// Drop buckets that have refilled; they hold no information. A bucket of a shared source
+    /// is full only at `burst * mult`, and dropping it earlier would hand out a fresh burst.
     pub fn prune(&self) {
         let now = now_ms();
-        let per_ms = self.per_ms;
-        let burst = self.burst;
-        self.map.lock().retain(|_, b| b.tokens + (now - b.at) as f64 * per_ms < burst);
+        let (per_ms, burst) = (self.per_ms, self.burst);
+        self.map.lock().retain(|_, b| b.tokens + (now - b.at).max(0) as f64 * per_ms * b.mult < burst * b.mult);
     }
 
-    /// Keys with a bucket (for the gauge).
-    pub fn len(&self) -> usize {
+    #[cfg(test)]
+    fn len(&self) -> usize {
         self.map.lock().len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 }
 
@@ -280,6 +279,21 @@ mod tests {
         let wait = b.take("k", 1.0, 1.0).unwrap_err();
         assert!((1..=2).contains(&wait));
         assert!(b.take("other", 1.0, 1.0).is_ok());
+    }
+
+    #[test]
+    fn prune_keeps_a_shared_bucket_until_it_is_full() {
+        // 1 token a minute, burst 2, multiplier 16: full at 32 tokens.
+        let b = Buckets::per_minute(1.0, 2.0);
+        for _ in 0..20 {
+            b.take("shared", 1.0, 16.0).unwrap();
+        }
+        b.take("plain", 1.0, 1.0).unwrap();
+        b.prune();
+        // 12 tokens left of 32: more than one burst, still not full, so it must stay.
+        assert_eq!(b.len(), 2);
+        b.take("plain", 1.0, 1.0).unwrap();
+        assert!(b.take("shared", 13.0, 16.0).is_err(), "pruning gave the shared source a fresh burst");
     }
 
     #[test]
