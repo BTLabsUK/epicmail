@@ -147,15 +147,20 @@ impl Session {
         Flow::Continue
     }
 
-    /// Per-socket Attach/Resume budget.
-    fn attach_budget(&mut self) -> bool {
+    /// Attach/Resume budget: `mux_attach_frames_per_min` per socket, and eight times that per
+    /// IP prefix, so opening more sockets does not multiply it. Err holds seconds to wait.
+    fn attach_budget(&mut self) -> Result<(), u64> {
         let cap = self.relay.cfg.limits.mux_attach_frames_per_min;
-        let Some(m) = self.mux.as_mut() else { return false };
+        let Some(m) = self.mux.as_mut() else { return Err(60) };
         if m.attach_window.0.elapsed() >= Duration::from_secs(60) {
             m.attach_window = (Instant::now(), 0);
         }
         m.attach_window.1 += 1;
-        m.attach_window.1 <= cap
+        if m.attach_window.1 > cap {
+            let left = Duration::from_secs(60).saturating_sub(m.attach_window.0.elapsed());
+            return Err(left.as_secs().max(1));
+        }
+        self.relay.limiter.attach_ip(self.ip)
     }
 
     /// Take a mailbox on this socket, replacing any other holder. Returns the number of
@@ -188,8 +193,9 @@ impl Session {
             self.send(ws, mux_error("too_many_mailboxes", "Too many mailboxes in one Attach.", r#ref, None)).await;
             return;
         }
-        if !self.attach_budget() {
-            self.send(ws, mux_error("rate_limited", "Too many Attach frames.", r#ref, Some(60))).await;
+        if let Err(wait) = self.attach_budget() {
+            metrics::counter!("epicbox_limit_refusals_total", "limit" => "mux_attach").increment(1);
+            self.send(ws, mux_error("rate_limited", "Too many Attach frames.", r#ref, Some(wait))).await;
             return;
         }
         if let Some(s) = r.limiter.sig_blocked(self.ip) {
@@ -228,8 +234,9 @@ impl Session {
             self.send(ws, mux_error("bad_frame", "Resume needs a token.", r#ref, None)).await;
             return;
         };
-        if !self.attach_budget() {
-            self.send(ws, mux_error("rate_limited", "Too many Resume frames.", r#ref, Some(60))).await;
+        if let Err(wait) = self.attach_budget() {
+            metrics::counter!("epicbox_limit_refusals_total", "limit" => "mux_attach").increment(1);
+            self.send(ws, mux_error("rate_limited", "Too many Resume frames.", r#ref, Some(wait))).await;
             return;
         }
         let Some(set) = self.relay.take_token(token) else {

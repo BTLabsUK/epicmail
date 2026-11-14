@@ -205,10 +205,11 @@ The info document (`/.well-known/epicbox.json`, `features.mux/1`) publishes all 
 | ids per Ack | 256 |
 | hold | 1 to 3600 s |
 | Attach and Resume frames per socket | 30 per minute |
+| Attach and Resume frames per IP prefix | 8 × the per-socket limit (240 per minute) |
 | failed signatures per IP prefix | 120 per minute, then `rate_limited` |
 | mux/1 sockets per IP prefix | 64 |
 
-All but "ids per Ack" and "hold" are operator settings in `[limits]`.
+All but "ids per Ack" and "hold" are operator settings in `[limits]`; the per-prefix Attach budget follows the per-socket one and is not published separately.
 
 IP prefixes are /24 for IPv4 and /48 for IPv6. Every user of one Tor exit, and every client of an onion service (all arrive from loopback), shares one prefix. Operators list such sources in `limits.shared_sources` (CIDRs); per-prefix limits are multiplied by `limits.shared_multiplier` (default 16) for them. Per-address and per-socket limits are unchanged.
 

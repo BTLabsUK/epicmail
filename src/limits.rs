@@ -173,6 +173,12 @@ impl Limiter {
         self.failed_sig_ip.blocked(&p, m)
     }
 
+    /// One mux/1 Attach or Resume frame against the prefix's budget.
+    pub fn attach_ip(&self, ip: IpAddr) -> Result<(), u64> {
+        let (p, m) = self.prefix(ip);
+        self.attach_ip.take(&p, 1.0, m)
+    }
+
     /// Count a failed signature against the prefix.
     pub fn sig_failed(&self, ip: IpAddr) {
         let (p, m) = self.prefix(ip);

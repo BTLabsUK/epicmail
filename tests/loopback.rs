@@ -550,3 +550,38 @@ async fn cancel_forged_refused_real_cancel_works() {
     send(&mut a, post).await;
     assert_eq!(recv(&mut a).await["type"], "TransactionCancelled");
 }
+
+/// Open a socket and switch it to mux/1; returns the socket and its challenge.
+async fn mux_socket(n: &Node) -> (Ws, String) {
+    let mut m = connect(n).await;
+    recv_type(&mut m, "Challenge").await;
+    send(&mut m, json!({"type":"ClientDetails","wallet_version":"t","wallet_mode":"listener","protocol_version":"3.0.0","ext":["mux/1"]})).await;
+    let ok = recv(&mut m).await;
+    let ch = ok["challenge"].as_str().expect("mux/1 challenge").to_string();
+    (m, ch)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mux_attach_budget_is_shared_by_a_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    // One Attach per socket per minute, so eight per prefix.
+    let n = start(dir.path(), "relay.test", |c| c.limits.mux_attach_frames_per_min = 1).await;
+    let mut socks = Vec::new();
+    for i in 0..9 {
+        let k = Key::new();
+        let (mut m, ch) = mux_socket(&n).await;
+        send(&mut m, json!({"type":"Attach","ref":"a","mailboxes":[{"address":k.pk,"signature":k.sign(&ch)}]})).await;
+        let r = recv(&mut m).await;
+        if i < 8 {
+            assert_eq!(r["type"], "Attached", "socket {i}: {r}");
+            // The second Attach on one socket is over the per-socket budget.
+            send(&mut m, json!({"type":"Attach","ref":"b","mailboxes":[]})).await;
+            let e = recv(&mut m).await;
+            assert_eq!(e["code"], "rate_limited", "socket {i}: {e}");
+        } else {
+            assert_eq!(r["code"], "rate_limited", "socket {i}: {r}");
+            assert!(r["retry_after"].as_u64().unwrap() >= 1, "{r}");
+        }
+        socks.push(m);
+    }
+}

@@ -84,7 +84,7 @@ Per-IP limits group clients by prefix (`ipv4_prefix` 24, `ipv6_prefix` 48). Sour
 | `mux_mailboxes_per_socket` | 256 | One mux/1 socket attaching everything |
 | `mux_attach_per_frame` | 64 | Large attach frames |
 | `mux_inflight` | 32 | Mail pushed on one mux/1 socket and not yet acked or held |
-| `mux_attach_frames_per_min` | 30 | Attach/detach churn |
+| `mux_attach_frames_per_min` | 30 | Attach/resume churn; a prefix gets 8 times this across its sockets |
 | `ipv4_prefix` / `ipv6_prefix` | 24 / 48 | Sets how clients are grouped for per-IP limits |
 | `max_sockets` | 150000 | Total file descriptors and memory |
 | `shared_sources` | empty | Tor exits and the onion loopback being limited as one client |
