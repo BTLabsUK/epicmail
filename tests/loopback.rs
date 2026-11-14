@@ -636,3 +636,20 @@ async fn https_pull_has_a_budget_per_prefix() {
     assert_eq!(st, 429, "{v}");
     assert!(head.to_ascii_lowercase().contains("retry-after:"), "{head}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ready_and_status_answer_without_store_work_per_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    for _ in 0..3 {
+        let (st, v) = http(&n, "GET", "/ready", None).await;
+        assert_eq!((st, v), (200, json!({"ready":true})));
+    }
+    // Only the first probe in a 5 s window wrote to the store.
+    assert!(n.relay.last_ready_probe.lock().is_some());
+    let (st, v) = http(&n, "GET", "/status.json", None).await;
+    assert_eq!(st, 200, "{v}");
+    // No housekeeping runs in this rig, so no store totals have been gathered yet.
+    assert!(v["store"].is_null(), "{v}");
+    assert_eq!(v["identity"], "relay.test:443");
+}

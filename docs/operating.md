@@ -98,9 +98,9 @@ Per-IP limits group clients by prefix (`ipv4_prefix` 24, `ipv6_prefix` 48). Sour
 ## 4. Reading the health endpoints
 
 - `/health`: the process is up and answering. Use it for liveness. It does not look at the store.
-- `/ready`: the store is writable. Use it for load balancer and orchestrator checks. A failure means the disk is full or read-only, or the DB file is damaged. During a SIGTERM drain it may also report not ready.
+- `/ready`: the store is writable. Use it for load balancer and orchestrator checks. It writes to the store at most once every 5 s and answers probes in between from that result. A failure means the disk is full or read-only, or the DB file is damaged. During a SIGTERM drain it may also report not ready.
 - `/metrics`: Prometheus text, metric names start with `epicbox_`. Look first at open sockets (against `max_sockets`), posts accepted and rejected (rejects by limit name show which limit fires), write queue depth and commit latency, and federation deliveries and failures. When `server.metrics_listen` is unset, it is served on `server.listen` to loopback peers whose request carries no `X-Forwarded-For`, so requests that came through the reverse proxy get 404. Set `server.metrics_listen` to serve it on a separate address instead, for example a private one a scraper on another host can reach.
-- `/status.json`: a small JSON summary for people and status pages: name, version, sockets, queue totals, uptime. It is public; it holds no per-address data.
+- `/status.json`: a small JSON summary for people and status pages: name, version, sockets, queue totals, uptime. It is public; it holds no per-address data. Queue totals are refreshed every 15 s, not per request.
 - `/.well-known/epicbox.json`: the info document wallets and peers read: software and version, `server.name`, identity (`domain:port`), protocol versions, whether federation is on, and the mux/1 and HTTPS features with their limits.
 
 ## 5. Backup and restore

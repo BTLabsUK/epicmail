@@ -54,6 +54,10 @@ pub struct Relay {
     pub started: Instant,
     /// The result of the last store write check (`/ready` and the housekeeping gauge).
     pub store_ok: AtomicBool,
+    /// When `/ready` last wrote to the store. Probes closer together reuse `store_ok`.
+    pub last_ready_probe: Mutex<Option<Instant>>,
+    /// Store totals from the last housekeeping round, served by `/status.json`.
+    pub last_stats: Mutex<Option<crate::store::Stats>>,
 }
 
 /// A PostSlate, from any entry point.
@@ -161,6 +165,8 @@ impl Relay {
             next_socket: AtomicU64::new(1),
             started: Instant::now(),
             store_ok: AtomicBool::new(true),
+            last_ready_probe: Mutex::new(None),
+            last_stats: Mutex::new(None),
         })
     }
 

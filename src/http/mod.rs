@@ -7,6 +7,7 @@ mod v1;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
@@ -21,7 +22,6 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use serde_json::{json, Value};
 
 use crate::address::parse_address;
-use crate::clock::now_ms;
 use crate::limits::SocketRefusal;
 use crate::relay::{session, Relay};
 
@@ -160,10 +160,30 @@ async fn health() -> &'static str {
     "ok\n"
 }
 
+/// `/ready` writes to the store at most this often; probes in between get the last result.
+const READY_PROBE_EVERY: Duration = Duration::from_secs(5);
+
 async fn ready(State(st): State<AppState>) -> Response {
     let r = &st.relay;
     if r.draining.load(Ordering::Relaxed) {
         return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"ready":false,"reason":"draining"}))).into_response();
+    }
+    // /ready is reachable through the proxy, so a flood of probes must not become a flood of
+    // commits.
+    let probe = {
+        let mut last = r.last_ready_probe.lock();
+        let due = last.is_none_or(|t| t.elapsed() >= READY_PROBE_EVERY);
+        if due {
+            *last = Some(Instant::now());
+        }
+        due
+    };
+    if !probe {
+        return if r.store_ok.load(Ordering::Relaxed) {
+            Json(json!({"ready":true})).into_response()
+        } else {
+            (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"ready":false,"reason":"store"}))).into_response()
+        };
     }
     match r.store.check_writable().await {
         Ok(()) => {
@@ -192,11 +212,12 @@ async fn metrics_main(
     }
 }
 
-/// Aggregate counts only: no addresses, keys or IPs.
+/// Aggregate counts only: no addresses, keys or IPs. Store totals come from the last
+/// housekeeping round (every 15 s), so a public request never scans the tables.
 async fn status(State(st): State<AppState>) -> Response {
     let r = &st.relay;
     let (mailboxes, mux, classic) = r.registry.counts();
-    let stats = r.store.stats(now_ms()).await.ok();
+    let stats = r.last_stats.lock().clone();
     Json(json!({
         "name": r.cfg.server.name,
         "identity": format!("{}:{}", r.cfg.server.domain, r.cfg.server.port),
