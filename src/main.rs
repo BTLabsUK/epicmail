@@ -203,7 +203,16 @@ async fn housekeeping(relay: Arc<Relay>) {
             match relay.store.sweep(now, relay.retention_ms()).await {
                 Ok(s) => {
                     relay.store_ok.store(true, Ordering::Relaxed);
-                    tracing::info!(?s, "expiry sweep");
+                    let removed = s.messages_expired
+                        + s.forwards_expired
+                        + s.tombstones_expired
+                        + s.challenges_expired
+                        + s.txlinks_expired;
+                    if removed > 0 {
+                        tracing::info!(?s, "expiry sweep");
+                    } else {
+                        tracing::debug!("expiry sweep: nothing expired");
+                    }
                 }
                 Err(e) => {
                     relay.store_ok.store(false, Ordering::Relaxed);
