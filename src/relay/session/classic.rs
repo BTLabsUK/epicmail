@@ -127,6 +127,13 @@ impl Session {
             metrics::counter!("epicbox_subscribe_total", "result" => "bad_signature").increment(1);
             if let Some(k) = self.key.take() {
                 r.registry.unsubscribe_classic(&k, self.id);
+                // The message in flight was that key's: hand it back, or it blocks the next
+                // key subscribed on this socket and waits out its lease for the owner.
+                if let Some(i) = self.inflight.take() {
+                    let _ = r.store.release(vec![i.id]).await;
+                    r.registry.wake(&k);
+                }
+                self.attempts = 0;
             }
             self.send(ws, invalid).await;
             return Flow::Continue;

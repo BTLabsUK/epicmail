@@ -1055,3 +1055,32 @@ async fn a_stranger_cannot_join_a_transaction_through_a_forward() {
     assert_eq!(recv(&mut m).await, json!({"type":"Ok"}));
     assert_eq!(waiting(&n).await, 1, "Alice's slate is still there");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_subscribe_hands_back_the_message_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob, carol) = (Key::new(), Key::new(), Key::new());
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    for to in [&bob, &carol] {
+        send(&mut a, post_frame(&alice, "relay.test", to, "relay.test", 1)).await;
+        assert_eq!(recv(&mut a).await["type"], "Ok");
+    }
+    // Bob's slate goes out on this socket and is not Made yet.
+    let mut s = connect(&n).await;
+    let ch = recv_type(&mut s, "Challenge").await["str"].as_str().unwrap().to_string();
+    send(&mut s, json!({"type":"Subscribe","address":bob.pk,"ver":"3.0.0","signature":bob.sign(&ch)})).await;
+    assert_eq!(recv_type(&mut s, "Slate").await["from"], alice.at("relay.test"));
+    // A Subscribe with a bad signature drops Bob from the socket...
+    send(&mut s, json!({"type":"Subscribe","address":bob.pk,"ver":"3.0.0","signature":carol.sign(&ch)})).await;
+    assert_eq!(recv(&mut s).await["kind"], "InvalidSignature");
+    // ...and Carol, subscribed next on the same socket, gets her mail at once.
+    send(&mut s, json!({"type":"Subscribe","address":carol.pk,"ver":"3.0.0","signature":carol.sign(&ch)})).await;
+    let v = recv_type(&mut s, "Slate").await;
+    assert_eq!(v["from"], alice.at("relay.test"), "{v}");
+    // Bob's slate is offerable again for Bob's next socket.
+    let mut b = connect(&n).await;
+    subscribe(&mut b, &bob, "3.0.0").await;
+    assert_eq!(recv_type(&mut b, "Slate").await["from"], alice.at("relay.test"));
+}
