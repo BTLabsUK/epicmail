@@ -23,7 +23,6 @@ All of it shares one `Relay` value (`src/relay/mod.rs`).
 | `forward.rs` | Delivery to other relays |
 | `limits.rs` | Rate limits and socket counts per IP prefix |
 | `address.rs`, `sig.rs` | Address grammar and signature checks, both matching the stock relay |
-| `bus.rs` | Events published after a commit |
 | `metrics.rs` | Prometheus exporter and metric descriptions |
 | `migrate.rs` | JSON Lines import and export |
 | `clock.rs`, `ids.rs` | Wall-clock milliseconds, random ids and id checks |
@@ -39,8 +38,8 @@ All of it shares one `Relay` value (`src/relay/mod.rs`).
    the message goes to `Store::put_message`. The store enforces `queue_cap` and
    `per_sender_cap`, keeps one copy of a slate posted twice, and links the message to its 3.1.0
    transaction. The call returns after the commit; only then does the wallet get `Ok`.
-3. **Wake.** After the commit the relay wakes the mailbox's holder through the registry and
-   publishes `MailStored` on the bus. The registry pushes to one socket per mailbox: the mux/1
+3. **Wake.** After the commit the relay wakes the mailbox's holder through the registry. The
+   registry pushes to one socket per mailbox: the mux/1
    holder if there is one, else the newest classic subscriber. `/v1` long polls waiting on that
    mailbox are woken through `relay/waiters.rs`, which wakes only the pulls for that mailbox;
    waiting pulls are capped per IP prefix and in total (`http_api.max_waiting_per_ip`,
@@ -153,6 +152,7 @@ built, the safe shape is narrow and off by default:
   variables.
 - Logs hold no mailbox, URL or host; metrics are totals.
 
-The core already has what this needs: `Event::MailStored` on the bus after each commit, and the
-store can answer which mailboxes have waiting mail. Phones need a different path (Web Push), which
+The core already has what this needs: `post_slate` wakes listeners right after each commit
+(`relay/post.rs`), which is where a notifier would be called, and the store can answer which
+mailboxes have waiting mail. Phones need a different path (Web Push), which
 would share the outbound client and the address checks.

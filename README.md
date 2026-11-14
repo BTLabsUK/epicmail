@@ -318,7 +318,7 @@ Some guidance:
 | `src/forward.rs` | Forwarding to other relays |
 | `src/limits.rs` | Rate limits and socket counts |
 | `src/address.rs`, `src/sig.rs` | Epicbox addresses and signatures |
-| `src/bus.rs`, `src/metrics.rs` | Post-commit events, Prometheus metrics |
+| `src/metrics.rs` | Prometheus metric descriptions |
 | `src/migrate.rs` | JSON Lines import and export |
 | `src/clock.rs`, `src/ids.rs` | Wall-clock milliseconds, random ids and id checks |
 | `examples/loadgen.rs` | Load generator used for docs/loadtest.md |

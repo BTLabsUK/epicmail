@@ -4,7 +4,6 @@
 //! `docs/architecture.md` describes how a message moves through the modules.
 
 pub mod address;
-pub mod bus;
 pub mod clock;
 pub mod config;
 pub mod forward;

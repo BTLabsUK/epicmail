@@ -12,7 +12,6 @@ use serde_json::{json, Value};
 
 use super::{CancelOutcome, Cmd, Refusal, Relay, CANCEL_SIG_PREFIX};
 use crate::address::parse_address;
-use crate::bus::Event;
 use crate::clock::now_ms;
 use crate::ids::{is_txid, rand_id};
 use crate::sig;
@@ -120,7 +119,7 @@ impl Relay {
                 }
             }
         }
-        self.bus.publish(Event::TxCancelled { txid: txid.clone(), queues });
+        tracing::debug!(mailboxes = queues.len(), "transaction cancelled");
         CancelOutcome::Cancelled(txid)
     }
 }

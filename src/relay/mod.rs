@@ -19,7 +19,6 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::{watch, Notify};
 
-use crate::bus::Bus;
 use crate::clock::now_ms;
 use crate::config::Config;
 use crate::limits::Limiter;
@@ -38,8 +37,6 @@ pub struct Relay {
     pub store: Arc<dyn Store>,
     /// Which socket gets pushes for each mailbox.
     pub registry: Registry,
-    /// Events published after a commit.
-    pub bus: Bus,
     /// `/v1/pull` long polls waiting for mail, by mailbox.
     pub pull_waiters: waiters::PullWaiters,
     pub limiter: Arc<Limiter>,
@@ -167,7 +164,6 @@ impl Relay {
             cfg,
             store,
             registry: Registry::new(),
-            bus: Bus::new(),
             pull_waiters: waiters::PullWaiters::new(),
             tokens: Mutex::new(tokens),
             forward_notify: Notify::new(),

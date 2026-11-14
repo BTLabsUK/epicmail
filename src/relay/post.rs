@@ -8,7 +8,6 @@ use serde_json::{json, Value};
 
 use super::{PostOutcome, PostReq, Refusal, Relay};
 use crate::address::{parse_address, EpicboxAddress};
-use crate::bus::Event;
 use crate::clock::now_ms;
 use crate::ids::{is_txid, rand_id};
 use crate::sig;
@@ -172,7 +171,6 @@ impl Relay {
             Ok(PutOutcome::Stored { msgid }) => {
                 self.registry.wake(&dest_key);
                 self.pull_waiters.wake(&dest_key);
-                self.bus.publish(Event::MailStored { queue: dest_key });
                 PostOutcome::Stored { msgid, txid }
             }
             Ok(PutOutcome::Duplicate { msgid }) => {
