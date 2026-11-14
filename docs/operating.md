@@ -96,6 +96,14 @@ Per-IP limits group clients by prefix (`ipv4_prefix` 24, `ipv6_prefix` 48). Sour
 
 `queue_cap` caps one mailbox, but anyone can make new addresses, so per-mailbox caps do not bound the database. What does: `bytes_per_min_per_ip` per prefix (16 MiB a minute is about 160 GB over 7 days of retention for one /24) and, for the whole relay, `store.max_bytes` (default 2 GiB of live data). Over `store.max_bytes` every post is refused with "Relay storage is full; try again later." (`/v1/post`: 429) until wallets collect mail or it expires; subscribing, collecting and acking keep working. Set it well below the free disk space, and watch `epicbox_store_used_bytes` and `epicbox_limit_refusals_total{limit="store_bytes"}`.
 
+The relay's limits group clients by prefix and act once a request has reached it. In front of
+it, `packaging/nginx.example.conf` adds per-address limits on new websocket connections, open
+connections, the public GET routes (which the relay does not limit) and `/v1` requests. On a
+small host they matter: in a load test on 2 vCPUs, a flood of `GET /status.json` used 55% of a
+core in the relay and 75% in nginx without them, and under 3% in the relay with them. A flood
+of new TLS connections still costs nginx the handshakes; only a firewall rate limit on new
+connections avoids that.
+
 ## 4. Reading the health endpoints
 
 - `/health`: the process is up and answering. Use it for liveness. It does not look at the store.
