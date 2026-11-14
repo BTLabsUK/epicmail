@@ -1,5 +1,10 @@
 #!/bin/sh
-# Build the static x86_64 musl binary. Output: target/x86_64-unknown-linux-musl/release/epicmail
+# Build a static x86_64 Linux binary of epicmail against musl, and check that it is static.
+#
+# Usage: tools/build-static.sh   (from any directory)
+# Needs: rustup (adds the x86_64-unknown-linux-musl target if missing) and musl-gcc for the
+# bundled SQLite (Debian/Ubuntu: apt install musl-tools).
+# Output: target/x86_64-unknown-linux-musl/release/epicmail
 set -eu
 cd "$(dirname "$0")/.."
 T=x86_64-unknown-linux-musl
