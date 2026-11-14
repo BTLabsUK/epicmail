@@ -124,7 +124,7 @@ The store is single-writer SQLite. One writer thread collects pending writes and
 
 Stay on SQLite until one of these holds:
 
-1. Sustained write rate near the single-writer ceiling. The measured ceiling is in docs/loadtest.md (see docs/loadtest.md). Act when the sustained rate stays above about half of it, not on peaks.
+1. Sustained write rate near the single-writer ceiling: about 2,000 messages per second end to end on an 8-core desktop with NVMe (docs/loadtest.md). Measure the production host before relying on it. Act when the sustained rate stays above about half of it, not on peaks.
 2. The database no longer fits in the page cache. Reads then hit disk and commit latency rises. Watch commit latency in `/metrics` against RAM.
 3. More than one relay process must share one store (active-active, or a standby that takes over without a copy). SQLite cannot be shared safely by processes on different hosts.
 

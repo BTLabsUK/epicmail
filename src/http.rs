@@ -153,10 +153,16 @@ async fn fallback(
         }
     };
     let max = relay.cfg.limits.max_frame_bytes;
-    ws.max_message_size(max)
+    // Small socket buffers: the 128 KiB defaults cost about 136 KiB of RSS per idle socket.
+    // Reads grow past 8 KiB as a large frame arrives; writes go out at each flush.
+    ws.read_buffer_size(WS_READ_BUFFER)
+        .write_buffer_size(0)
+        .max_message_size(max)
         .max_frame_size(max)
         .on_upgrade(move |socket| session::run(relay, socket, ip, permit))
 }
+
+const WS_READ_BUFFER: usize = 8 * 1024;
 
 async fn health() -> &'static str {
     "ok\n"

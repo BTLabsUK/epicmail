@@ -1,6 +1,6 @@
 # mux/1: one socket, many mailboxes
 
-Status: **draft 2** (wallet-side comments on draft 1 folded in). Wire changes need agreement from the relay and the LEPIC client side.
+Status: **agreed, frozen** (draft 2, 2026-11-14). The relay (this repo) and the LEPIC client (`lepic-epicbox`, feat/epicbox-mux) both implement it; the client passed a live run against this relay. Wire changes from here need a new version (mux/2).
 
 mux/1 is an optional extension to the Epicbox 3.0.0 websocket protocol. One socket carries any number of proven mailboxes. The relay pushes each message as soon as it is stored. The client acknowledges messages without signatures. A token lets a client resume a session after a reconnect without signing again.
 

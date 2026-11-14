@@ -415,3 +415,52 @@ async fn older_sockets_beyond_cap_are_closed() {
     }
     assert_eq!(recv(&mut socks[0]).await, json!({"closed": 4001}));
 }
+
+/// 3.1.0 cancel: a bare txid signature (which every receiver of the slate holds) cannot cancel from
+/// an unauthenticated socket, a non-participant cannot cancel, and the sender's domain-separated
+/// signature cancels, removes the slate and tells the receiver.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_forged_refused_real_cancel_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob, mallory) = (Key::new(), Key::new(), Key::new());
+    let txid = "0123456789abcdef0123456789abcdef";
+
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    let mut post = post_frame(&alice, "relay.test", &bob, "relay.test", 1);
+    post["ver"] = json!("3.1.0");
+    post["epicboxtxid"] = json!(txid);
+    post["epicboxtxidsig"] = json!(alice.sign(txid));
+    send(&mut a, post.clone()).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    assert_eq!(waiting(&n).await, 1);
+
+    // Replaying the sender's bare txid signature from a socket that proved no key.
+    let mut m = connect(&n).await;
+    recv_type(&mut m, "Challenge").await;
+    send(&mut m, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":txid,"signature":alice.sign(txid)})).await;
+    assert_eq!(recv(&mut m).await["kind"], "InvalidSignature");
+    assert_eq!(waiting(&n).await, 1);
+
+    // A valid signature from someone who is not a participant changes nothing.
+    let msig = mallory.sign(&format!("{}{txid}", epicbox_relay::relay::CANCEL_SIG_PREFIX));
+    send(&mut m, json!({"type":"CancelTx","address":mallory.pk,"epicboxtxid":txid,"signature":msig})).await;
+    assert_eq!(recv(&mut m).await, json!({"type":"Ok"}));
+    assert_eq!(waiting(&n).await, 1);
+
+    // The sender cancels with the domain-separated signature.
+    let asig = alice.sign(&format!("{}{txid}", epicbox_relay::relay::CANCEL_SIG_PREFIX));
+    send(&mut a, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":txid,"signature":asig})).await;
+    assert_eq!(recv(&mut a).await, json!({"type":"TransactionCancelled","epicboxtxid":txid}));
+    assert_eq!(waiting(&n).await, 0);
+
+    // The receiver on 3.1.0 hears about it instead of getting the slate.
+    let mut b = connect(&n).await;
+    subscribe(&mut b, &bob, "3.1.0").await;
+    assert_eq!(recv_type(&mut b, "TransactionCancelled").await["epicboxtxid"], txid);
+
+    // Posting the same transaction again is refused.
+    send(&mut a, post).await;
+    assert_eq!(recv(&mut a).await["type"], "TransactionCancelled");
+}
