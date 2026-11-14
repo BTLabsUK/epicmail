@@ -4,8 +4,9 @@
 //!   sigdiff-gen gen    <out.jsonl>               generated cases (fixed seed, throwaway keys)
 //!   sigdiff-gen corpus <slates.sql> <out.jsonl>  cases derived from a pg_dump `slates` COPY block
 //!
-//! The oracle is `epicboxlib verifysignature`, path from $ORACLE
-//! (default ~/epic-build/epicbox-cache/epicboxlib). Only `true` on stdout counts as valid.
+//! The oracle is `epicboxlib verifysignature`: the path comes from `$ORACLE`, default
+//! `epicboxlib` on `PATH`. Only `true` on stdout counts as valid.
+//! See tools/sigdiff/README.md for the whole procedure.
 
 use epicmail::sig::{self, encode_public_key, VERSION_FLOONET, VERSION_MAINNET};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -23,9 +24,7 @@ const N: [u8; 32] = [
 type Case = (String, String, String); // pk, msg, sig
 
 fn oracle_path() -> String {
-    std::env::var("ORACLE").unwrap_or_else(|_| {
-        format!("{}/epic-build/epicbox-cache/epicboxlib", std::env::var("HOME").unwrap())
-    })
+    std::env::var("ORACLE").unwrap_or_else(|_| "epicboxlib".to_string())
 }
 
 fn run_oracle(c: &Case) -> bool {
