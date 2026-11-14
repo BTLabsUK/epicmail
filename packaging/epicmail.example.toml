@@ -32,7 +32,7 @@ forward_bare_cancel = false      # forward CancelTx whose signature covers only 
 [limits]
 max_frame_bytes = 1048576        # largest websocket frame (1 MiB)
 max_str_bytes = 131072           # largest string field (128 KiB); not above max_frame_bytes
-posts_per_min_per_address = 60   # PostSlate rate per destination address
+posts_per_min_per_address = 60   # PostSlate rate per sender address
 posts_burst_per_address = 120    # burst allowance for the above
 posts_per_min_per_ip = 240       # PostSlate rate per IP prefix
 posts_burst_per_ip = 480         # burst allowance for the above

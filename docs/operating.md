@@ -70,7 +70,7 @@ Per-IP limits group clients by prefix (`ipv4_prefix` 24, `ipv6_prefix` 48). Sour
 |---|---|---|
 | `max_frame_bytes` | 1 MiB | Memory use from one huge frame |
 | `max_str_bytes` | 128 KiB | Oversized slate or string fields |
-| `posts_per_min_per_address` | 60 | One destination being flooded |
+| `posts_per_min_per_address` | 60 | One sender flooding |
 | `posts_burst_per_address` | 120 | Same, burst size |
 | `posts_per_min_per_ip` | 240 | One client flooding many destinations |
 | `posts_burst_per_ip` | 480 | Same, burst size |

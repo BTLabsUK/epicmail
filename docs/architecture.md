@@ -51,9 +51,10 @@ All of it shares one `Relay` value (`src/relay/mod.rs`).
    Wallets older than 2.0.0 send no `Made`, so their messages are deleted on delivery. A message
    that is never collected expires after `store.retention_days`.
 
-A message offered three times without `Made` stays in the store, but its lease is released and
-the store orders it after the other waiting messages, so one slate a wallet cannot handle does
-not block the rest of the mailbox.
+On a classic socket, each Subscribe that arrives while a message is in flight without `Made`
+counts. On the Subscribe after three such, the message stays in the store, but its lease is
+released and the store orders it after the other waiting messages, so one slate a wallet cannot
+handle does not block the rest of the mailbox. mux/1 and `/v1` have no such count.
 
 ## Federation
 

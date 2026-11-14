@@ -34,10 +34,10 @@ A client that does not ask for mux/1 sees plain 3.0.0. A relay that does not off
 | `token_unknown` | InvalidChallenge | resume token not known, used already, or expired |
 | `unknown_id` | InvalidRequest | Hold names an id that is not in flight on this socket |
 | `rate_limited` | InvalidRequest | a limit was hit; `retry_after` (seconds) is set |
-
-A mux/1 frame type sent on a socket that did not negotiate mux/1 is ignored, as the classic protocol ignores unknown types. A frame larger than the frame limit closes the socket.
 | `post_refused` | InvalidRequest | PostSlate refused; `description` says why |
 | `internal` | UnknownError | store error; the frame had no effect and can be retried |
+
+A mux/1 frame type sent on a socket that did not negotiate mux/1 is ignored, as the classic protocol ignores unknown types. A frame larger than the frame limit closes the socket.
 
 ## 2. Negotiation
 
@@ -195,7 +195,7 @@ On SIGTERM the relay sends `Detached` with `reason: "shutdown"` for every attach
 
 ## 5. Limits
 
-The relay publishes these limits in the `Ok` and in its info document (`/.well-known/epicbox.json`, `features.mux/1`):
+The info document (`/.well-known/epicbox.json`, `features.mux/1`) publishes all eight limits below. The `Ok` carries four of them: `attach_per_frame`, `mailboxes_per_socket`, `inflight_per_socket` and `hold_max_s`.
 
 | limit | default |
 |---|---|
@@ -214,7 +214,7 @@ IP prefixes are /24 for IPv4 and /48 for IPv6. Every user of one Tor exit, and e
 
 ## 6. Privacy
 
-- The relay operator sees which mailboxes share a socket, and so belong to one wallet. 3.0.0 leaks the same by timing and IP, but less directly. Clients that care can split mailboxes over several sockets, for example one per mailbox group when Tor is on.
+- The relay operator sees which mailboxes share a socket, and so belong to one wallet. With 3.0.0 the same can be seen from timing and IP, but less directly. Clients that care can split mailboxes over several sockets, for example one per mailbox group when Tor is on.
 - A stolen token lets its holder receive and ack the session's mail for at most 24 h, or until the owner resumes or attaches again, which spends it. Payloads stay encrypted to the recipient key. The token travels only inside TLS.
 - The relay keeps no token, session or mailbox set on disk. Logs carry no mailbox keys, tokens or payloads.
 - Push timing tells an observer of the socket when mail arrives. This is no different from a 3.0.0 listener.
