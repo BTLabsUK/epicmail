@@ -74,7 +74,7 @@ Per-IP limits group clients by prefix (`ipv4_prefix` 24, `ipv6_prefix` 48). Sour
 | `posts_burst_per_address` | 120 | Same, burst size |
 | `posts_per_min_per_ip` | 240 | One client flooding many destinations |
 | `posts_burst_per_ip` | 480 | Same, burst size |
-| `bytes_per_min_per_ip` | 16 MiB | Disk fill by few large posts |
+| `bytes_per_min_per_ip` | 16 MiB | Disk fill by few large posts; large frames of other kinds (each websocket frame that is not a PostSlate counts its size here, and a socket over the budget is closed with 1008) |
 | `frames_per_min_per_socket` | 1200 | One chatty socket using CPU |
 | `queue_cap` | 2000 | One mailbox growing without bound |
 | `per_sender_cap` | 200 | One sender filling a mailbox |

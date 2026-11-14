@@ -162,6 +162,12 @@ impl Limiter {
         self.bytes_ip.take(&p, bytes as f64, m)
     }
 
+    /// Bytes of a websocket frame that is not a PostSlate, against the prefix's byte budget.
+    pub fn frame_bytes(&self, ip: IpAddr, bytes: usize) -> Result<(), u64> {
+        let (p, m) = self.prefix(ip);
+        self.bytes_ip.take(&p, bytes as f64, m)
+    }
+
     /// Per-address post rate. Checked after the sender's signature verified, so a forged `from`
     /// cannot drain someone else's budget.
     pub fn post_addr(&self, key: &str) -> Result<(), u64> {

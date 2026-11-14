@@ -832,3 +832,36 @@ async fn posts_are_refused_when_the_store_is_full() {
     subscribe(&mut b, &bob, "3.0.0").await;
     assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frames_other_than_posts_pay_the_byte_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| c.limits.bytes_per_min_per_ip = 100_000).await;
+    let pad = "a".repeat(60_000);
+    let mut s = connect(&n).await;
+    recv_type(&mut s, "Challenge").await;
+    // Typeless frames are ignored on a classic socket, but their bytes count.
+    s.send(Message::Text(json!({ "pad": pad }).to_string().into())).await.unwrap();
+    s.send(Message::Text(json!({ "pad": pad }).to_string().into())).await.unwrap();
+    assert_eq!(recv(&mut s).await, json!({"closed": 1008}));
+
+    // A post over the budget gets the usual rate-limit error, and its socket stays open.
+    let (alice, bob) = (Key::new(), Key::new());
+    let body = json!({
+        "destination": {"public_key": bob.pk, "domain": "relay.test", "port": 443},
+        "encrypted_message": pad, "salt": "00", "nonce": "00"
+    })
+    .to_string();
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    send(
+        &mut a,
+        json!({"type":"PostSlate","from":alice.at("relay.test"),"to":bob.at("relay.test"),"str":body,"signature":alice.sign(&body)}),
+    )
+    .await;
+    let r = recv(&mut a).await;
+    assert_eq!(r["type"], "Error", "{r}");
+    assert!(r["description"].as_str().unwrap().contains("Rate limit"), "{r}");
+    send(&mut a, json!({"type":"GetVersion"})).await;
+    assert_eq!(recv(&mut a).await["type"], "GetVersion");
+}

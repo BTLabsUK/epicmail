@@ -301,7 +301,14 @@ impl Session {
         let Ok(msg) = serde_json::from_str::<Value>(t) else {
             return self.bad_json(ws).await;
         };
-        let Some(ty) = msg.get("type").and_then(|t| t.as_str()).map(|t| t.to_ascii_lowercase()) else {
+        let ty = msg.get("type").and_then(|t| t.as_str()).map(|t| t.to_ascii_lowercase());
+        // A PostSlate pays for its body in `post_slate`; every other frame pays here, so large
+        // frames of any other kind cannot be sent without limit.
+        if ty.as_deref() != Some("postslate") && self.relay.limiter.frame_bytes(self.ip, t.len()).is_err() {
+            metrics::counter!("epicbox_limit_refusals_total", "limit" => "bytes_per_ip").increment(1);
+            return Flow::Close(1008, "Too many bytes.");
+        }
+        let Some(ty) = ty else {
             if self.mux.is_some() {
                 let r = ref_of(&msg);
                 self.send(ws, mux_error("bad_frame", "Frame has no type.", &r, None)).await;

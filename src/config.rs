@@ -111,7 +111,8 @@ pub struct Limits {
     pub posts_per_min_per_ip: u32,
     /// Burst allowance for `posts_per_min_per_ip`.
     pub posts_burst_per_ip: u32,
-    /// Posted bytes per IP per minute.
+    /// Bytes per IP per minute: slate bodies posted, plus every websocket frame that is not a
+    /// PostSlate.
     pub bytes_per_min_per_ip: u64,
     /// Frames one socket may send per minute.
     pub frames_per_min_per_socket: u32,
