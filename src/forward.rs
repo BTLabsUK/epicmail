@@ -34,6 +34,39 @@ const BATCH: usize = 50;
 const MAX_REFUSALS: i64 = 3;
 const BACKOFF_BASE_MS: i64 = 5_000;
 const BACKOFF_MAX_MS: i64 = 3_600_000;
+/// Longest wait for a TCP connection. A peer that drops SYNs must not hold a lane for the whole
+/// `federation.timeout_s`.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Peers that failed to answer at all, with when to try them next (unix ms) and how many times
+/// in a row they failed. One unreachable peer then costs one attempt per backoff period, not
+/// one per queued row, so it cannot keep every lane busy.
+#[derive(Default)]
+pub struct PeerBackoff {
+    map: Mutex<std::collections::HashMap<String, (i64, i64)>>,
+}
+
+impl PeerBackoff {
+    /// True when `peer` may be tried at `now`.
+    pub fn ready(&self, peer: &str, now: i64) -> bool {
+        self.map.lock().get(peer).is_none_or(|(until, _)| *until <= now)
+    }
+    /// Record a failure; returns the time of the next try.
+    pub fn failed(&self, peer: &str, now: i64) -> i64 {
+        let mut m = self.map.lock();
+        let e = m.entry(peer.to_string()).or_insert((0, 0));
+        e.1 += 1;
+        e.0 = now + backoff_ms(e.1);
+        e.0
+    }
+    pub fn ok(&self, peer: &str) {
+        self.map.lock().remove(peer);
+    }
+    /// Forget peers whose backoff ended long ago.
+    pub fn prune(&self, now: i64) {
+        self.map.lock().retain(|_, (until, _)| *until + BACKOFF_MAX_MS > now);
+    }
+}
 
 /// Delay before the next try after `attempts` failures: 5 s, doubling, at most an hour.
 pub fn backoff_ms(attempts: i64) -> i64 {
@@ -80,22 +113,28 @@ pub fn is_public(ip: IpAddr) -> bool {
 /// Runs until shutdown.
 pub async fn run(relay: Arc<Relay>) {
     let lanes: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let backoff = Arc::new(PeerBackoff::default());
     let tls = Arc::new(tls_config());
     let mut shutdown = relay.shutdown.subscribe();
     loop {
         if relay.cfg.federation.enabled {
-            match relay.store.forward_peers_due(now_ms()).await {
+            let now = now_ms();
+            backoff.prune(now);
+            match relay.store.forward_peers_due(now).await {
                 Ok(peers) => {
                     for peer in peers {
+                        if !backoff.ready(&peer, now) {
+                            continue;
+                        }
                         let mut l = lanes.lock();
                         if l.contains(&peer) || l.len() >= relay.cfg.federation.max_lanes.max(1) {
                             continue;
                         }
                         l.insert(peer.clone());
                         drop(l);
-                        let (relay, lanes, tls) = (relay.clone(), lanes.clone(), tls.clone());
+                        let (relay, lanes, tls, backoff) = (relay.clone(), lanes.clone(), tls.clone(), backoff.clone());
                         tokio::spawn(async move {
-                            lane(&relay, &peer, tls).await;
+                            lane(&relay, &peer, tls, &backoff).await;
                             lanes.lock().remove(&peer);
                         });
                     }
@@ -118,7 +157,7 @@ fn tls_config() -> rustls::ClientConfig {
     rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth()
 }
 
-async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>) {
+async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, backoff: &PeerBackoff) {
     loop {
         let rows = match relay.store.forwards_due(peer, now_ms(), BATCH).await {
             Ok(r) if !r.is_empty() => r,
@@ -149,6 +188,7 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>) {
             let attempts = row.attempts + 1;
             let r = match res {
                 Ok(()) => {
+                    backoff.ok(peer);
                     metrics::counter!("epicbox_forwards_total", "result" => "ok").increment(1);
                     tracing::info!(peer, kind = ?row.kind, "forwarded");
                     relay.store.forward_done(row.id).await
@@ -166,8 +206,11 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>) {
                 }
                 Err(Failure::Transport(e)) => {
                     metrics::counter!("epicbox_forwards_total", "result" => "failed").increment(1);
-                    tracing::warn!(peer, error = %e, attempts, "forward failed");
-                    let r = relay.store.forward_failed(row.id, now_ms() + backoff_ms(attempts), &e, false).await;
+                    // The whole peer waits, not only this row.
+                    let next = backoff.failed(peer, now_ms());
+                    tracing::warn!(peer, error = %e, attempts, retry_in_s = (next - now_ms()) / 1000, "forward failed");
+                    let r =
+                        relay.store.forward_failed(row.id, next.max(now_ms() + backoff_ms(attempts)), &e, false).await;
                     // The peer is unreachable: leave the rest of the batch for the next round.
                     if let Err(e) = r {
                         tracing::error!(error = %e, "forward bookkeeping failed");
@@ -235,7 +278,10 @@ async fn deliver(relay: &Relay, peer: &str, row: &ForwardRow, tls: Arc<rustls::C
                 .ok_or_else(|| Failure::Transport("no addresses".into()))?
         }
     };
-    let tcp = TcpStream::connect(addr).await.map_err(|e| Failure::Transport(format!("connect: {e}")))?;
+    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
+        .await
+        .map_err(|_| Failure::Transport("connect timed out".into()))?
+        .map_err(|e| Failure::Transport(format!("connect: {e}")))?;
     let _ = tcp.set_nodelay(true);
     let mut cfg = WebSocketConfig::default();
     cfg.max_message_size = Some(relay.cfg.limits.max_frame_bytes);
@@ -291,6 +337,19 @@ async fn deliver(relay: &Relay, peer: &str, row: &ForwardRow, tls: Arc<rustls::C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unreachable_peer_waits_as_a_whole() {
+        let b = PeerBackoff::default();
+        assert!(b.ready("p:443", 0));
+        let next = b.failed("p:443", 0);
+        assert_eq!(next, backoff_ms(1));
+        assert!(!b.ready("p:443", next - 1) && b.ready("p:443", next));
+        assert!(b.ready("other:443", 1), "other peers are not held back");
+        assert_eq!(b.failed("p:443", next), next + backoff_ms(2), "doubles while it keeps failing");
+        b.ok("p:443");
+        assert!(b.ready("p:443", next));
+    }
 
     #[test]
     fn vetting() {

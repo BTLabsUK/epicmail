@@ -565,8 +565,10 @@ impl Store for SqliteStore {
 
     async fn forward_peers_due(&self, now: i64) -> Result<Vec<String>> {
         self.read(move |c| {
-            let mut st =
-                c.prepare_cached("SELECT DISTINCT peer FROM forwards WHERE next_at<=?1 AND expires_at>?1 LIMIT 1000")?;
+            let mut st = c.prepare_cached(
+                "SELECT peer FROM forwards WHERE next_at<=?1 AND expires_at>?1 \
+                     GROUP BY peer ORDER BY min(next_at) LIMIT 1000",
+            )?;
             let rows = st.query_map([now], |r| r.get::<_, String>(0))?;
             rows.collect()
         })

@@ -967,3 +967,27 @@ async fn a_socket_with_our_own_instance_id_is_a_forward_loop() {
     req.headers_mut().insert("x-epicmail-instance", "someone-else".parse().unwrap());
     assert!(tokio_tungstenite::connect_async(req).await.is_ok());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreachable_peer_costs_one_attempt_per_backoff_not_one_per_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| {
+        c.federation.allow_private = true;
+        // Nothing listens on the discard port: every connect fails at once.
+        c.federation.peers.insert("dead.test:443".into(), "ws://127.0.0.1:9/".into());
+    })
+    .await;
+    let alice = Key::new();
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    for i in 0..3 {
+        send(&mut a, post_frame(&alice, "relay.test", &Key::new(), "dead.test", i)).await;
+        assert_eq!(recv(&mut a).await["type"], "Ok");
+    }
+    // Two manager ticks (5 s each) pass; the peer failed once and is held back as a whole.
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    let rows = n.relay.store.forwards_due("dead.test:443", now_ms() + 7_200_000, 50).await.unwrap();
+    assert_eq!(rows.len(), 3);
+    let attempts: i64 = rows.iter().map(|r| r.attempts).sum();
+    assert_eq!(attempts, 1, "each tick tried another row of the dead peer");
+}
