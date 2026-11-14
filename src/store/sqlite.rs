@@ -677,7 +677,8 @@ impl Store for SqliteStore {
     }
 
     async fn vacuum(&self) -> Result<()> {
-        // incremental_vacuum returns rows; run it outside a savepoint-sensitive path.
+        // The pragma returns rows, so it runs as a query (`execute` refuses statements that
+        // return rows) and is stepped to the end, which is when the pages are freed.
         self.write(|c| {
             let mut st = c.prepare("PRAGMA incremental_vacuum(2000)")?;
             let mut rows = st.query([])?;
