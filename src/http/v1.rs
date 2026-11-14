@@ -89,11 +89,9 @@ pub(super) async fn post(
             reply(R, StatusCode::OK, v)
         }
         PostOutcome::Forwarded { .. } => reply(R, StatusCode::OK, json!({"ok": true, "forwarded": true})),
-        PostOutcome::Cancelled { txid } => reply(
-            R,
-            StatusCode::CONFLICT,
-            json!({"error": "The transaction was cancelled.", "epicboxtxid": txid}),
-        ),
+        PostOutcome::Cancelled { txid } => {
+            reply(R, StatusCode::CONFLICT, json!({"error": "The transaction was cancelled.", "epicboxtxid": txid}))
+        }
         PostOutcome::Refused(Refusal::RateLimited(s)) => {
             too_many(R, format!("Rate limit exceeded; retry in {s} s."), s)
         }

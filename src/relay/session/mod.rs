@@ -212,9 +212,7 @@ impl Session {
             }
         };
         if let Flow::Close(code, reason) = flow {
-            let _ = ws
-                .send(Message::Close(Some(CloseFrame { code, reason: Utf8Bytes::from_static(reason) })))
-                .await;
+            let _ = ws.send(Message::Close(Some(CloseFrame { code, reason: Utf8Bytes::from_static(reason) }))).await;
         }
     }
 

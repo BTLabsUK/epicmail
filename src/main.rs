@@ -10,12 +10,12 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+use epicmail::clock::now_ms;
 use epicmail::config::Config;
 use epicmail::http::{self, AppState};
 use epicmail::relay::Relay;
 use epicmail::store::sqlite::SqliteStore;
 use epicmail::store::Store;
-use epicmail::clock::now_ms;
 use epicmail::{forward, metrics as relay_metrics, migrate, sig};
 
 #[derive(Parser)]

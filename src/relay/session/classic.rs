@@ -144,7 +144,8 @@ impl Session {
         // 3.1.0: a successful Subscribe acknowledges the TransactionCancelled sent before it.
         if let (Some(t), Some(k)) = (self.pending_cancel_ack.take(), self.key.as_ref()) {
             if r.store.ack_cancel(k, &t).await.is_err() {
-                let e = json!({"type":"Error","kind":"InvalidRequest","description":"Unable to acknowledge cancellation."});
+                let e =
+                    json!({"type":"Error","kind":"InvalidRequest","description":"Unable to acknowledge cancellation."});
                 self.send(ws, e).await;
                 return Flow::Continue;
             }
@@ -158,11 +159,8 @@ impl Session {
                 }
             }
             self.handle.cancel = self.ver == Some(Ver::V31);
-            let evicted = r.registry.subscribe_classic(
-                &key,
-                self.handle.clone(),
-                r.cfg.limits.sockets_per_address as usize,
-            );
+            let evicted =
+                r.registry.subscribe_classic(&key, self.handle.clone(), r.cfg.limits.sockets_per_address as usize);
             for h in evicted {
                 h.send(Cmd::Close { code: 4001, reason: "Too many connections for this address." });
             }
@@ -290,7 +288,8 @@ impl Session {
         let signature = msg.get("signature").and_then(|s| s.as_str()).unwrap_or("");
         let signed = if ver == Ver::V2 { self.challenge.as_str() } else { msgid };
         let ok_sig = sig::verify(&key, signed, signature).is_ok()
-            || (ver == Ver::V2 && self.prev_challenge.as_ref().is_some_and(|p| sig::verify(&key, p, signature).is_ok()));
+            || (ver == Ver::V2
+                && self.prev_challenge.as_ref().is_some_and(|p| sig::verify(&key, p, signature).is_ok()));
         if !ok_sig {
             r.limiter.sig_failed(self.ip);
             self.send(ws, json!({"type":"Error","kind":"InvalidSignature","description":"Invalid signature."})).await;
@@ -302,7 +301,8 @@ impl Session {
         }
         if let Err(e) = r.store.made(&key, vec![msgid.to_string()]).await {
             tracing::error!(error = %e, "made failed");
-            self.send(ws, json!({"type":"Error","kind":"UnknownError","description":"Internal error; try again."})).await;
+            self.send(ws, json!({"type":"Error","kind":"UnknownError","description":"Internal error; try again."}))
+                .await;
             return;
         }
         metrics::counter!("epicbox_made_total", "mode" => "classic").increment(1);

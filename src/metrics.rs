@@ -33,7 +33,10 @@ fn describe() {
     describe_counter!("epicbox_made_total", "Messages acknowledged and removed.");
     describe_counter!("epicbox_cancels_total", "Transactions cancelled.");
     describe_counter!("epicbox_forwards_total", "Forward attempts by result.");
-    describe_counter!("epicbox_watchdog_closes_total", "Sockets closed because Challenges went unanswered while mail waited.");
+    describe_counter!(
+        "epicbox_watchdog_closes_total",
+        "Sockets closed because Challenges went unanswered while mail waited."
+    );
     describe_counter!("epicbox_limit_refusals_total", "Requests refused by a limit.");
     describe_counter!("epicbox_mux_sessions_total", "Sockets that switched to mux/1.");
     describe_counter!("epicbox_mux_resumes_total", "mux/1 Resume frames that found their token.");

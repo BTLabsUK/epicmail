@@ -106,9 +106,7 @@ pub fn verify_with_key(pk: &PublicKey, message: &str, signature_hex: &str) -> Re
     let der = oracle_from_hex(signature_hex)?;
     let sig = Signature::from_der(&der).map_err(|_| SigReject::BadDer)?;
     // libsecp256k1 verify rejects high-S signatures.
-    Secp256k1::verification_only()
-        .verify_ecdsa(&digest(message), &sig, pk)
-        .map_err(|_| SigReject::Invalid)
+    Secp256k1::verification_only().verify_ecdsa(&digest(message), &sig, pk).map_err(|_| SigReject::Invalid)
 }
 
 /// Ok(()) exactly when the oracle prints `true`.

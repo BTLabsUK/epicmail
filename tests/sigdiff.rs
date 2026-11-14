@@ -9,11 +9,7 @@ fn check(path: &str) -> (usize, usize, usize) {
     let (mut n, mut mism, mut trues) = (0, 0, 0);
     for line in text.lines().filter(|l| !l.is_empty()) {
         let v: serde_json::Value = serde_json::from_str(line).unwrap();
-        let (pk, msg, sg) = (
-            v["pk"].as_str().unwrap(),
-            v["msg"].as_str().unwrap(),
-            v["sig"].as_str().unwrap(),
-        );
+        let (pk, msg, sg) = (v["pk"].as_str().unwrap(), v["msg"].as_str().unwrap(), v["sig"].as_str().unwrap());
         let expected = v["expected"].as_bool().unwrap();
         let got = sig::verify(pk, msg, sg).is_ok();
         n += 1;

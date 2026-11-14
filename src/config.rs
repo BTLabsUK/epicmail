@@ -229,13 +229,7 @@ impl Default for Server {
 
 impl Default for StoreCfg {
     fn default() -> Self {
-        Self {
-            path: "epicmail.db".into(),
-            retention_days: 7,
-            group_commit_max: 256,
-            readers: 4,
-            vacuum_hour_utc: 3,
-        }
+        Self { path: "epicmail.db".into(), retention_days: 7, group_commit_max: 256, readers: 4, vacuum_hour_utc: 3 }
     }
 }
 
@@ -321,10 +315,8 @@ impl Default for Log {
 impl Config {
     /// Reads, parses and validates a config file.
     pub fn load(path: &std::path::Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let cfg: Config =
-            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -371,7 +363,11 @@ impl Config {
         let with_port = format!("{d}:{port}");
         self.server.aliases.iter().any(|a| {
             let a = a.to_ascii_lowercase();
-            if a.contains(':') { a == with_port } else { a == d && port == self.server.port }
+            if a.contains(':') {
+                a == with_port
+            } else {
+                a == d && port == self.server.port
+            }
         })
     }
 }

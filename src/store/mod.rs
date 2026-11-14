@@ -40,9 +40,13 @@ pub struct NewMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PutOutcome {
-    Stored { msgid: String },
+    Stored {
+        msgid: String,
+    },
     /// The same message (queue, sender, body, signature) is already waiting.
-    Duplicate { msgid: String },
+    Duplicate {
+        msgid: String,
+    },
     QueueFull,
     SenderCapped,
     /// The 3.1.0 transaction was cancelled; the poster gets TransactionCancelled.

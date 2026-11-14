@@ -14,13 +14,13 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
+use epicmail::clock::now_ms;
 use epicmail::config::Config;
 use epicmail::http::{self, AppState};
 use epicmail::relay::Relay;
 use epicmail::sig;
 use epicmail::store::sqlite::SqliteStore;
 use epicmail::store::Store;
-use epicmail::clock::now_ms;
 
 const STATIC: &str = "7WUDtkSaKyGRUnQ22rE3QUXChV8DmA6NnunDYP4vheTpc";
 
@@ -168,18 +168,30 @@ async fn classic_post_push_made() {
     assert_eq!(waiting(&n).await, 1);
 
     // A bad Made signature is refused and the message stays.
-    send(&mut b, json!({"type":"Made","address":bob.pk,"signature":alice.sign(&msgid),"epicboxmsgid":msgid,"ver":"3.0.0"})).await;
+    send(
+        &mut b,
+        json!({"type":"Made","address":bob.pk,"signature":alice.sign(&msgid),"epicboxmsgid":msgid,"ver":"3.0.0"}),
+    )
+    .await;
     assert_eq!(recv(&mut b).await["kind"], "InvalidSignature");
     assert_eq!(waiting(&n).await, 1);
 
-    send(&mut b, json!({"type":"Made","address":bob.pk,"signature":bob.sign(&msgid),"epicboxmsgid":msgid,"ver":"3.0.0"})).await;
+    send(
+        &mut b,
+        json!({"type":"Made","address":bob.pk,"signature":bob.sign(&msgid),"epicboxmsgid":msgid,"ver":"3.0.0"}),
+    )
+    .await;
     assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
     let c = recv_type(&mut b, "Challenge").await;
     assert_ne!(c["str"], STATIC);
     assert_eq!(waiting(&n).await, 0);
 
     // Subscribing again finds nothing.
-    send(&mut b, json!({"type":"Subscribe","address":bob.pk,"ver":"3.0.0","signature":bob.sign(c["str"].as_str().unwrap())})).await;
+    send(
+        &mut b,
+        json!({"type":"Subscribe","address":bob.pk,"ver":"3.0.0","signature":bob.sign(c["str"].as_str().unwrap())}),
+    )
+    .await;
     assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
 }
 
@@ -211,7 +223,9 @@ async fn mail_waits_and_survives_restart() {
 async fn garbage_frames_do_not_stop_the_relay() {
     let dir = tempfile::tempdir().unwrap();
     let n = start(dir.path(), "relay.test", |_| {}).await;
-    for junk in ["not json", "{\"type\":5}", "{\"type\":\"Subscribe\",\"address\":\"x@:\"}", "{\"type\":\"PostSlate\"}", "[]"] {
+    for junk in
+        ["not json", "{\"type\":5}", "{\"type\":\"Subscribe\",\"address\":\"x@:\"}", "{\"type\":\"PostSlate\"}", "[]"]
+    {
         let mut s = connect(&n).await;
         recv_type(&mut s, "Challenge").await;
         s.send(Message::Text(junk.into())).await.unwrap();
@@ -253,9 +267,13 @@ async fn mux_attach_mail_ack_resume() {
     assert_eq!(ok["ext"], json!(["mux/1"]), "{ok}");
     let ch = ok["challenge"].as_str().unwrap().to_string();
     assert_eq!(ch.len(), 22);
-    send(&mut m, json!({"type":"Attach","ref":"a1","mailboxes":[
+    send(
+        &mut m,
+        json!({"type":"Attach","ref":"a1","mailboxes":[
         {"address":bob.pk,"signature":bob.sign(&ch)},
-        {"address":alice.pk,"signature":bob.sign(&ch)}]})).await;
+        {"address":alice.pk,"signature":bob.sign(&ch)}]}),
+    )
+    .await;
     let at = recv(&mut m).await;
     assert_eq!(at["type"], "Attached", "{at}");
     assert_eq!(at["mailboxes"][0]["ok"], true);

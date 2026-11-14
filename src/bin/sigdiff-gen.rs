@@ -17,8 +17,8 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 const N: [u8; 32] = [
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
-    0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE, 0xBA, 0xAE, 0xDC,
+    0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
 ];
 
 type Case = (String, String, String); // pk, msg, sig
@@ -57,7 +57,11 @@ fn run_all(cases: Vec<Case>, out: &str) {
     let (mut t, mut fl) = (0, 0);
     for r in results.lock().unwrap().iter() {
         let (c, e) = r.clone().unwrap();
-        if e { t += 1 } else { fl += 1 }
+        if e {
+            t += 1
+        } else {
+            fl += 1
+        }
         writeln!(f, "{}", json!({"pk": c.0, "msg": c.1, "sig": c.2, "expected": e})).unwrap();
     }
     println!("{total} cases, oracle true={t} false={fl} -> {out}");
@@ -90,7 +94,12 @@ fn sub_n(s: &[u8]) -> [u8; 32] {
     let mut borrow = 0i32;
     for i in (0..32).rev() {
         let mut d = N[i] as i32 - s[i] as i32 - borrow;
-        borrow = if d < 0 { d += 256; 1 } else { 0 };
+        borrow = if d < 0 {
+            d += 256;
+            1
+        } else {
+            0
+        };
         r[i] = d as u8;
     }
     r
@@ -262,8 +271,8 @@ fn variants_key(pk: &PublicKey, rng: &mut StdRng) -> Vec<(String, bool)> {
         [&[1u8, 136][..], &off[..]].concat(),
         [&[1u8, 136][..], &[0u8; 33][..]].concat(),
         [&[1u8, 136][..], &[0x04u8; 1][..], &ser[1..]].concat(), // 33 bytes with 0x04
-        [&[1u8][..], &ser[..]].concat(),                           // 1 version byte
-        [&[1u8, 136, 0][..], &ser[..]].concat(),                  // 3 version-ish bytes
+        [&[1u8][..], &ser[..]].concat(),                         // 1 version byte
+        [&[1u8, 136, 0][..], &ser[..]].concat(),                 // 3 version-ish bytes
         [&[1u8, 136][..], &ser[..32]].concat(),
         [&[1u8, 136][..], &unc[..64]].concat(),
         [&[0u8, 0][..], &ser[..]].concat(),
@@ -304,9 +313,8 @@ fn gen_cases() -> Vec<Case> {
         let good_pk = encode_public_key(pk, VERSION_FLOONET);
         for (mi, m) in msgs.iter().enumerate() {
             let sig_hex = sig::sign(sk, m);
-            let compact = secp
-                .sign_ecdsa(&Message::from_digest(Sha256::digest(m.as_bytes()).into()), sk)
-                .serialize_compact();
+            let compact =
+                secp.sign_ecdsa(&Message::from_digest(Sha256::digest(m.as_bytes()).into()), sk).serialize_compact();
             let _ = Signature::from_compact(&compact).unwrap();
             for s in variants_sig(&sig_hex, &compact) {
                 cases.push((good_pk.clone(), m.clone(), s));

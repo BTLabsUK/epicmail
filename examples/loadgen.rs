@@ -149,7 +149,8 @@ async fn listener(args: Arc<Args>, target: SocketAddr, i: usize, key: Arc<Key>, 
         match v["type"].as_str().unwrap_or("") {
             "Challenge" => {
                 let ch = v["str"].as_str().unwrap_or("");
-                let f = json!({"type":"Subscribe","address":key.pk,"ver":"3.0.0","signature":sig::sign(&key.secret, ch)});
+                let f =
+                    json!({"type":"Subscribe","address":key.pk,"ver":"3.0.0","signature":sig::sign(&key.secret, ch)});
                 if ws.send(text(f)).await.is_err() {
                     break;
                 }

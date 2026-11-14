@@ -87,9 +87,7 @@ impl Relay {
         let (txid, txidsig) = if cancel_fields {
             match (&req.txid, &req.txidsig) {
                 (None, None) => (None, None),
-                (Some(Value::String(t)), Some(Value::String(s))) if is_txid(t) => {
-                    (Some(t.clone()), Some(s.clone()))
-                }
+                (Some(Value::String(t)), Some(Value::String(s))) if is_txid(t) => (Some(t.clone()), Some(s.clone())),
                 _ => return Err(Refusal::Invalid("InvalidRequest", MISSING_FIELDS.into())),
             }
         } else {
@@ -99,9 +97,7 @@ impl Relay {
             return Err(Refusal::Invalid("InvalidRequest", MISSING_FIELDS.into()));
         }
 
-        let wrong = || {
-            Refusal::Invalid("InvalidRequest", format!("Wrong address format. From: {from_s}, To: {to_s}"))
-        };
+        let wrong = || Refusal::Invalid("InvalidRequest", format!("Wrong address format. From: {from_s}, To: {to_s}"));
         let (Ok(from), Ok(to)) = (parse_address(&from_s), parse_address(&to_s)) else {
             return Err(wrong());
         };
@@ -171,9 +167,9 @@ impl Relay {
                 PostOutcome::Stored { msgid, txid }
             }
             Ok(PutOutcome::QueueFull) => Refused(Refusal::Full("Recipient mailbox is full; try again later.".into())),
-            Ok(PutOutcome::SenderCapped) => Refused(Refusal::Full(
-                "Too many messages from this sender are waiting for the recipient.".into(),
-            )),
+            Ok(PutOutcome::SenderCapped) => {
+                Refused(Refusal::Full("Too many messages from this sender are waiting for the recipient.".into()))
+            }
             Ok(PutOutcome::Cancelled) => PostOutcome::Cancelled { txid: txid.unwrap_or_default() },
             Ok(PutOutcome::NotParticipant) => Refused(Refusal::Invalid(
                 "InvalidRequest",

@@ -202,8 +202,7 @@ impl Session {
         for e in list {
             let address = e.get("address").and_then(|a| a.as_str()).unwrap_or("");
             let signature = e.get("signature").and_then(|a| a.as_str()).unwrap_or("");
-            let Some(key) = parse_address(address).ok().filter(|a| a.public_key_valid()).map(|a| a.public_key)
-            else {
+            let Some(key) = parse_address(address).ok().filter(|a| a.public_key_valid()).map(|a| a.public_key) else {
                 out.push(json!({"mailbox":address,"ok":false,"code":"bad_address"}));
                 continue;
             };
@@ -336,7 +335,8 @@ impl Session {
             self.send(ws, mux_error("bad_frame", "At most 256 ids per Ack.", r#ref, None)).await;
             return;
         }
-        let ids: Vec<String> = ids.iter().filter_map(|i| i.as_str()).filter(|i| is_msgid(i)).map(String::from).collect();
+        let ids: Vec<String> =
+            ids.iter().filter_map(|i| i.as_str()).filter(|i| is_msgid(i)).map(String::from).collect();
         let attached: Vec<String> = self.mux.as_ref().map(|m| m.attached.iter().cloned().collect()).unwrap_or_default();
         if !ids.is_empty() && !attached.is_empty() {
             match self.relay.store.made_in(attached, ids.clone()).await {
@@ -455,17 +455,15 @@ impl Session {
                 continue;
             }
             let exclude: Vec<i64> = m.inflight.values().filter(|(_, k)| *k == key).map(|(id, _)| *id).collect();
-            let got = match r
-                .store
-                .claim(&key, now_ms(), free, exclude, ClaimMode::Offer { lease_ms: OFFER_LEASE_MS })
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!(error = %e, "mux claim failed");
-                    return;
-                }
-            };
+            let got =
+                match r.store.claim(&key, now_ms(), free, exclude, ClaimMode::Offer { lease_ms: OFFER_LEASE_MS }).await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!(error = %e, "mux claim failed");
+                        return;
+                    }
+                };
             let full = got.len() == free;
             for msg in got {
                 let frame = json!({

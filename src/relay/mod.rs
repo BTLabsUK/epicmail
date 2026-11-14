@@ -100,11 +100,18 @@ pub enum Refusal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PostOutcome {
     /// Committed for a local mailbox (or already there: a slate posted twice keeps one copy).
-    Stored { msgid: String, txid: Option<String> },
+    Stored {
+        msgid: String,
+        txid: Option<String>,
+    },
     /// Committed as a forward row for another relay.
-    Forwarded { txid: Option<String> },
+    Forwarded {
+        txid: Option<String>,
+    },
     /// The 3.1.0 transaction was cancelled; nothing was stored.
-    Cancelled { txid: String },
+    Cancelled {
+        txid: String,
+    },
     Refused(Refusal),
 }
 
@@ -127,9 +134,7 @@ impl Refusal {
     /// The 3.0.0 `Error` frame for this refusal.
     pub fn classic_frame(&self) -> Value {
         match self {
-            Refusal::RateLimited(s) => {
-                error_frame("InvalidRequest", &format!("Rate limit exceeded; retry in {s} s."))
-            }
+            Refusal::RateLimited(s) => error_frame("InvalidRequest", &format!("Rate limit exceeded; retry in {s} s.")),
             Refusal::Invalid(kind, d) => error_frame(kind, d),
             Refusal::Full(d) => error_frame("InvalidRequest", d),
             Refusal::Internal => error_frame("UnknownError", "Internal error; try again."),
@@ -198,5 +203,4 @@ impl Relay {
             None => false,
         }
     }
-
 }

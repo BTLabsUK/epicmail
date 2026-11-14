@@ -98,12 +98,7 @@ fn secs_to_ms(s: i64) -> Option<i64> {
 
 /// Reads JSON Lines from `input` into the store: `slate` lines become queued messages, `forward`
 /// lines become forwards. Bad lines and lines already expired at `now_ms` are skipped and counted.
-pub async fn import_jsonl<R: BufRead>(
-    store: &dyn Store,
-    cfg: &Config,
-    input: R,
-    now_ms: i64,
-) -> Result<ImportStats> {
+pub async fn import_jsonl<R: BufRead>(store: &dyn Store, cfg: &Config, input: R, now_ms: i64) -> Result<ImportStats> {
     let mut st = ImportStats::default();
     let recipient_suffix = if cfg.server.port == 443 {
         cfg.server.domain.clone()
@@ -235,11 +230,8 @@ struct ForwardOut<'a> {
 /// Write every waiting message and PostSlate forward of the SQLite file at `db_path` as JSON
 /// Lines. The file is opened read only.
 pub fn export_jsonl<W: Write>(db_path: &Path, mut out: W) -> Result<ExportStats> {
-    let conn = Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("opening {} read only", db_path.display()))?;
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+        .with_context(|| format!("opening {} read only", db_path.display()))?;
     let mut st = ExportStats::default();
 
     let mut q = conn.prepare(
@@ -268,9 +260,8 @@ pub fn export_jsonl<W: Write>(db_path: &Path, mut out: W) -> Result<ExportStats>
     }
     drop(rows);
 
-    let mut q = conn.prepare(
-        "SELECT peer,frame,attempts,created_at FROM forwards WHERE kind=0 ORDER BY created_at, id",
-    )?;
+    let mut q =
+        conn.prepare("SELECT peer,frame,attempts,created_at FROM forwards WHERE kind=0 ORDER BY created_at, id")?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
         let peer: String = r.get(0)?;
@@ -308,11 +299,26 @@ mod tests {
     fn input() -> String {
         let now_s = NOW / 1000;
         let l = vec![
-            format!(r#"{{"kind":"slate","queue":"{Q1}","from":"epicbox://{Q2}@old.example:443","str":"body1","signature":"s1","challenge":"c1","messageid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_at":{},"expires_at":{},"deliveries":2}}"#, now_s - 10, now_s + 1000),
-            format!(r#"{{"kind":"slate","queue":"{Q2}","from":"","str":"body2","signature":"s2","challenge":"","messageid":null,"created_at":{},"expires_at":{},"deliveries":0}}"#, now_s - 5, now_s + 1000),
-            format!(r#"{{"kind":"forward","target_host":"Peer.Example","target_port":8443,"frame":"{{\"x\":1}}","attempts":3,"created_at":{}}}"#, now_s - 20),
+            format!(
+                r#"{{"kind":"slate","queue":"{Q1}","from":"epicbox://{Q2}@old.example:443","str":"body1","signature":"s1","challenge":"c1","messageid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_at":{},"expires_at":{},"deliveries":2}}"#,
+                now_s - 10,
+                now_s + 1000
+            ),
+            format!(
+                r#"{{"kind":"slate","queue":"{Q2}","from":"","str":"body2","signature":"s2","challenge":"","messageid":null,"created_at":{},"expires_at":{},"deliveries":0}}"#,
+                now_s - 5,
+                now_s + 1000
+            ),
+            format!(
+                r#"{{"kind":"forward","target_host":"Peer.Example","target_port":8443,"frame":"{{\"x\":1}}","attempts":3,"created_at":{}}}"#,
+                now_s - 20
+            ),
             "not json".to_string(),
-            format!(r#"{{"kind":"slate","queue":"{Q1}","from":"","str":"old","signature":"s3","challenge":"","messageid":null,"created_at":{},"expires_at":{},"deliveries":0}}"#, now_s - 5000, now_s - 1),
+            format!(
+                r#"{{"kind":"slate","queue":"{Q1}","from":"","str":"old","signature":"s3","challenge":"","messageid":null,"created_at":{},"expires_at":{},"deliveries":0}}"#,
+                now_s - 5000,
+                now_s - 1
+            ),
         ];
         l.join("\n") + "\n"
     }

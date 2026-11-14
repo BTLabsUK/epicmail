@@ -130,10 +130,7 @@ pub struct SocketPermit {
 impl Limiter {
     pub fn new(cfg: &Limits) -> Self {
         Self {
-            post_addr: Buckets::per_minute(
-                cfg.posts_per_min_per_address as f64,
-                cfg.posts_burst_per_address as f64,
-            ),
+            post_addr: Buckets::per_minute(cfg.posts_per_min_per_address as f64, cfg.posts_burst_per_address as f64),
             post_ip: Buckets::per_minute(cfg.posts_per_min_per_ip as f64, cfg.posts_burst_per_ip as f64),
             bytes_ip: Buckets::per_minute(cfg.bytes_per_min_per_ip as f64, cfg.bytes_per_min_per_ip as f64),
             failed_sig_ip: Buckets::per_minute(

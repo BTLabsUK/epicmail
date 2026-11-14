@@ -19,23 +19,16 @@ impl Relay {
         use CancelOutcome::Refused as R;
         let requester = match socket_key {
             Some(k) => Some(k.to_string()),
-            None => msg
-                .get("address")
-                .and_then(|a| a.as_str())
-                .and_then(|a| parse_address(a).ok())
-                .map(|a| a.public_key),
+            None => {
+                msg.get("address").and_then(|a| a.as_str()).and_then(|a| parse_address(a).ok()).map(|a| a.public_key)
+            }
         };
         let Some(requester) = requester else {
             return R(Refusal::Invalid("InvalidRequest", "Missing cancellation address.".into()));
         };
         let txid = match msg.get("epicboxtxid").and_then(|t| t.as_str()) {
             Some(t) if is_txid(t) => t.to_string(),
-            _ => {
-                return R(Refusal::Invalid(
-                    "InvalidRequest",
-                    "Invalid or missing 32-character epicboxtxid.".into(),
-                ))
-            }
+            _ => return R(Refusal::Invalid("InvalidRequest", "Invalid or missing 32-character epicboxtxid.".into())),
         };
         let Some(signature) = msg.get("signature").and_then(|s| s.as_str()) else {
             return R(Refusal::Invalid("InvalidRequest", "Missing signature.".into()));

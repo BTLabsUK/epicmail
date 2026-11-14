@@ -81,12 +81,8 @@ pub fn client_ip(peer: SocketAddr, headers: &HeaderMap, trusted: &[IpNet]) -> Ip
     if !is_trusted(&ip) {
         return ip;
     }
-    let hops: Vec<&str> = headers
-        .get_all("x-forwarded-for")
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .collect();
+    let hops: Vec<&str> =
+        headers.get_all("x-forwarded-for").iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(',')).collect();
     for hop in hops.iter().rev() {
         let Ok(h) = hop.trim().parse::<IpAddr>() else { break };
         ip = canon(h);
@@ -257,7 +253,6 @@ async fn well_known(State(st): State<AppState>) -> Response {
     }))
     .into_response()
 }
-
 
 /// `POST /test/stall {address, seconds}`: the relay delivers nothing to that mailbox for the
 /// given seconds (0 ends it). Only with `test.stall_endpoint`, only from loopback.

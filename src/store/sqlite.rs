@@ -90,8 +90,7 @@ pub struct SqliteStore {
 }
 
 fn open(path: &Path, flags: OpenFlags) -> Result<Connection> {
-    let conn = Connection::open_with_flags(path, flags)
-        .with_context(|| format!("opening {}", path.display()))?;
+    let conn = Connection::open_with_flags(path, flags).with_context(|| format!("opening {}", path.display()))?;
     conn.busy_timeout(std::time::Duration::from_secs(10))?;
     Ok(conn)
 }
@@ -118,9 +117,7 @@ impl SqliteStore {
     /// `readers` read connections. `group_max` caps the writes in one commit. Fails on a database
     /// whose schema is newer than this binary.
     pub fn open(path: &Path, readers: usize, group_max: usize) -> Result<Self> {
-        let rw = OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_CREATE
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let rw = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let writer = open(path, rw)?;
         // auto_vacuum must be set before the first table exists.
         writer.execute_batch(
@@ -128,15 +125,11 @@ impl SqliteStore {
              PRAGMA foreign_keys=ON; PRAGMA temp_store=MEMORY;",
         )?;
         writer.execute_batch(SCHEMA)?;
-        let version: Option<String> = writer
-            .query_row("SELECT value FROM meta WHERE key='schema'", [], |r| r.get(0))
-            .optional()?;
+        let version: Option<String> =
+            writer.query_row("SELECT value FROM meta WHERE key='schema'", [], |r| r.get(0)).optional()?;
         match version {
             None => {
-                writer.execute(
-                    "INSERT INTO meta(key,value) VALUES('schema',?1)",
-                    [SCHEMA_VERSION.to_string()],
-                )?;
+                writer.execute("INSERT INTO meta(key,value) VALUES('schema',?1)", [SCHEMA_VERSION.to_string()])?;
             }
             Some(v) if v == SCHEMA_VERSION.to_string() => {}
             Some(v) => return Err(anyhow!("database schema {v} is newer than this binary ({SCHEMA_VERSION})")),
@@ -192,10 +185,7 @@ impl SqliteStore {
     }
 }
 
-fn run_savepoint<T>(
-    conn: &Connection,
-    f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
-) -> rusqlite::Result<T> {
+fn run_savepoint<T>(conn: &Connection, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> rusqlite::Result<T> {
     conn.execute_batch("SAVEPOINT job")?;
     match f(conn) {
         Ok(v) => {
@@ -281,15 +271,13 @@ fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
     })
 }
 
-const MSG_COLS: &str =
-    "id, msgid, queue, sender, body, signature, challenge, txid, deliveries, created_at";
+const MSG_COLS: &str = "id, msgid, queue, sender, body, signature, challenge, txid, deliveries, created_at";
 const OFFER_ORDER: &str = "ORDER BY CASE WHEN deliveries>=3 THEN 1 ELSE 0 END, \
      CASE WHEN deliveries>=3 THEN last_offered_at ELSE created_at END, id";
 
 fn link_tx(conn: &Connection, txid: &str, keys: &[&str], endpoint: Option<&str>, now: i64) -> rusqlite::Result<()> {
-    let mut st = conn.prepare_cached(
-        "INSERT OR IGNORE INTO txlinks(txid,kind,value,created_at) VALUES(?1,?2,?3,?4)",
-    )?;
+    let mut st =
+        conn.prepare_cached("INSERT OR IGNORE INTO txlinks(txid,kind,value,created_at) VALUES(?1,?2,?3,?4)")?;
     for k in keys {
         st.execute(params![txid, LINK_KEY, k, now])?;
     }
@@ -310,9 +298,7 @@ impl Store for SqliteStore {
     async fn put_message(&self, m: NewMessage) -> Result<PutOutcome> {
         self.write(move |c| {
             if let Some(txid) = &m.txid {
-                let cancelled: bool = c
-                    .prepare_cached("SELECT 1 FROM cancels WHERE txid=?1")?
-                    .exists([txid])?;
+                let cancelled: bool = c.prepare_cached("SELECT 1 FROM cancels WHERE txid=?1")?.exists([txid])?;
                 if cancelled {
                     return Ok(PutOutcome::Cancelled);
                 }
@@ -337,9 +323,7 @@ impl Store for SqliteStore {
                 return Ok(PutOutcome::Duplicate { msgid });
             }
             let (in_queue, from_sender): (i64, i64) = c
-                .prepare_cached(
-                    "SELECT count(*), coalesce(sum(sender_key=?2),0) FROM messages WHERE queue=?1",
-                )?
+                .prepare_cached("SELECT count(*), coalesce(sum(sender_key=?2),0) FROM messages WHERE queue=?1")?
                 .query_row(params![m.queue, m.sender_key], |r| Ok((r.get(0)?, r.get(1)?)))?;
             if in_queue >= i64::from(m.queue_cap) {
                 return Ok(PutOutcome::QueueFull);
@@ -353,11 +337,29 @@ impl Store for SqliteStore {
                  VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             )?
             .execute(params![
-                m.msgid, m.queue, m.sender, m.sender_key, m.recipient, m.body, m.signature,
-                m.challenge, m.txid, m.txidsig, m.deliveries, m.created_at, m.expires_at, dedupe
+                m.msgid,
+                m.queue,
+                m.sender,
+                m.sender_key,
+                m.recipient,
+                m.body,
+                m.signature,
+                m.challenge,
+                m.txid,
+                m.txidsig,
+                m.deliveries,
+                m.created_at,
+                m.expires_at,
+                dedupe
             ])?;
             if let Some(txid) = &m.txid {
-                link_tx(c, txid, &[m.sender_key.as_str(), m.queue.as_str()], m.remote_endpoint.as_deref(), m.created_at)?;
+                link_tx(
+                    c,
+                    txid,
+                    &[m.sender_key.as_str(), m.queue.as_str()],
+                    m.remote_endpoint.as_deref(),
+                    m.created_at,
+                )?;
             }
             Ok(PutOutcome::Stored { msgid: m.msgid })
         })
@@ -384,10 +386,8 @@ impl Store for SqliteStore {
     async fn waiting(&self, queue: &str, now: i64) -> Result<i64> {
         let queue = queue.to_string();
         self.read(move |c| {
-            c.prepare_cached(
-                "SELECT count(*) FROM messages WHERE queue=?1 AND not_before<=?2 AND expires_at>?2",
-            )?
-            .query_row(params![queue, now], |r| r.get(0))
+            c.prepare_cached("SELECT count(*) FROM messages WHERE queue=?1 AND not_before<=?2 AND expires_at>?2")?
+                .query_row(params![queue, now], |r| r.get(0))
         })
         .await
     }
@@ -515,9 +515,8 @@ impl Store for SqliteStore {
 
     async fn forward_peers_due(&self, now: i64) -> Result<Vec<String>> {
         self.read(move |c| {
-            let mut st = c.prepare_cached(
-                "SELECT DISTINCT peer FROM forwards WHERE next_at<=?1 AND expires_at>?1 LIMIT 1000",
-            )?;
+            let mut st =
+                c.prepare_cached("SELECT DISTINCT peer FROM forwards WHERE next_at<=?1 AND expires_at>?1 LIMIT 1000")?;
             let rows = st.query_map([now], |r| r.get::<_, String>(0))?;
             rows.collect()
         })
@@ -560,10 +559,8 @@ impl Store for SqliteStore {
             if drop {
                 c.prepare_cached("DELETE FROM forwards WHERE id=?1")?.execute([id])?;
             } else {
-                c.prepare_cached(
-                    "UPDATE forwards SET attempts=attempts+1, next_at=?2, last_error=?3 WHERE id=?1",
-                )?
-                .execute(params![id, next_at, error])?;
+                c.prepare_cached("UPDATE forwards SET attempts=attempts+1, next_at=?2, last_error=?3 WHERE id=?1")?
+                    .execute(params![id, next_at, error])?;
             }
             Ok(())
         })
@@ -667,8 +664,7 @@ impl Store for SqliteStore {
                 messages_expired: c.execute("DELETE FROM messages WHERE expires_at<=?1", [now])? as u64,
                 forwards_expired: c.execute("DELETE FROM forwards WHERE expires_at<=?1", [now])? as u64,
                 tombstones_expired: c.execute("DELETE FROM cancels WHERE created_at<=?1", [cutoff])? as u64,
-                challenges_expired: c.execute("DELETE FROM used_challenges WHERE expires_at<=?1", [now])?
-                    as u64,
+                challenges_expired: c.execute("DELETE FROM used_challenges WHERE expires_at<=?1", [now])? as u64,
                 txlinks_expired: c.execute("DELETE FROM txlinks WHERE created_at<=?1", [cutoff])? as u64,
             })
         })
@@ -699,11 +695,10 @@ impl Store for SqliteStore {
                 [now],
                 |r| r.get(0),
             )?;
-            let (f, fp, fo): (i64, i64, Option<i64>) = c.query_row(
-                "SELECT count(*), count(DISTINCT peer), min(created_at) FROM forwards",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?;
+            let (f, fp, fo): (i64, i64, Option<i64>) =
+                c.query_row("SELECT count(*), count(DISTINCT peer), min(created_at) FROM forwards", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?;
             let t: i64 = c.query_row("SELECT count(*) FROM cancels", [], |r| r.get(0))?;
             let pages: i64 = c.query_row("PRAGMA page_count", [], |r| r.get(0))?;
             let psize: i64 = c.query_row("PRAGMA page_size", [], |r| r.get(0))?;
