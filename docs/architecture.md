@@ -10,8 +10,12 @@ All of it shares one `Relay` value (`src/relay/mod.rs`).
 |---|---|
 | `main.rs` | CLI (`serve`, `check-config`, `import`, `export`, `selftest`), startup, housekeeping, SIGTERM drain |
 | `config.rs` | The TOML file, its defaults and its checks |
-| `http.rs` | The axum router: websocket upgrade, `/health`, `/ready`, `/metrics`, `/status.json`, `/.well-known/epicbox.json`, the `/v1` HTTPS API |
-| `relay/mod.rs` | Shared state and the rules every entry point uses: `post_slate`, `cancel_tx`, mux/1 resume tokens |
+| `http/mod.rs` | The axum router: websocket upgrade, `/health`, `/ready`, `/metrics`, `/status.json`, `/.well-known/epicbox.json` |
+| `http/v1.rs` | The `/v1` HTTPS API and its challenge auth |
+| `relay/mod.rs` | Shared state and the types every entry point uses |
+| `relay/post.rs` | `post_slate`: the rules for posting a slate, from any entry point |
+| `relay/cancel.rs` | `cancel_tx`: the 3.1.0 cancel |
+| `relay/tokens.rs` | mux/1 resume tokens |
 | `relay/registry.rs` | Which socket holds which mailbox, and waking it |
 | `relay/session/` | One task per websocket: the shared event loop, classic frames (`classic.rs`) and mux/1 frames (`mux.rs`) |
 | `store/mod.rs` | The `Store` trait and its record types |
@@ -22,6 +26,7 @@ All of it shares one `Relay` value (`src/relay/mod.rs`).
 | `bus.rs` | Events published after a commit |
 | `metrics.rs` | Prometheus exporter and metric descriptions |
 | `migrate.rs` | JSON Lines import and export |
+| `clock.rs`, `ids.rs` | Wall-clock milliseconds, random ids and id checks |
 
 ## Message flow
 

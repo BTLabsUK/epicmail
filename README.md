@@ -71,7 +71,7 @@ systemd unit and the Caddy and nginx examples.
 |---|---|
 | `src/main.rs` | CLI, startup, housekeeping, shutdown |
 | `src/config.rs` | Configuration file and defaults |
-| `src/http.rs` | HTTP routes, websocket upgrade, `/v1` API |
+| `src/http/` | HTTP routes and websocket upgrade (`mod.rs`), the `/v1` HTTPS API (`v1.rs`) |
 | `src/relay/` | Shared state, posting, cancel, the socket registry and the websocket sessions |
 | `src/store/` | The `Store` trait and the SQLite store |
 | `src/forward.rs` | Forwarding to other relays |
@@ -79,6 +79,7 @@ systemd unit and the Caddy and nginx examples.
 | `src/address.rs`, `src/sig.rs` | Epicbox addresses and signatures |
 | `src/bus.rs`, `src/metrics.rs` | Post-commit events, Prometheus metrics |
 | `src/migrate.rs` | JSON Lines import and export |
+| `src/clock.rs`, `src/ids.rs` | Wall-clock milliseconds, random ids and id checks |
 | `examples/loadgen.rs` | Load generator used for docs/loadtest.md |
 | `src/bin/sigdiff-gen.rs`, `tests/sigdiff.rs` | Signature differential test ([tools/sigdiff/README.md](tools/sigdiff/README.md)) |
 | `tools/` | Static build, classic wallet compatibility run, export from Postgres-backed relays |
