@@ -1,4 +1,8 @@
-//! Epicbox relay library. The binary in main.rs wires these modules together.
+//! epicmail, an Epicbox-compatible relay, as a library. The `epicmail` binary (`main.rs`) wires
+//! these modules together; the integration tests and the load generator use them directly.
+//!
+//! `docs/architecture.md` describes how a message moves through the modules.
+
 pub mod address;
 pub mod bus;
 pub mod clock;

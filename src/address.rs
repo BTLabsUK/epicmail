@@ -9,6 +9,7 @@ const ADDRESS_REGEX: &str = r"^(epicbox://)?(?P<public_key>[123456789ABCDEFGHJKL
 
 static RE: Lazy<Regex> = Lazy::new(|| Regex::new(ADDRESS_REGEX).unwrap());
 
+/// `[epicbox://]<public key>[@domain[:port]]`, split into its parts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpicboxAddress {
     pub public_key: String,
@@ -25,6 +26,7 @@ pub enum AddressError {
     BadPort,
 }
 
+/// Split an address by the grammar alone. The key is not decoded; see `public_key_valid`.
 pub fn parse_address(s: &str) -> Result<EpicboxAddress, AddressError> {
     let caps = RE.captures(s).ok_or(AddressError::Malformed)?;
     let port = match caps.name("port") {

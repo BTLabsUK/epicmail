@@ -19,6 +19,7 @@ pub struct Bus {
 }
 
 impl Bus {
+    /// A bus that keeps the last 4096 events for listeners that fall behind.
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(4096);
         Self { tx }
@@ -29,6 +30,7 @@ impl Bus {
         let _ = self.tx.send(e);
     }
 
+    /// A receiver for events published from now on.
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.tx.subscribe()
     }

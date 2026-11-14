@@ -33,6 +33,7 @@ pub struct SockHandle {
 }
 
 impl SockHandle {
+    /// Queue a command for the socket's task. False when its queue is full or it has ended.
     pub fn send(&self, c: Cmd) -> bool {
         self.tx.try_send(c).is_ok()
     }
@@ -45,6 +46,7 @@ struct Entry {
     classic: Vec<SockHandle>,
 }
 
+/// The mailbox map, split into shards so sockets on different mailboxes rarely contend.
 pub struct Registry {
     shards: Vec<Mutex<HashMap<String, Entry>>>,
 }
@@ -56,6 +58,7 @@ impl Default for Registry {
 }
 
 impl Registry {
+    /// An empty registry.
     pub fn new() -> Self {
         Self { shards: (0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect() }
     }
@@ -81,6 +84,7 @@ impl Registry {
         }
     }
 
+    /// Remove a 3.0.0 subscriber; the entry goes when nothing holds the mailbox.
     pub fn unsubscribe_classic(&self, key: &str, id: u64) {
         let mut s = self.shard(key).lock();
         if let Some(e) = s.get_mut(key) {
@@ -113,6 +117,7 @@ impl Registry {
         held
     }
 
+    /// True when socket `id` is the mux/1 holder of `key`.
     pub fn is_mux_holder(&self, key: &str, id: u64) -> bool {
         self.shard(key).lock().get(key).and_then(|e| e.mux.as_ref()).map(|m| m.id == id).unwrap_or(false)
     }

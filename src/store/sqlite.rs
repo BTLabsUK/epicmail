@@ -82,6 +82,7 @@ const LINK_ENDPOINT: i64 = 1;
 type Done = Box<dyn FnOnce(std::result::Result<(), String>) + Send>;
 type Job = Box<dyn FnOnce(&Connection) -> Done + Send>;
 
+/// The [`Store`] on one SQLite file.
 pub struct SqliteStore {
     tx: mpsc::Sender<Job>,
     readers: Arc<Vec<Mutex<Connection>>>,
@@ -113,6 +114,9 @@ fn dedupe_forward(peer: &str, frame: &str) -> Vec<u8> {
 }
 
 impl SqliteStore {
+    /// Open or create the database, apply the schema, start the writer thread and open
+    /// `readers` read connections. `group_max` caps the writes in one commit. Fails on a database
+    /// whose schema is newer than this binary.
     pub fn open(path: &Path, readers: usize, group_max: usize) -> Result<Self> {
         let rw = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE

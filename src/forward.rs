@@ -33,6 +33,7 @@ const MAX_REFUSALS: i64 = 3;
 const BACKOFF_BASE_MS: i64 = 5_000;
 const BACKOFF_MAX_MS: i64 = 3_600_000;
 
+/// Delay before the next try after `attempts` failures: 5 s, doubling, at most an hour.
 pub fn backoff_ms(attempts: i64) -> i64 {
     let n = attempts.clamp(0, 20) as u32;
     BACKOFF_BASE_MS.saturating_mul(1i64 << n).min(BACKOFF_MAX_MS)

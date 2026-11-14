@@ -2,6 +2,7 @@
 
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
+/// Installs the global Prometheus recorder and describes every metric. Call once per process.
 pub fn install() -> anyhow::Result<PrometheusHandle> {
     let handle = PrometheusBuilder::new().install_recorder()?;
     describe();

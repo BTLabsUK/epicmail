@@ -39,6 +39,7 @@ struct Bucket {
 }
 
 impl Buckets {
+    /// `per_min` tokens a minute, holding at most `burst`. A key starts full.
     pub fn per_minute(per_min: f64, burst: f64) -> Self {
         Self { map: Mutex::new(HashMap::new()), per_ms: per_min / 60_000.0, burst: burst.max(1.0) }
     }
@@ -49,6 +50,8 @@ impl Buckets {
         b.at = now;
     }
 
+    /// Take `cost` tokens from `key`; `mult` scales both the rate and the burst. Err holds the
+    /// seconds until enough tokens are back.
     pub fn take(&self, key: &str, cost: f64, mult: f64) -> Result<(), u64> {
         let now = now_ms();
         let mut map = self.map.lock();
@@ -86,6 +89,7 @@ impl Buckets {
         self.map.lock().retain(|_, b| b.tokens + (now - b.at) as f64 * per_ms < burst);
     }
 
+    /// Keys with a bucket (for the gauge).
     pub fn len(&self) -> usize {
         self.map.lock().len()
     }
@@ -95,6 +99,7 @@ impl Buckets {
     }
 }
 
+/// Every rate and socket limit in `[limits]`, keyed by IP prefix or address.
 pub struct Limiter {
     cfg: Limits,
     pub post_addr: Buckets,
@@ -106,9 +111,12 @@ pub struct Limiter {
     total: AtomicU32,
 }
 
+/// Why a socket was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SocketRefusal {
+    /// `max_sockets` are open.
     Total,
+    /// The client's prefix has `sockets_per_ip` open.
     PerIp,
 }
 
@@ -162,16 +170,19 @@ impl Limiter {
         self.post_addr.take(key, 1.0, 1.0)
     }
 
+    /// Seconds to wait when the prefix has used up its failed-signature budget.
     pub fn sig_blocked(&self, ip: IpAddr) -> Option<u64> {
         let (p, m) = self.prefix(ip);
         self.failed_sig_ip.blocked(&p, m)
     }
 
+    /// Count a failed signature against the prefix.
     pub fn sig_failed(&self, ip: IpAddr) {
         let (p, m) = self.prefix(ip);
         let _ = self.failed_sig_ip.take(&p, 1.0, m);
     }
 
+    /// Reserve a socket slot for `ip`, held until the permit drops.
     pub fn open_socket(self: &Arc<Self>, ip: IpAddr) -> Result<SocketPermit, SocketRefusal> {
         let (p, m) = self.prefix(ip);
         let cap = (self.cfg.sockets_per_ip as f64 * m) as u32;
@@ -188,10 +199,12 @@ impl Limiter {
         Ok(SocketPermit { limiter: self.clone(), prefix: p, mux: false })
     }
 
+    /// Sockets open now, all kinds.
     pub fn sockets_open(&self) -> u32 {
         self.total.load(Ordering::Relaxed)
     }
 
+    /// Drop full buckets. Housekeeping calls this every minute.
     pub fn prune(&self) {
         self.post_addr.prune();
         self.post_ip.prune();

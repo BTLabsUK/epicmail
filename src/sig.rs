@@ -21,6 +21,7 @@ pub enum SigReject {
 }
 
 impl SigReject {
+    /// The `reason` label value.
     pub fn as_str(&self) -> &'static str {
         match self {
             SigReject::BadKey => "bad_key",
@@ -100,6 +101,7 @@ fn digest(message: &str) -> Message {
     Message::from_digest(Sha256::digest(message.as_bytes()).into())
 }
 
+/// `verify` with the key already decoded.
 pub fn verify_with_key(pk: &PublicKey, message: &str, signature_hex: &str) -> Result<(), SigReject> {
     let der = oracle_from_hex(signature_hex)?;
     let sig = Signature::from_der(&der).map_err(|_| SigReject::BadDer)?;

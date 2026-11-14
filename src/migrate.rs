@@ -96,6 +96,8 @@ fn secs_to_ms(s: i64) -> Option<i64> {
     s.checked_mul(1000)
 }
 
+/// Reads JSON Lines from `input` into the store: `slate` lines become queued messages, `forward`
+/// lines become forwards. Bad lines and lines already expired at `now_ms` are skipped and counted.
 pub async fn import_jsonl<R: BufRead>(
     store: &dyn Store,
     cfg: &Config,
