@@ -111,6 +111,10 @@ impl Session {
             self.send(ws, e).await;
             return Flow::Continue;
         }
+        if let Err(s) = r.limiter.sig_checks(self.ip, 1) {
+            self.send(ws, Refusal::RateLimited(s).classic_frame()).await;
+            return Flow::Continue;
+        }
         let address = msg.get("address").and_then(|a| a.as_str()).unwrap_or("");
         let signature = msg.get("signature").and_then(|a| a.as_str()).unwrap_or("");
         let key = parse_address(address).ok().filter(|a| a.public_key_valid()).map(|a| a.public_key);
@@ -274,6 +278,10 @@ impl Session {
             // The stock relay ignores other Made frames without an answer.
             _ => return,
         };
+        if let Err(s) = r.limiter.sig_checks(self.ip, 1) {
+            self.send(ws, Refusal::RateLimited(s).classic_frame()).await;
+            return;
+        }
         let signature = msg.get("signature").and_then(|s| s.as_str()).unwrap_or("");
         let signed = if ver == Ver::V2 { self.challenge.as_str() } else { msgid };
         let ok_sig = sig::verify(&key, signed, signature).is_ok()

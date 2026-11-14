@@ -43,6 +43,7 @@ per_sender_cap = 200             # pending messages per address from one sender
 sockets_per_ip = 256             # open sockets per IP prefix
 sockets_per_address = 4          # open sockets per subscribed address
 failed_sigs_per_min_per_ip = 120 # bad signatures per IP prefix per minute
+sig_checks_per_min_per_ip = 1200 # signature checks per IP prefix per minute: Subscribe, Made, CancelTx, each mux/1 Attach mailbox
 mux_mailboxes_per_socket = 256   # mailboxes one mux/1 socket may attach
 mux_attach_per_frame = 64        # mailboxes per attach frame
 mux_inflight = 32                # Mail pushed per mux/1 socket and not yet acked or held

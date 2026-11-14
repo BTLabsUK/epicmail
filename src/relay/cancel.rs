@@ -36,6 +36,9 @@ impl Relay {
         if let Some(s) = self.limiter.sig_blocked(ip) {
             return R(Refusal::RateLimited(s));
         }
+        if let Err(s) = self.limiter.sig_checks(ip, 1) {
+            return R(Refusal::RateLimited(s));
+        }
         // A bare signature over the txid is what PostSlate's epicboxtxidsig already is, so anyone
         // who saw the slate holds one. Accept it only from a socket that proved the key this
         // session; otherwise require the domain-separated form.

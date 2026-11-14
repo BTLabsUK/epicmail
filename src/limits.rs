@@ -105,6 +105,7 @@ pub struct Limiter {
     pub post_ip: Buckets,
     pub bytes_ip: Buckets,
     pub failed_sig_ip: Buckets,
+    pub sig_check_ip: Buckets,
     pub attach_ip: Buckets,
     pub http_ip: Buckets,
     sockets: Mutex<HashMap<String, (u32, u32)>>,
@@ -136,6 +137,10 @@ impl Limiter {
             failed_sig_ip: Buckets::per_minute(
                 cfg.failed_sigs_per_min_per_ip as f64,
                 cfg.failed_sigs_per_min_per_ip as f64,
+            ),
+            sig_check_ip: Buckets::per_minute(
+                cfg.sig_checks_per_min_per_ip as f64,
+                cfg.sig_checks_per_min_per_ip as f64,
             ),
             attach_ip: Buckets::per_minute(
                 cfg.mux_attach_frames_per_min as f64 * 8.0,
@@ -178,6 +183,15 @@ impl Limiter {
     pub fn sig_blocked(&self, ip: IpAddr) -> Option<u64> {
         let (p, m) = self.prefix(ip);
         self.failed_sig_ip.blocked(&p, m)
+    }
+
+    /// `n` signature checks against the prefix's budget, taken before the checks run. Counts
+    /// it as a refusal in the metrics when over.
+    pub fn sig_checks(&self, ip: IpAddr, n: usize) -> Result<(), u64> {
+        let (p, m) = self.prefix(ip);
+        self.sig_check_ip.take(&p, n.max(1) as f64, m).inspect_err(|_| {
+            metrics::counter!("epicbox_limit_refusals_total", "limit" => "sig_checks").increment(1);
+        })
     }
 
     /// One mux/1 Attach or Resume frame against the prefix's budget.
@@ -226,6 +240,7 @@ impl Limiter {
         self.post_ip.prune();
         self.bytes_ip.prune();
         self.failed_sig_ip.prune();
+        self.sig_check_ip.prune();
         self.attach_ip.prune();
         self.http_ip.prune();
     }

@@ -207,6 +207,10 @@ impl Session {
             self.send(ws, mux_error("rate_limited", "Too many failed signatures.", r#ref, Some(s))).await;
             return;
         }
+        if let Err(s) = r.limiter.sig_checks(self.ip, list.len()) {
+            self.send(ws, mux_error("rate_limited", "Too many signature checks.", r#ref, Some(s))).await;
+            return;
+        }
         let challenge = self.mux.as_ref().map(|m| m.challenge.clone()).unwrap_or_default();
         let mut out = Vec::with_capacity(list.len());
         let mut any = false;

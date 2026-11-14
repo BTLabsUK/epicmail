@@ -126,6 +126,9 @@ pub struct Limits {
     pub sockets_per_address: u32,
     /// Failed signature checks per IP per minute before posts from it are refused.
     pub failed_sigs_per_min_per_ip: u32,
+    /// Signature checks per IP per minute, passed or failed: Subscribe, Made, CancelTx and each
+    /// mailbox of a mux/1 Attach. Each costs a secp256k1 verification.
+    pub sig_checks_per_min_per_ip: u32,
     /// Mailboxes one mux/1 socket may attach.
     pub mux_mailboxes_per_socket: u32,
     /// Mailboxes in one Attach or Resume frame.
@@ -277,6 +280,7 @@ impl Default for Limits {
             sockets_per_ip: 256,
             sockets_per_address: 4,
             failed_sigs_per_min_per_ip: 120,
+            sig_checks_per_min_per_ip: 1200,
             mux_mailboxes_per_socket: 256,
             mux_attach_per_frame: 64,
             mux_inflight: 32,

@@ -865,3 +865,32 @@ async fn frames_other_than_posts_pay_the_byte_budget() {
     send(&mut a, json!({"type":"GetVersion"})).await;
     assert_eq!(recv(&mut a).await["type"], "GetVersion");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signature_checks_have_a_budget_per_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| c.limits.sig_checks_per_min_per_ip = 3).await;
+    // Valid Subscribes with fresh keys: each costs a check, and passing does not make it free.
+    let mut s = connect(&n).await;
+    let ch = recv_type(&mut s, "Challenge").await["str"].as_str().unwrap().to_string();
+    for _ in 0..3 {
+        let k = Key::new();
+        send(&mut s, json!({"type":"Subscribe","address":k.pk,"ver":"3.0.0","signature":k.sign(&ch)})).await;
+        assert_eq!(recv(&mut s).await, json!({"type":"Ok"}));
+    }
+    let k = Key::new();
+    send(&mut s, json!({"type":"Subscribe","address":k.pk,"ver":"3.0.0","signature":k.sign(&ch)})).await;
+    let r = recv(&mut s).await;
+    assert_eq!(r["type"], "Error", "{r}");
+    assert!(r["description"].as_str().unwrap().contains("Rate limit"), "{r}");
+
+    // The same prefix's mux/1 Attach is refused before any check runs.
+    let mut m = connect(&n).await;
+    recv_type(&mut m, "Challenge").await;
+    send(&mut m, json!({"type":"ClientDetails","wallet_version":"t","wallet_mode":"listener","protocol_version":"3.0.0","ext":["mux/1"]})).await;
+    let ok = recv(&mut m).await;
+    let mch = ok["challenge"].as_str().unwrap().to_string();
+    send(&mut m, json!({"type":"Attach","ref":"a1","mailboxes":[{"address":k.pk,"signature":k.sign(&mch)}]})).await;
+    let r = recv(&mut m).await;
+    assert_eq!(r["code"], "rate_limited", "{r}");
+}

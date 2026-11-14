@@ -256,6 +256,7 @@ async fn well_known(State(st): State<AppState>) -> Response {
                     "waiting_frames_per_min": session::WAITING_PER_MIN,
                     "attach_frames_per_min": l.mux_attach_frames_per_min,
                     "failed_sigs_per_min_per_ip": l.failed_sigs_per_min_per_ip,
+                    "sig_checks_per_min_per_ip": l.sig_checks_per_min_per_ip,
                     "mux_sockets_per_ip": l.mux_sockets_per_ip,
                 }
             }),

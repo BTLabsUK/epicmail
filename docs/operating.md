@@ -81,6 +81,7 @@ Per-IP limits group clients by prefix (`ipv4_prefix` 24, `ipv6_prefix` 48). Sour
 | `sockets_per_ip` | 256 | One prefix using all sockets |
 | `sockets_per_address` | 4 | Many sockets on one address |
 | `failed_sigs_per_min_per_ip` | 120 | Signature guessing, CPU burn on verification |
+| `sig_checks_per_min_per_ip` | 1200 | CPU burn by valid signatures: Subscribe, Made and CancelTx each cost one check, a mux/1 Attach one per mailbox. Without it one /24 with 128 sockets made 2,900 valid Subscribes a second and used 1.5 cores of a 2-vCPU host. A service that attaches many mailboxes from one address belongs in `shared_sources` |
 | `mux_mailboxes_per_socket` | 256 | One mux/1 socket attaching everything |
 | `mux_attach_per_frame` | 64 | Large attach frames |
 | `mux_inflight` | 32 | Mail pushed on one mux/1 socket and not yet acked or held |
