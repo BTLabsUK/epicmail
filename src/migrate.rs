@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::address;
 use crate::config::Config;
+use crate::ids::is_msgid;
 use crate::store::{ForwardKind, NewForward, NewMessage, PutOutcome, Store};
 
 const MAX_ERRORS: usize = 100;
@@ -133,8 +134,10 @@ pub async fn import_jsonl<R: BufRead>(store: &dyn Store, cfg: &Config, input: R,
                     st.skip(n, "expired");
                     continue;
                 }
+                // Wallets can only acknowledge ids of the form they accept; any other id would
+                // sit until it expires.
                 let msgid = match s.messageid {
-                    Some(m) if !m.is_empty() => m,
+                    Some(m) if is_msgid(&m) => m,
                     _ => random_msgid(),
                 };
                 let m = NewMessage {
@@ -373,5 +376,21 @@ mod tests {
         assert_eq!(g2[0].msgid, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         assert_eq!(g2[0].body, "body1");
         assert_eq!(g2[0].sender, format!("epicbox://{Q2}@old.example:443"));
+    }
+
+    #[tokio::test]
+    async fn import_replaces_ids_wallets_cannot_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = SqliteStore::open(&dir.path().join("a.db"), 1, 64).unwrap();
+        let now_s = NOW / 1000;
+        let line = format!(
+            r#"{{"kind":"slate","queue":"{Q1}","from":"","str":"b","signature":"s","messageid":"bad id/with spaces","created_at":{},"expires_at":{}}}"#,
+            now_s,
+            now_s + 1000
+        );
+        let st = import_jsonl(&s, &cfg(), Cursor::new(line), NOW).await.unwrap();
+        assert_eq!(st.slates, 1);
+        let got = s.claim(Q1, NOW, 10, vec![], ClaimMode::Consume).await.unwrap();
+        assert!(is_msgid(&got[0].msgid) && got[0].msgid != "bad id/with spaces", "{}", got[0].msgid);
     }
 }
