@@ -699,3 +699,16 @@ async fn a_client_that_stops_reading_is_closed() {
     }
     drop(m);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mux_detach_list_is_capped() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| c.limits.mux_mailboxes_per_socket = 2).await;
+    let (mut m, _) = mux_socket(&n).await;
+    let keys: Vec<String> = (0..3).map(|_| Key::new().pk).collect();
+    send(&mut m, json!({"type":"Detach","ref":"d1","mailboxes":keys[..2]})).await;
+    assert_eq!(recv(&mut m).await, json!({"type":"Ok","ref":"d1"}));
+    send(&mut m, json!({"type":"Detach","ref":"d2","mailboxes":keys})).await;
+    let e = recv(&mut m).await;
+    assert_eq!((e["code"].as_str(), e["ref"].as_str()), (Some("too_many_mailboxes"), Some("d2")), "{e}");
+}

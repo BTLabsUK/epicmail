@@ -302,6 +302,11 @@ impl Session {
             self.send(ws, mux_error("bad_frame", "Detach needs mailboxes.", r#ref, None)).await;
             return;
         };
+        // A socket never holds more than this, and each entry costs an address parse.
+        if list.len() > self.relay.cfg.limits.mux_mailboxes_per_socket as usize {
+            self.send(ws, mux_error("too_many_mailboxes", "Too many mailboxes in one Detach.", r#ref, None)).await;
+            return;
+        }
         let keys: Vec<String> = list
             .iter()
             .filter_map(|a| a.as_str())

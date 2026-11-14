@@ -97,7 +97,7 @@ The relay checks every entry and answers once:
 {"type":"Detach","ref":"2","mailboxes":["<key>"]}
 ```
 
-Answer: `{"type":"Ok","ref":"2"}`. Messages in flight for that mailbox go back to waiting. Detaching a mailbox that is not attached is not an error.
+Answer: `{"type":"Ok","ref":"2"}`. Messages in flight for that mailbox go back to waiting. Detaching a mailbox that is not attached is not an error. A Detach may name at most `mailboxes_per_socket` mailboxes; a longer list gets `too_many_mailboxes` and changes nothing.
 
 ### Resume
 
