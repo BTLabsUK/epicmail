@@ -78,6 +78,8 @@ CREATE TABLE IF NOT EXISTS used_challenges(key TEXT PRIMARY KEY, expires_at INTE
 
 const LINK_KEY: i64 = 0;
 const LINK_ENDPOINT: i64 = 1;
+/// Most incremental vacuum rounds of 2000 pages in one daily vacuum (about 32 GiB).
+const VACUUM_MAX_ROUNDS: usize = 4096;
 
 type Done = Box<dyn FnOnce(std::result::Result<(), String>) + Send>;
 type Job = Box<dyn FnOnce(&Connection) -> Done + Send>;
@@ -149,7 +151,7 @@ impl SqliteStore {
         let writer = open(path, rw)?;
         // auto_vacuum must be set before the first table exists.
         writer.execute_batch(
-            "PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; \
+            "PRAGMA auto_vacuum=INCREMENTAL; PRAGMA secure_delete=FAST; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; \
              PRAGMA foreign_keys=ON; PRAGMA temp_store=MEMORY;",
         )?;
         writer.execute_batch(SCHEMA)?;
@@ -724,15 +726,25 @@ impl Store for SqliteStore {
     }
 
     async fn vacuum(&self) -> Result<()> {
-        // The pragma returns rows, so it runs as a query (`execute` refuses statements that
-        // return rows) and is stepped to the end, which is when the pages are freed.
-        self.write(|c| {
-            let mut st = c.prepare("PRAGMA incremental_vacuum(2000)")?;
-            let mut rows = st.query([])?;
-            while rows.next()?.is_some() {}
-            Ok(())
-        })
-        .await
+        // Return every free page, 2000 (8 MiB) per writer job so other writes run in between.
+        // After a flood that can be gigabytes; the cap only bounds a runaway loop.
+        for _ in 0..VACUUM_MAX_ROUNDS {
+            let left = self
+                .write(|c| {
+                    // The pragma returns rows, so it runs as a query (`execute` refuses
+                    // statements that return rows) and is stepped to the end, which is when the
+                    // pages are freed.
+                    let mut st = c.prepare("PRAGMA incremental_vacuum(2000)")?;
+                    let mut rows = st.query([])?;
+                    while rows.next()?.is_some() {}
+                    c.query_row("PRAGMA freelist_count", [], |r| r.get::<_, i64>(0))
+                })
+                .await?;
+            if left == 0 {
+                break;
+            }
+        }
+        Ok(())
     }
 
     async fn stats(&self, now: i64) -> Result<Stats> {
@@ -844,6 +856,27 @@ mod tests {
         assert_eq!(sw.messages_expired, 2);
         s.check_writable().await.unwrap();
         s.vacuum().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn vacuum_returns_every_free_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = SqliteStore::open(&dir.path().join("t.db"), 2, 64).unwrap();
+        // About 6 MiB in 30 slates, then delete them: more than one 2000-page round.
+        for i in 0..30 {
+            let mut m = msg("q", &format!("s{i}"), &format!("{i}{}", "x".repeat(200_000)), 10);
+            m.msgid = format!("m{i}");
+            m.queue_cap = 100;
+            m.per_sender_cap = 100;
+            s.put_message(m).await.unwrap();
+        }
+        let ids: Vec<String> = (0..30).map(|i| format!("m{i}")).collect();
+        s.made("q", ids).await.unwrap();
+        s.vacuum().await.unwrap();
+        let free: i64 = s.read(|c| c.query_row("PRAGMA freelist_count", [], |r| r.get(0))).await.unwrap();
+        assert_eq!(free, 0);
+        let st = s.stats(10).await.unwrap();
+        assert!(st.db_bytes < 1 << 20, "file did not shrink: {} bytes", st.db_bytes);
     }
 
     #[tokio::test]

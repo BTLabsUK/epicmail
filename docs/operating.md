@@ -130,7 +130,7 @@ A portable alternative is `epicmail export --config epicmail.toml --out file`, a
 
 ## 6. Retention and sweep
 
-Messages nobody collects are deleted after `store.retention_days` (default 7, the protocol minimum). Collected messages are removed when the wallet acknowledges them (Made or Ack; wallets older than 2.0.0 send no Made, so theirs are removed on delivery). An expiry sweep runs at start and every 5 minutes. Once a day, at `store.vacuum_hour_utc` (UTC), an incremental vacuum returns free pages so the file shrinks. The file does not shrink before that vacuum, so a size peak after a flood falls back within a day.
+Messages nobody collects are deleted after `store.retention_days` (default 7, the protocol minimum). Collected messages are removed when the wallet acknowledges them (Made or Ack; wallets older than 2.0.0 send no Made, so theirs are removed on delivery). An expiry sweep runs at start and every 5 minutes. Once a day, at `store.vacuum_hour_utc` (UTC), an incremental vacuum returns every free page so the file shrinks, in rounds of 8 MiB with other writes in between. The file does not shrink before that vacuum, so a size peak after a flood falls back within a day. Deleted slates are overwritten in place where that costs no extra I/O (`secure_delete=FAST`); the rest is gone at the next vacuum or when SQLite reuses the page.
 
 ## 7. When to switch to Postgres
 
