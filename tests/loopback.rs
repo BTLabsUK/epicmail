@@ -1124,3 +1124,14 @@ async fn a_slate_reposted_with_another_from_is_still_one_message() {
     }
     assert_eq!(waiting(&n).await, 1, "the same signed slate was stored more than once");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pulls_stop_a_quarter_above_the_store_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| c.store.max_bytes = 1).await;
+    let bob = Key::new();
+    let ch = format!("ebh-{}-{:016x}", now_ms() / 1000, rand::random::<u64>());
+    let body = json!({"mailboxes":[{"address":bob.pk,"challenge":ch,"signature":bob.sign(&ch)}],"wait":0});
+    let (st, v) = http(&n, "POST", "/v1/pull", Some(body)).await;
+    assert_eq!(st, 503, "{v}");
+}

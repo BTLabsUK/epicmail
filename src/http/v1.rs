@@ -205,6 +205,14 @@ pub(super) async fn pull(
         Err(e) => return err(R, StatusCode::BAD_REQUEST, format!("{shape}: {e}")),
     };
     let ip = client_ip(peer, &headers, &relay.cfg.server.trusted_proxies);
+    // Every proven mailbox writes a used-challenge row, kept for the challenge window. Posts
+    // stop at store.max_bytes; pulls stop a quarter above it, so draining goes on while posts
+    // are refused but rows from pulls alone cannot grow the store without bound.
+    let cap = relay.cfg.store.max_bytes;
+    if cap > 0 && relay.store.used_bytes().is_some_and(|u| u >= cap.saturating_add(cap / 4)) {
+        metrics::counter!("epicbox_limit_refusals_total", "limit" => "store_bytes").increment(1);
+        return err(R, StatusCode::SERVICE_UNAVAILABLE, "Relay storage is full; try again later.");
+    }
     if let Some(s) = relay.limiter.sig_blocked(ip) {
         metrics::counter!("epicbox_limit_refusals_total", "limit" => "failed_sigs").increment(1);
         return too_many(R, format!("Too many failed signatures; retry in {s} s."), s);
