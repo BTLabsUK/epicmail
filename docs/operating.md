@@ -81,7 +81,7 @@ Per-IP limits group clients by prefix (`ipv4_prefix` 24, `ipv6_prefix` 48). Sour
 | `sockets_per_ip` | 256 | One prefix using all sockets |
 | `sockets_per_address` | 4 | Many sockets on one address |
 | `failed_sigs_per_min_per_ip` | 120 | Signature guessing, CPU burn on verification |
-| `sig_checks_per_min_per_ip` | 1200 | CPU burn by valid signatures: Subscribe, Made and CancelTx each cost one check, a mux/1 Attach one per mailbox. Without it one /24 with 128 sockets made 2,900 valid Subscribes a second and used 1.5 cores of a 2-vCPU host. A service that attaches many mailboxes from one address belongs in `shared_sources` |
+| `sig_checks_per_min_per_ip` | 1200 | CPU burn by valid signatures: Subscribe, Made and CancelTx each cost one check, a mux/1 Attach one per mailbox. Without it a few sockets can keep a core busy with valid Subscribes. A service that attaches many mailboxes from one address belongs in `shared_sources` |
 | `mux_mailboxes_per_socket` | 256 | One mux/1 socket attaching everything |
 | `mux_attach_per_frame` | 64 | Large attach frames |
 | `mux_inflight` | 32 | Mail pushed on one mux/1 socket and not yet acked or held |
@@ -98,11 +98,10 @@ Per-IP limits group clients by prefix (`ipv4_prefix` 24, `ipv6_prefix` 48). Sour
 
 The relay's limits group clients by prefix and act once a request has reached it. In front of
 it, `packaging/nginx.example.conf` adds per-address limits on new websocket connections, open
-connections, the public GET routes (which the relay does not limit) and `/v1` requests. On a
-small host they matter: in a load test on 2 vCPUs, a flood of `GET /status.json` used 55% of a
-core in the relay and 75% in nginx without them, and under 3% in the relay with them. A flood
-of new TLS connections still costs nginx the handshakes; only a firewall rate limit on new
-connections avoids that.
+connections, the public GET routes (which the relay does not limit) and `/v1` requests. They
+matter most on a small host, where a flood of public GETs would otherwise reach the relay. A
+flood of new TLS connections still costs nginx the handshakes; only a firewall rate limit on
+new connections avoids that.
 
 ## 4. Reading the health endpoints
 
@@ -138,7 +137,7 @@ The store is single-writer SQLite. One writer thread collects pending writes and
 
 Stay on SQLite until one of these holds:
 
-1. Sustained write rate near the single-writer ceiling: about 2,000 messages per second end to end on an 8-core desktop with NVMe (docs/loadtest.md). Measure your own host before relying on it. Act when the sustained rate stays above about half of it, not on peaks.
+1. Sustained write rate near the single-writer ceiling. The ceiling depends on the host's CPU and disk; find it on your own host with `examples/loadgen.rs`, and act when the sustained rate stays above about half of it, not on peaks.
 2. The database no longer fits in the page cache. Reads then hit disk and commit latency rises. Watch commit latency (`epicbox_store_commit_seconds`) against RAM.
 3. More than one relay process must share one store (active-active, or a standby that takes over without a copy). SQLite cannot be shared safely by processes on different hosts.
 

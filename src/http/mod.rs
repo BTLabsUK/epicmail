@@ -151,7 +151,7 @@ async fn fallback(
         }
     };
     let max = relay.cfg.limits.max_frame_bytes;
-    // Small socket buffers: the 128 KiB defaults cost about 136 KiB of RSS per idle socket.
+    // Small socket buffers: the 128 KiB defaults make every idle socket hold that much memory.
     // Reads grow past 8 KiB as a large frame arrives; writes go out at each flush.
     ws.read_buffer_size(WS_READ_BUFFER)
         .write_buffer_size(0)
