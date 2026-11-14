@@ -107,6 +107,7 @@ pub struct Limiter {
     pub bytes_ip: Buckets,
     pub failed_sig_ip: Buckets,
     pub attach_ip: Buckets,
+    pub http_ip: Buckets,
     sockets: Mutex<HashMap<String, (u32, u32)>>,
     total: AtomicU32,
 }
@@ -141,6 +142,7 @@ impl Limiter {
                 cfg.mux_attach_frames_per_min as f64 * 8.0,
                 cfg.mux_attach_frames_per_min as f64 * 8.0,
             ),
+            http_ip: Buckets::per_minute(cfg.http_per_min_per_ip as f64, cfg.http_per_min_per_ip as f64),
             sockets: Mutex::new(HashMap::new()),
             total: AtomicU32::new(0),
             cfg: cfg.clone(),
@@ -179,6 +181,12 @@ impl Limiter {
         self.attach_ip.take(&p, 1.0, m)
     }
 
+    /// /v1 work against the prefix's budget: `cost` mailboxes or acks.
+    pub fn http_ip(&self, ip: IpAddr, cost: usize) -> Result<(), u64> {
+        let (p, m) = self.prefix(ip);
+        self.http_ip.take(&p, cost.max(1) as f64, m)
+    }
+
     /// Count a failed signature against the prefix.
     pub fn sig_failed(&self, ip: IpAddr) {
         let (p, m) = self.prefix(ip);
@@ -214,6 +222,7 @@ impl Limiter {
         self.bytes_ip.prune();
         self.failed_sig_ip.prune();
         self.attach_ip.prune();
+        self.http_ip.prune();
     }
 }
 

@@ -150,6 +150,8 @@ pub struct Limits {
     pub shared_multiplier: u32,
     /// mux/1 sockets per IP prefix.
     pub mux_sockets_per_ip: u32,
+    /// /v1 work per IP per minute: each mailbox in a pull and each id in a made costs one.
+    pub http_per_min_per_ip: u32,
     /// Mailboxes held by all mux/1 resume tokens together. Past this the oldest tokens are
     /// dropped. Tokens outlive their sockets, so the socket limits do not bound them.
     pub mux_token_mailboxes: u32,
@@ -278,6 +280,7 @@ impl Default for Limits {
             shared_sources: vec![],
             shared_multiplier: 16,
             mux_sockets_per_ip: 64,
+            http_per_min_per_ip: 1200,
             mux_token_mailboxes: 1_000_000,
         }
     }
@@ -344,6 +347,10 @@ impl Config {
         }
         if !(8..=32).contains(&self.limits.ipv4_prefix) || !(16..=128).contains(&self.limits.ipv6_prefix) {
             bail!("limits.ipv4_prefix must be 8..32 and ipv6_prefix 16..128");
+        }
+        let biggest_v1 = self.http_api.max_mailboxes.max(self.http_api.max_per_mailbox);
+        if (self.limits.http_per_min_per_ip as usize) < biggest_v1 {
+            bail!("limits.http_per_min_per_ip must be at least http_api.max_mailboxes and http_api.max_per_mailbox");
         }
         for (k, v) in &self.federation.peers {
             if !(v.starts_with("ws://") || v.starts_with("wss://")) {

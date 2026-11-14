@@ -53,6 +53,7 @@ max_sockets = 150000             # open sockets in total
 shared_sources = []              # sources many users share (Tor exits, onion loopback); example ["127.0.0.1/32"]
 shared_multiplier = 16           # per-prefix limits are multiplied by this for shared_sources
 mux_sockets_per_ip = 64          # mux/1 sockets per IP prefix
+http_per_min_per_ip = 1200       # /v1 work per IP prefix per minute: one per mailbox pulled, one per id acked
 mux_token_mailboxes = 1000000    # mailboxes held by all mux/1 resume tokens; oldest tokens dropped past it
 
 [federation]

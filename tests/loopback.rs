@@ -611,3 +611,28 @@ async fn cancel_is_not_forwarded_against_federation_policy() {
     // Federation is off: nothing may be queued for elsewhere.example.
     assert_eq!(n.relay.store.stats(now_ms()).await.unwrap().forwards_waiting, 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn https_pull_has_a_budget_per_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| {
+        c.http_api.max_mailboxes = 2;
+        c.http_api.max_per_mailbox = 2;
+        c.limits.http_per_min_per_ip = 3;
+    })
+    .await;
+    let (bob, carol) = (Key::new(), Key::new());
+    let pull = || {
+        let entry = |k: &Key| {
+            let ch = format!("ebh-{}-{:016x}", now_ms() / 1000, rand::random::<u64>());
+            json!({"address":k.pk,"challenge":ch,"signature":k.sign(&ch)})
+        };
+        json!({"mailboxes":[entry(&bob), entry(&carol)],"wait":0,"limit":1})
+    };
+    let (st, v) = http(&n, "POST", "/v1/pull", Some(pull())).await;
+    assert_eq!(st, 200, "{v}");
+    // Two mailboxes cost two of the three units; the next pull of two is refused.
+    let (st, head, v) = http_with_head(&n, "POST", "/v1/pull", Some(pull())).await;
+    assert_eq!(st, 429, "{v}");
+    assert!(head.to_ascii_lowercase().contains("retry-after:"), "{head}");
+}

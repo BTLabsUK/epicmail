@@ -49,6 +49,7 @@ pub(super) async fn info(State(st): State<AppState>) -> Response {
             "max_messages_per_mailbox": h.max_per_mailbox,
             "max_wait_seconds": h.max_wait_s,
             "redeliver_after_seconds": h.lease_s,
+            "mailboxes_and_acks_per_min_per_ip": cfg.limits.http_per_min_per_ip,
         }),
     )
 }
@@ -198,6 +199,11 @@ pub(super) async fn pull(
         metrics::counter!("epicbox_limit_refusals_total", "limit" => "failed_sigs").increment(1);
         return too_many(R, format!("Too many failed signatures; retry in {s} s."), s);
     }
+    // Every mailbox costs a signature check and a challenge write.
+    if let Err(s) = relay.limiter.http_ip(ip, list.len()) {
+        metrics::counter!("epicbox_limit_refusals_total", "limit" => "http").increment(1);
+        return too_many(R, format!("Rate limit exceeded; retry in {s} s."), s);
+    }
 
     let mut proven = Vec::with_capacity(list.len());
     for mb in list {
@@ -313,6 +319,10 @@ pub(super) async fn made(
     if let Some(s) = relay.limiter.sig_blocked(ip) {
         metrics::counter!("epicbox_limit_refusals_total", "limit" => "failed_sigs").increment(1);
         return too_many(R, format!("Too many failed signatures; retry in {s} s."), s);
+    }
+    if let Err(s) = relay.limiter.http_ip(ip, acks.len()) {
+        metrics::counter!("epicbox_limit_refusals_total", "limit" => "http").increment(1);
+        return too_many(R, format!("Rate limit exceeded; retry in {s} s."), s);
     }
     let mut ids = Vec::with_capacity(acks.len());
     let mut refused = 0u64;
