@@ -9,7 +9,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -352,11 +351,9 @@ impl Session {
         match c {
             Cmd::Close { code, reason } => return Flow::Close(code, reason),
             Cmd::Wake(k) => {
-                if self.mux.is_some() {
-                    if let Some(m) = self.mux.as_mut() {
-                        if m.attached.contains(&k) {
-                            m.dirty.insert(k);
-                        }
+                if let Some(m) = self.mux.as_mut() {
+                    if m.attached.contains(&k) {
+                        m.dirty.insert(k);
                     }
                     self.pump(ws).await;
                 } else {
@@ -830,11 +827,9 @@ impl Session {
             return;
         };
         let mut out = Vec::with_capacity(set.len());
-        let mut any = false;
         for key in set {
             match self.take_mailbox(&key).await {
                 Ok(waiting) => {
-                    any = true;
                     out.push(json!({"mailbox":key,"ok":true,"waiting":waiting}));
                 }
                 Err(code) => out.push(json!({"mailbox":key,"ok":false,"code":code})),
@@ -843,7 +838,6 @@ impl Session {
         metrics::counter!("epicbox_mux_resumes_total").increment(1);
         // A resumed empty set still gets a token, so the session can go on.
         self.attached_reply(ws, out, true, r#ref).await;
-        let _ = any;
     }
 
     async fn attached_reply(&mut self, ws: &mut WebSocket, out: Vec<Value>, issue: bool, r#ref: &Option<String>) {
@@ -1078,11 +1072,4 @@ impl Session {
 
 fn ref_of(msg: &Value) -> Option<String> {
     msg.get("ref").and_then(|r| r.as_str()).filter(|r| r.len() <= 64).map(String::from)
-}
-
-#[allow(dead_code)]
-fn _assert_send() {
-    fn is_send<T: Send>(_: T) {}
-    let _ = |relay: Arc<Relay>, ws: WebSocket, ip: IpAddr, p: SocketPermit| is_send(run(relay, ws, ip, p));
-    let _ = Ordering::Relaxed;
 }

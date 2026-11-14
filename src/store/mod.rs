@@ -166,9 +166,6 @@ pub trait Store: Send + Sync + 'static {
         mode: ClaimMode,
     ) -> Result<Vec<StoredMessage>>;
 
-    /// Count another offer of a message already in flight. False when it is gone.
-    async fn reoffer(&self, id: i64, now: i64, lease_ms: i64) -> Result<bool>;
-
     /// Clear the lease on messages (socket closed, Detach) so they are offered again at once.
     async fn release(&self, ids: Vec<i64>) -> Result<()>;
 

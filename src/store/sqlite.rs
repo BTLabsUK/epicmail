@@ -447,20 +447,6 @@ impl Store for SqliteStore {
         .await
     }
 
-    async fn reoffer(&self, id: i64, now: i64, lease_ms: i64) -> Result<bool> {
-        self.write(move |c| {
-            let nb = if lease_ms > 0 { now + lease_ms } else { 0 };
-            let n = c
-                .prepare_cached(
-                    "UPDATE messages SET deliveries=deliveries+1, last_offered_at=?2, not_before=?3 \
-                     WHERE id=?1 AND expires_at>?2",
-                )?
-                .execute(params![id, now, nb])?;
-            Ok(n == 1)
-        })
-        .await
-    }
-
     async fn release(&self, ids: Vec<i64>) -> Result<()> {
         if ids.is_empty() {
             return Ok(());
