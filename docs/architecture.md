@@ -83,7 +83,7 @@ A 3.1.0 `CancelTx` whose other party is on another relay is forwarded the same w
 write over a channel and wait for the answer. The writer takes every write that is waiting, up to
 `store.group_commit_max`, runs each in its own savepoint inside one transaction, commits once,
 and then answers all callers. A write that fails rolls back its savepoint only. Under load this
-turns many fsyncs into one, which is where the throughput in `docs/loadtest.md` comes from.
+turns many fsyncs into one.
 
 Readers use a pool of `store.readers` read-only connections; WAL mode lets them read while the
 writer commits. `epicbox_store_commit_seconds` and `epicbox_store_commit_batch` show the
