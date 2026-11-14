@@ -60,43 +60,39 @@ impl Relay {
             Ok(i) => i,
             Err(_) => return R(Refusal::Internal),
         };
-        if let Some(t) = &info.tombstone {
-            return if t.participants.contains(&requester) {
-                CancelOutcome::Cancelled(txid)
-            } else {
-                CancelOutcome::Ok
-            };
-        }
-        if info.participants.is_empty() || !info.participants.contains(&requester) {
+        let participants = match &info.tombstone {
+            Some(t) => t.participants.clone(),
+            None => info.participants.clone(),
+        };
+        if participants.is_empty() || !participants.contains(&requester) {
             return CancelOutcome::Ok;
         }
         // Relays pass the request id on; a request seen moments ago is one coming back around a
-        // relay loop, so it is confirmed and not processed or forwarded again.
+        // relay loop, so it is confirmed and not processed or forwarded again. Ids are
+        // remembered only once the cancel is stored, so a request that failed can be retried.
         let request_id = msg
             .get("cancelrequestid")
             .and_then(|c| c.as_str())
             .filter(|c| is_txid(c))
             .map(String::from)
             .unwrap_or_else(|| rand_id(32));
-        if !self.first_cancel_request(&txid, &request_id) {
+        if self.cancel_request_seen(&txid, &request_id) {
             return CancelOutcome::Cancelled(txid);
         }
-        let receiver = info.participants.iter().find(|p| **p != requester).cloned();
+        let first = info.tombstone.is_none();
+        let receiver = participants.iter().find(|p| **p != requester).cloned();
         let now = now_ms();
-        let queues = match self.store.cancel_tx(&txid, info.participants.clone(), receiver.clone(), now).await {
-            Ok(q) => q,
-            Err(_) => return R(Refusal::Internal),
-        };
-        metrics::counter!("epicbox_cancels_total").increment(1);
+        // The CancelTx for each peer relay is queued in the same store transaction as the
+        // tombstone, so a store error leaves neither, and the requester's retry starts clean.
+        let mut forwards = Vec::new();
         if separated || self.cfg.protocol.forward_bare_cancel {
             // Endpoints come from the sender's address, which the slate signature does not
             // cover, so they get the same federation policy as a posted slate.
-            let peers: Vec<&String> = info.endpoints.iter().filter(|p| self.peer_allowed(p)).collect();
-            for peer in &peers {
+            for peer in info.endpoints.iter().filter(|p| self.peer_allowed(p)) {
                 let frame = json!({"type":"CancelTx","address":requester,"epicboxtxid":txid,
                     "signature":signature,"cancelrequestid":request_id});
-                let f = NewForward {
-                    peer: (*peer).clone(),
+                forwards.push(NewForward {
+                    peer: peer.clone(),
                     kind: ForwardKind::CancelTx,
                     frame: frame.to_string(),
                     txid: None,
@@ -104,15 +100,23 @@ impl Relay {
                     created_at: now,
                     expires_at: now + self.retention_ms(),
                     attempts: 0,
-                };
-                if self.store.put_forward(f).await.is_err() {
-                    return R(Refusal::Internal);
-                }
-            }
-            if !peers.is_empty() {
-                self.forward_notify.notify_one();
+                });
             }
         }
+        let written = match self.store.cancel_tx(&txid, participants.clone(), receiver.clone(), now, forwards).await {
+            Ok(w) => w,
+            Err(_) => return R(Refusal::Internal),
+        };
+        self.remember_cancel_request(&txid, &request_id);
+        if written.forwards_queued > 0 {
+            self.forward_notify.notify_one();
+        }
+        // A cancel that was already stored is confirmed again; the receiver was told then.
+        if !first {
+            return CancelOutcome::Cancelled(txid);
+        }
+        let queues = written.queues;
+        metrics::counter!("epicbox_cancels_total").increment(1);
         if let Some(r) = &receiver {
             for h in self.registry.classic_sockets(r) {
                 if h.cancel {
@@ -137,8 +141,14 @@ const CANCEL_REQUEST_TTL_MS: i64 = 10 * 60 * 1000;
 const CANCEL_REQUEST_MAX: usize = 100_000;
 
 impl Relay {
-    /// True the first time `txid:request_id` is seen within `CANCEL_REQUEST_TTL_MS`.
-    fn first_cancel_request(&self, txid: &str, request_id: &str) -> bool {
+    /// True when `txid:request_id` was stored within `CANCEL_REQUEST_TTL_MS`.
+    fn cancel_request_seen(&self, txid: &str, request_id: &str) -> bool {
+        let now = now_ms();
+        self.cancel_requests.lock().get(&format!("{txid}:{request_id}")).is_some_and(|until| *until > now)
+    }
+
+    /// Remember `txid:request_id` once its cancel is stored.
+    fn remember_cancel_request(&self, txid: &str, request_id: &str) {
         let now = now_ms();
         let mut seen = self.cancel_requests.lock();
         if seen.len() >= CANCEL_REQUEST_MAX {
@@ -147,13 +157,6 @@ impl Relay {
                 seen.clear();
             }
         }
-        let key = format!("{txid}:{request_id}");
-        match seen.get(&key) {
-            Some(until) if *until > now => false,
-            _ => {
-                seen.insert(key, now + CANCEL_REQUEST_TTL_MS);
-                true
-            }
-        }
+        seen.insert(format!("{txid}:{request_id}"), now + CANCEL_REQUEST_TTL_MS);
     }
 }

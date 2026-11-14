@@ -260,6 +260,11 @@ directions.
   `TransactionCancelled` and not processed or forwarded again, which ends relay loops.
   `protocol.forward_bare_cancel = false` forwards only cancels signed over
   `epicbox-cancel/1:<txid>`.
+- **All or nothing.** The cancel record, the deletion of waiting states and the queued forward
+  to each other relay are stored in one transaction. If storing fails, the requester gets an
+  error, nothing is kept, and the request (or the same request from a relay) can be sent again.
+  Each relay is queued once per transaction: a retry queues only relays not queued before, and
+  a cancel that comes back from a relay is not sent to it again.
 - **`Made` on a 3.1.0 slate** also removes the other waiting states of that transaction in the
   same mailbox.
 

@@ -73,6 +73,12 @@ CREATE TABLE IF NOT EXISTS cancels(
   created_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS cancels_receiver ON cancels(receiver, acknowledged, created_at);
+CREATE TABLE IF NOT EXISTS cancel_forwards(
+  txid TEXT NOT NULL,
+  peer TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(txid, peer)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS used_challenges(key TEXT PRIMARY KEY, expires_at INTEGER NOT NULL) WITHOUT ROWID;
 "#;
 
@@ -666,8 +672,10 @@ impl Store for SqliteStore {
         participants: Vec<String>,
         receiver: Option<String>,
         now: i64,
-    ) -> Result<Vec<String>> {
+        forwards: Vec<NewForward>,
+    ) -> Result<CancelWrite> {
         let txid = txid.to_string();
+        // One writer job runs in one savepoint: any error below undoes all of it.
         self.write(move |c| {
             c.prepare_cached(
                 "INSERT OR IGNORE INTO cancels(txid,participants,receiver,acknowledged,created_at) VALUES(?1,?2,?3,?4,?5)",
@@ -678,7 +686,25 @@ impl Store for SqliteStore {
                 st.query_map([&txid], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
             drop(st);
             c.prepare_cached("DELETE FROM messages WHERE txid=?1")?.execute([&txid])?;
-            Ok(queues)
+            let mut forwards_queued = 0;
+            for f in forwards {
+                // Each peer is queued once per transaction, ever: a retry fills gaps and a cancel
+                // that comes back from a peer is not sent to it again.
+                let first = c
+                    .prepare_cached("INSERT OR IGNORE INTO cancel_forwards(txid,peer,created_at) VALUES(?1,?2,?3)")?
+                    .execute(params![txid, f.peer, now])?;
+                if first == 0 {
+                    continue;
+                }
+                let dedupe = dedupe_forward(&f.peer, &f.frame);
+                forwards_queued += c
+                    .prepare_cached(
+                        "INSERT OR IGNORE INTO forwards(peer,kind,frame,attempts,next_at,created_at,expires_at,dedupe) \
+                         VALUES(?1,?2,?3,?4,?5,?5,?6,?7)",
+                    )?
+                    .execute(params![f.peer, f.kind as i64, f.frame, f.attempts, f.created_at, f.expires_at, dedupe])?;
+            }
+            Ok(CancelWrite { queues, forwards_queued })
         })
         .await
     }
@@ -719,6 +745,8 @@ impl Store for SqliteStore {
     async fn sweep(&self, now: i64, retention_ms: i64) -> Result<SweepStats> {
         self.write(move |c| {
             let cutoff = now - retention_ms;
+            // Which peers a cancel was queued for lives as long as its tombstone.
+            c.execute("DELETE FROM cancel_forwards WHERE created_at<=?1", [cutoff])?;
             Ok(SweepStats {
                 messages_expired: c.execute("DELETE FROM messages WHERE expires_at<=?1", [now])? as u64,
                 forwards_expired: c.execute("DELETE FROM forwards WHERE expires_at<=?1", [now])? as u64,
@@ -884,6 +912,41 @@ mod tests {
         assert!(st.db_bytes < 1 << 20, "file did not shrink: {} bytes", st.db_bytes);
     }
 
+    fn cancel_forward(peer: &str) -> NewForward {
+        NewForward {
+            peer: peer.into(),
+            kind: ForwardKind::CancelTx,
+            frame: format!("{{\"type\":\"CancelTx\",\"to\":\"{peer}\"}}"),
+            txid: None,
+            tx_keys: vec![],
+            created_at: 10,
+            expires_at: 1_000_000,
+            attempts: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancel_queues_each_peer_once_with_the_tombstone() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = SqliteStore::open(&dir.path().join("t.db"), 2, 64).unwrap();
+        let t = "t".repeat(32);
+        let parts = vec!["alice".to_string(), "bob".to_string()];
+        let w = s.cancel_tx(&t, parts.clone(), Some("bob".into()), 10, vec![cancel_forward("a:443")]).await.unwrap();
+        assert_eq!(w.forwards_queued, 1);
+        assert!(s.tx_info(&t).await.unwrap().tombstone.is_some());
+        // Again, with a peer learned since: only the new one is queued.
+        let w = s
+            .cancel_tx(&t, parts, Some("bob".into()), 11, vec![cancel_forward("a:443"), cancel_forward("b:443")])
+            .await
+            .unwrap();
+        assert_eq!(w.forwards_queued, 1);
+        let due = |p: &'static str| {
+            let s = &s;
+            async move { s.forwards_due(p, 1_000, 10).await.unwrap().len() }
+        };
+        assert_eq!((due("a:443").await, due("b:443").await), (1, 1));
+    }
+
     #[tokio::test]
     async fn used_bytes_follow_commits() {
         let dir = tempfile::tempdir().unwrap();
@@ -947,7 +1010,7 @@ mod tests {
         assert_eq!(s.put_message(intruder).await.unwrap(), PutOutcome::NotParticipant);
         let info = s.tx_info(&"t".repeat(32)).await.unwrap();
         assert_eq!(info.participants, ["alice", "bob"]);
-        let q = s.cancel_tx(&"t".repeat(32), info.participants, Some("bob".into()), 20).await.unwrap();
+        let q = s.cancel_tx(&"t".repeat(32), info.participants, Some("bob".into()), 20, vec![]).await.unwrap().queues;
         assert_eq!(q, ["bob"]);
         let mut again = msg("bob", "alice", "3", 21);
         again.txid = m.txid.clone();

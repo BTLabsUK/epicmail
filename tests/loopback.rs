@@ -1387,3 +1387,68 @@ async fn a_cancel_hands_the_message_in_flight_back_at_once() {
     let again = recv_type(&mut b, "Slate").await;
     assert_eq!(again["epicboxmsgid"], first["epicboxmsgid"]);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_store_failure_mid_cancel_leaves_nothing_half_done() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| {
+        // Nothing listens there, so forward rows stay queued and can be read.
+        c.federation.peers.insert("ok.test:443".into(), "ws://127.0.0.1:9/".into());
+        c.federation.peers.insert("fail.test:443".into(), "ws://127.0.0.1:9/".into());
+    })
+    .await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let txid = "0123456789abcdef0123456789abcdef";
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    // One transaction with a waiting slate here and states sent to two other relays.
+    for to_domain in ["relay.test", "ok.test", "fail.test"] {
+        send(&mut a, post_tx_frame(&alice, "relay.test", &bob, to_domain, txid)).await;
+        assert_eq!(recv(&mut a).await["type"], "Ok");
+    }
+    assert_eq!(waiting(&n).await, 1);
+    let cancel_rows = |peer: &'static str| {
+        let relay = n.relay.clone();
+        async move {
+            relay
+                .store
+                .forwards_due(peer, now_ms() + 7_200_000, 50)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|r| serde_json::from_str::<Value>(&r.frame).unwrap()["type"] == "CancelTx")
+                .count()
+        }
+    };
+
+    // The store fails while it queues the CancelTx for the second relay.
+    let db = rusqlite::Connection::open(dir.path().join("relay.test.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_cancel BEFORE INSERT ON forwards \
+         WHEN NEW.peer = 'fail.test:443' AND NEW.frame LIKE '%\"CancelTx\"%' \
+         BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+    )
+    .unwrap();
+    let crid = "requestidrequestidrequestid12345";
+    let cancel = json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":txid,"signature":alice.sign(txid),"cancelrequestid":crid});
+    send(&mut a, cancel.clone()).await;
+    let r = recv(&mut a).await;
+    assert_eq!(r["type"], "Error", "{r}");
+    assert_eq!(r["kind"], "UnknownError", "{r}");
+    // Nothing of the cancel was kept: no tombstone, the slate still waits, no forward queued.
+    assert!(n.relay.store.tx_info(txid).await.unwrap().tombstone.is_none());
+    assert_eq!(waiting(&n).await, 1);
+    assert_eq!((cancel_rows("ok.test:443").await, cancel_rows("fail.test:443").await), (0, 0));
+
+    // The store recovers; the same request, as a relay would retry it, now goes through.
+    db.execute_batch("DROP TRIGGER fail_cancel;").unwrap();
+    send(&mut a, cancel).await;
+    assert_eq!(recv(&mut a).await, json!({"type":"TransactionCancelled","epicboxtxid":txid}));
+    assert!(n.relay.store.tx_info(txid).await.unwrap().tombstone.is_some());
+    assert_eq!(waiting(&n).await, 0);
+    assert_eq!((cancel_rows("ok.test:443").await, cancel_rows("fail.test:443").await), (1, 1));
+    // Retrying again, with a new request id, queues nobody twice.
+    send(&mut a, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":txid,"signature":alice.sign(txid)})).await;
+    assert_eq!(recv(&mut a).await, json!({"type":"TransactionCancelled","epicboxtxid":txid}));
+    assert_eq!((cancel_rows("ok.test:443").await, cancel_rows("fail.test:443").await), (1, 1));
+}

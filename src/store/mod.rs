@@ -101,6 +101,15 @@ pub struct ForwardRow {
     pub created_at: i64,
 }
 
+/// What `Store::cancel_tx` did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CancelWrite {
+    /// Mailboxes that lost waiting messages.
+    pub queues: Vec<String>,
+    /// CancelTx forwards queued by this call.
+    pub forwards_queued: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TxInfo {
     /// Participant public keys seen on this relay.
@@ -200,15 +209,20 @@ pub trait Store: Send + Sync + 'static {
     async fn forward_failed(&self, id: i64, next_at: i64, error: &str, drop: bool) -> Result<()>;
 
     async fn tx_info(&self, txid: &str) -> Result<TxInfo>;
-    /// Write the tombstone and delete every waiting state of the transaction. Returns the
-    /// mailboxes that lost messages.
+    /// In one transaction: write the tombstone (if there is none yet), delete every waiting
+    /// state of the transaction, and queue `forwards`, the CancelTx for each peer relay. A peer
+    /// already queued for this txid is not queued again, so a retry queues only peers an earlier
+    /// call missed, and two relays forwarding a cancel to each other stop after one round. On
+    /// an error nothing is written. Returns the mailboxes that lost messages and how many
+    /// forwards were queued.
     async fn cancel_tx(
         &self,
         txid: &str,
         participants: Vec<String>,
         receiver: Option<String>,
         now: i64,
-    ) -> Result<Vec<String>>;
+        forwards: Vec<NewForward>,
+    ) -> Result<CancelWrite>;
     /// The oldest unacknowledged tombstone for a receiver.
     async fn pending_cancel(&self, receiver: &str) -> Result<Option<String>>;
     async fn ack_cancel(&self, receiver: &str, txid: &str) -> Result<()>;
