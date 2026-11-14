@@ -42,6 +42,8 @@ clap = { version = "4", features = ["derive"] }
 url = "2"
 ipnet = { version = "2", features = ["serde"] }
 base64 = "0.22"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 
 [dev-dependencies]
 tempfile = "3"

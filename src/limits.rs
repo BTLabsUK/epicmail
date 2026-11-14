@@ -1,0 +1,254 @@
+//! Rate limits and socket counts. Clients are grouped by IP prefix (/24, /48); listed shared
+//! sources (Tor exits, the onion service's loopback) get `shared_multiplier` times the budget.
+
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+
+use crate::config::Limits;
+use crate::util::{ip_prefix, now_ms};
+
+/// A token bucket per key. `take` returns the seconds to wait when the bucket is empty.
+pub struct Buckets {
+    map: Mutex<HashMap<String, Bucket>>,
+    per_ms: f64,
+    burst: f64,
+}
+
+#[derive(Clone, Copy)]
+struct Bucket {
+    tokens: f64,
+    at: i64,
+}
+
+impl Buckets {
+    pub fn per_minute(per_min: f64, burst: f64) -> Self {
+        Self { map: Mutex::new(HashMap::new()), per_ms: per_min / 60_000.0, burst: burst.max(1.0) }
+    }
+
+    fn refill(&self, b: &mut Bucket, now: i64, mult: f64) {
+        let cap = self.burst * mult;
+        b.tokens = (b.tokens + (now - b.at).max(0) as f64 * self.per_ms * mult).min(cap);
+        b.at = now;
+    }
+
+    pub fn take(&self, key: &str, cost: f64, mult: f64) -> Result<(), u64> {
+        let now = now_ms();
+        let mut map = self.map.lock();
+        let b = map.entry(key.to_string()).or_insert(Bucket { tokens: self.burst * mult, at: now });
+        self.refill(b, now, mult);
+        if b.tokens >= cost {
+            b.tokens -= cost;
+            Ok(())
+        } else {
+            let missing = cost - b.tokens;
+            let rate = (self.per_ms * mult).max(f64::MIN_POSITIVE);
+            Err(((missing / rate) / 1000.0).ceil().max(1.0) as u64)
+        }
+    }
+
+    /// Seconds until one token is available, without taking it.
+    pub fn blocked(&self, key: &str, mult: f64) -> Option<u64> {
+        let now = now_ms();
+        let mut map = self.map.lock();
+        let b = map.get_mut(key)?;
+        self.refill(b, now, mult);
+        if b.tokens >= 1.0 {
+            None
+        } else {
+            let rate = (self.per_ms * mult).max(f64::MIN_POSITIVE);
+            Some((((1.0 - b.tokens) / rate) / 1000.0).ceil().max(1.0) as u64)
+        }
+    }
+
+    /// Drop buckets that have refilled; they hold no information.
+    pub fn prune(&self) {
+        let now = now_ms();
+        let per_ms = self.per_ms;
+        let burst = self.burst;
+        self.map.lock().retain(|_, b| b.tokens + (now - b.at) as f64 * per_ms < burst);
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.lock().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+pub struct Limiter {
+    cfg: Limits,
+    pub post_addr: Buckets,
+    pub post_ip: Buckets,
+    pub bytes_ip: Buckets,
+    pub failed_sig_ip: Buckets,
+    pub attach_ip: Buckets,
+    sockets: Mutex<HashMap<String, (u32, u32)>>,
+    total: AtomicU32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketRefusal {
+    Total,
+    PerIp,
+}
+
+/// Held by a socket for its life; releases its slot on drop.
+pub struct SocketPermit {
+    limiter: Arc<Limiter>,
+    prefix: String,
+    mux: bool,
+}
+
+impl Limiter {
+    pub fn new(cfg: &Limits) -> Self {
+        Self {
+            post_addr: Buckets::per_minute(
+                cfg.posts_per_min_per_address as f64,
+                cfg.posts_burst_per_address as f64,
+            ),
+            post_ip: Buckets::per_minute(cfg.posts_per_min_per_ip as f64, cfg.posts_burst_per_ip as f64),
+            bytes_ip: Buckets::per_minute(cfg.bytes_per_min_per_ip as f64, cfg.bytes_per_min_per_ip as f64),
+            failed_sig_ip: Buckets::per_minute(
+                cfg.failed_sigs_per_min_per_ip as f64,
+                cfg.failed_sigs_per_min_per_ip as f64,
+            ),
+            attach_ip: Buckets::per_minute(
+                cfg.mux_attach_frames_per_min as f64 * 8.0,
+                cfg.mux_attach_frames_per_min as f64 * 8.0,
+            ),
+            sockets: Mutex::new(HashMap::new()),
+            total: AtomicU32::new(0),
+            cfg: cfg.clone(),
+        }
+    }
+
+    /// Prefix key and budget multiplier for a client IP.
+    pub fn prefix(&self, ip: IpAddr) -> (String, f64) {
+        let shared = self.cfg.shared_sources.iter().any(|n| n.contains(&ip));
+        let mult = if shared { self.cfg.shared_multiplier.max(1) as f64 } else { 1.0 };
+        (ip_prefix(ip, self.cfg.ipv4_prefix, self.cfg.ipv6_prefix), mult)
+    }
+
+    /// Per-IP post rate and bytes. Checked before any signature work.
+    pub fn post_ip(&self, ip: IpAddr, bytes: usize) -> Result<(), u64> {
+        let (p, m) = self.prefix(ip);
+        self.post_ip.take(&p, 1.0, m)?;
+        self.bytes_ip.take(&p, bytes as f64, m)
+    }
+
+    /// Per-address post rate. Checked after the sender's signature verified, so a forged `from`
+    /// cannot drain someone else's budget.
+    pub fn post_addr(&self, key: &str) -> Result<(), u64> {
+        self.post_addr.take(key, 1.0, 1.0)
+    }
+
+    pub fn sig_blocked(&self, ip: IpAddr) -> Option<u64> {
+        let (p, m) = self.prefix(ip);
+        self.failed_sig_ip.blocked(&p, m)
+    }
+
+    pub fn sig_failed(&self, ip: IpAddr) {
+        let (p, m) = self.prefix(ip);
+        let _ = self.failed_sig_ip.take(&p, 1.0, m);
+    }
+
+    pub fn open_socket(self: &Arc<Self>, ip: IpAddr) -> Result<SocketPermit, SocketRefusal> {
+        let (p, m) = self.prefix(ip);
+        let cap = (self.cfg.sockets_per_ip as f64 * m) as u32;
+        let mut map = self.sockets.lock();
+        if self.total.load(Ordering::Relaxed) >= self.cfg.max_sockets {
+            return Err(SocketRefusal::Total);
+        }
+        let e = map.entry(p.clone()).or_insert((0, 0));
+        if e.0 >= cap {
+            return Err(SocketRefusal::PerIp);
+        }
+        e.0 += 1;
+        self.total.fetch_add(1, Ordering::Relaxed);
+        Ok(SocketPermit { limiter: self.clone(), prefix: p, mux: false })
+    }
+
+    pub fn sockets_open(&self) -> u32 {
+        self.total.load(Ordering::Relaxed)
+    }
+
+    pub fn prune(&self) {
+        self.post_addr.prune();
+        self.post_ip.prune();
+        self.bytes_ip.prune();
+        self.failed_sig_ip.prune();
+        self.attach_ip.prune();
+    }
+}
+
+impl SocketPermit {
+    /// Count this socket as mux/1. False when the prefix is over `mux_sockets_per_ip`.
+    pub fn upgrade_mux(&mut self, mult: f64) -> bool {
+        if self.mux {
+            return true;
+        }
+        let cap = (self.limiter.cfg.mux_sockets_per_ip as f64 * mult) as u32;
+        let mut map = self.limiter.sockets.lock();
+        let e = map.entry(self.prefix.clone()).or_insert((0, 0));
+        if e.1 >= cap {
+            return false;
+        }
+        e.1 += 1;
+        self.mux = true;
+        true
+    }
+}
+
+impl Drop for SocketPermit {
+    fn drop(&mut self) {
+        let mut map = self.limiter.sockets.lock();
+        if let Some(e) = map.get_mut(&self.prefix) {
+            e.0 = e.0.saturating_sub(1);
+            if self.mux {
+                e.1 = e.1.saturating_sub(1);
+            }
+            if *e == (0, 0) {
+                map.remove(&self.prefix);
+            }
+        }
+        self.limiter.total.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bucket_burst_then_refuse() {
+        let b = Buckets::per_minute(60.0, 3.0);
+        for _ in 0..3 {
+            assert!(b.take("k", 1.0, 1.0).is_ok());
+        }
+        let wait = b.take("k", 1.0, 1.0).unwrap_err();
+        assert!((1..=2).contains(&wait));
+        assert!(b.take("other", 1.0, 1.0).is_ok());
+    }
+
+    #[test]
+    fn socket_caps() {
+        let cfg = Limits { sockets_per_ip: 2, mux_sockets_per_ip: 1, ..Limits::default() };
+        let l = Arc::new(Limiter::new(&cfg));
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let mut a = l.open_socket(ip).unwrap();
+        let _b = l.open_socket("10.0.0.9".parse().unwrap()).unwrap();
+        assert_eq!(l.open_socket(ip).err(), Some(SocketRefusal::PerIp));
+        assert!(l.open_socket("10.0.1.1".parse().unwrap()).is_ok());
+        assert!(a.upgrade_mux(1.0));
+        drop(a);
+        assert_eq!(l.sockets_open(), 1);
+        let mut c = l.open_socket(ip).unwrap();
+        assert!(c.upgrade_mux(1.0));
+    }
+}

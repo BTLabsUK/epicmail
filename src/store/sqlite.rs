@@ -210,6 +210,24 @@ fn run_savepoint<T>(
     }
 }
 
+/// Delete `msgid` if it sits in one of `queues`. When it carries a txid, the other waiting states
+/// of that transaction in the same queue go too (the cancel fork's Made rule). Returns the queue.
+fn made_one(c: &Connection, queues: &[&str], msgid: &str) -> rusqlite::Result<Option<String>> {
+    let row: Option<(String, Option<String>)> = c
+        .prepare_cached("SELECT queue, txid FROM messages WHERE msgid=?1")?
+        .query_row([msgid], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    let Some((queue, txid)) = row else { return Ok(None) };
+    if !queues.contains(&queue.as_str()) {
+        return Ok(None);
+    }
+    c.prepare_cached("DELETE FROM messages WHERE msgid=?1")?.execute([msgid])?;
+    if let Some(t) = txid {
+        c.prepare_cached("DELETE FROM messages WHERE queue=?1 AND txid=?2")?.execute(params![queue, t])?;
+    }
+    Ok(Some(queue))
+}
+
 fn writer_loop(conn: Connection, mut rx: mpsc::Receiver<Job>, group_max: usize) {
     while let Some(first) = rx.blocking_recv() {
         let mut batch = Vec::with_capacity(16);
@@ -471,12 +489,23 @@ impl Store for SqliteStore {
     async fn made(&self, queue: &str, msgids: Vec<String>) -> Result<Vec<bool>> {
         let queue = queue.to_string();
         self.write(move |c| {
-            let mut st = c.prepare_cached("DELETE FROM messages WHERE queue=?1 AND msgid=?2")?;
             let mut out = Vec::with_capacity(msgids.len());
             for id in msgids {
-                out.push(st.execute(params![queue, id])? == 1);
+                out.push(made_one(c, &[queue.as_str()], &id)?.is_some());
             }
             Ok(out)
+        })
+        .await
+    }
+
+    async fn made_in(&self, queues: Vec<String>, msgids: Vec<String>) -> Result<u64> {
+        self.write(move |c| {
+            let qs: Vec<&str> = queues.iter().map(String::as_str).collect();
+            let mut n = 0;
+            for id in msgids {
+                n += made_one(c, &qs, &id)?.is_some() as u64;
+            }
+            Ok(n)
         })
         .await
     }

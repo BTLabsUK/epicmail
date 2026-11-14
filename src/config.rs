@@ -85,6 +85,10 @@ pub struct Protocol {
     pub idle_timeout_s: u64,
     /// Unanswered Challenges, with mail waiting, before the watchdog closes a socket with 1001.
     pub watchdog_misses: u32,
+    /// Also forward CancelTx signed over the bare txid (the 3.1.0 fork's form) to other relays.
+    /// Off: only `epicbox-cancel/1:<txid>` signatures leave this relay, since a bare txid
+    /// signature can be replayed by anyone who saw the PostSlate.
+    pub forward_bare_cancel: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -221,6 +225,7 @@ impl Default for Protocol {
             ping_interval_s: 30,
             idle_timeout_s: 90,
             watchdog_misses: 3,
+            forward_bare_cancel: false,
         }
     }
 }

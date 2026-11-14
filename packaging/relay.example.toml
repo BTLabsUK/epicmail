@@ -27,6 +27,7 @@ mux = true                       # offer mux/1
 ping_interval_s = 30             # websocket ping interval, seconds
 idle_timeout_s = 90              # close a socket with no pong or frame for this long, seconds
 watchdog_misses = 3              # unanswered Challenges, with mail waiting, before close 1001
+forward_bare_cancel = false      # forward CancelTx signed over the bare txid (replayable); off by default
 
 [limits]
 max_frame_bytes = 1048576        # largest websocket frame (1 MiB)

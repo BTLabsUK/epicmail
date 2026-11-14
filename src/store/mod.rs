@@ -175,8 +175,13 @@ pub trait Store: Send + Sync + 'static {
     /// Delay a message until `until` (mux Hold). False when unknown for this queue.
     async fn hold(&self, queue: &str, msgid: &str, until: i64) -> Result<bool>;
 
-    /// Remove delivered messages. Returns, per msgid, whether it was removed.
+    /// Remove delivered messages. Returns, per msgid, whether it was removed. A message with a
+    /// txid takes the other waiting states of that transaction in the queue with it.
     async fn made(&self, queue: &str, msgids: Vec<String>) -> Result<Vec<bool>>;
+
+    /// mux/1 Ack: remove each msgid that sits in one of `queues`; others are ignored. Returns
+    /// how many were removed.
+    async fn made_in(&self, queues: Vec<String>, msgids: Vec<String>) -> Result<u64>;
 
     /// Queue a frame for a remote relay. False when the same frame is already queued.
     async fn put_forward(&self, f: NewForward) -> Result<bool>;
