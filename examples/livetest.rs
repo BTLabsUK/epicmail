@@ -23,7 +23,7 @@ use anyhow::{anyhow, bail, Context};
 use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
-use secp256k1::{PublicKey, SecretKey, SECP256K1};
+use secp256k1::{PublicKey, SecretKey};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -126,10 +126,10 @@ struct Key {
 
 impl Key {
     fn new() -> Self {
-        Self::from_secret(SecretKey::from_slice(&rand::random::<[u8; 32]>()).unwrap())
+        Self::from_secret(SecretKey::from_secret_bytes(rand::random()).unwrap())
     }
     fn from_secret(secret: SecretKey) -> Self {
-        let pk = sig::encode_public_key(&PublicKey::from_secret_key(SECP256K1, &secret), sig::VERSION_MAINNET);
+        let pk = sig::encode_public_key(&PublicKey::from_secret_key(&secret), sig::VERSION_MAINNET);
         Key { secret, pk }
     }
     fn sign(&self, m: &str) -> String {
@@ -942,7 +942,7 @@ async fn spam(
     keys: &str,
 ) -> anyhow::Result<()> {
     let dests: Arc<Vec<Key>> = Arc::new((0..mailboxes).map(|_| Key::new()).collect());
-    let lines: Vec<String> = dests.iter().map(|k| hex::encode(k.secret.secret_bytes())).collect();
+    let lines: Vec<String> = dests.iter().map(|k| hex::encode(k.secret.to_secret_bytes())).collect();
     std::fs::write(keys, lines.join("\n") + "\n")?;
     println!("{} destination keys written to {keys}", dests.len());
     let t = Arc::new(Tally::default());
@@ -1012,7 +1012,11 @@ async fn drain(ws_url: &str, keys: &str) -> anyhow::Result<()> {
     let ks: Vec<Key> = std::fs::read_to_string(keys)?
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| Ok(Key::from_secret(SecretKey::from_slice(&hex::decode(l.trim())?)?)))
+        .map(|l| {
+            Ok(Key::from_secret(SecretKey::from_secret_bytes(
+                hex::decode(l.trim())?.try_into().map_err(|_| anyhow!("a key line must be 32 bytes of hex"))?,
+            )?))
+        })
         .collect::<anyhow::Result<_>>()?;
     let t0 = Instant::now();
     let mut total_acked = 0u64;

@@ -1,7 +1,7 @@
 //! Epicbox address parsing (same grammar as the stock relay).
 
-use std::sync::LazyLock;
 use regex::Regex;
+use std::sync::LazyLock;
 
 use crate::sig;
 
@@ -50,11 +50,11 @@ impl EpicboxAddress {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secp256k1::{Secp256k1, SecretKey};
+    use secp256k1::SecretKey;
 
     fn key() -> String {
-        let sk = SecretKey::from_slice(&[7u8; 32]).unwrap();
-        let pk = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &sk);
+        let sk = SecretKey::from_secret_bytes([7u8; 32]).unwrap();
+        let pk = secp256k1::PublicKey::from_secret_key(&sk);
         sig::encode_public_key(&pk, sig::VERSION_FLOONET)
     }
 

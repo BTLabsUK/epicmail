@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
-use secp256k1::{PublicKey, SecretKey, SECP256K1};
+use secp256k1::{PublicKey, SecretKey};
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -142,9 +142,9 @@ struct Key {
 
 impl Key {
     fn new(floonet: bool) -> Self {
-        let secret = SecretKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
+        let secret = SecretKey::from_secret_bytes(rand::random()).unwrap();
         let v = if floonet { sig::VERSION_FLOONET } else { sig::VERSION_MAINNET };
-        let pk = sig::encode_public_key(&PublicKey::from_secret_key(SECP256K1, &secret), v);
+        let pk = sig::encode_public_key(&PublicKey::from_secret_key(&secret), v);
         Key { secret, pk }
     }
     fn sign(&self, m: &str) -> String {

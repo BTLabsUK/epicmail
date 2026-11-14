@@ -24,7 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
-use secp256k1::{PublicKey, SecretKey, SECP256K1};
+use secp256k1::{PublicKey, SecretKey};
 use serde_json::{json, Value};
 use tokio::net::TcpSocket;
 use tokio_tungstenite::tungstenite::Message;
@@ -85,8 +85,8 @@ struct Key {
 
 impl Key {
     fn new() -> Self {
-        let secret = SecretKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
-        let pk = sig::encode_public_key(&PublicKey::from_secret_key(SECP256K1, &secret), sig::VERSION_MAINNET);
+        let secret = SecretKey::from_secret_bytes(rand::random()).unwrap();
+        let pk = sig::encode_public_key(&PublicKey::from_secret_key(&secret), sig::VERSION_MAINNET);
         Key { secret, pk }
     }
     fn sign(&self, m: &str) -> String {
@@ -567,7 +567,7 @@ async fn main() -> anyhow::Result<()> {
         let mut k = std::fs::File::create(&args.keys)?;
         let mut a = std::fs::File::create(format!("{}.addrs", args.keys))?;
         for key in lkeys.iter().chain(okeys.iter()) {
-            writeln!(k, "{}", hex::encode(key.secret.secret_bytes()))?;
+            writeln!(k, "{}", hex::encode(key.secret.to_secret_bytes()))?;
             writeln!(a, "{}", key.pk)?;
         }
     }

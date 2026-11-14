@@ -10,7 +10,10 @@
 
 use epicmail::sig::{self, encode_public_key, VERSION_FLOONET, VERSION_MAINNET};
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1, SecretKey};
+use secp256k1::{
+    ecdsa::{self, Signature},
+    Message, PublicKey, SecretKey,
+};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::io::Write;
@@ -290,7 +293,6 @@ fn variants_key(pk: &PublicKey, rng: &mut StdRng) -> Vec<(String, bool)> {
 
 fn gen_cases() -> Vec<Case> {
     let mut rng = StdRng::seed_from_u64(0x5167_D1FF);
-    let secp = Secp256k1::new();
     let msgs: Vec<String> = vec![
         "hello".into(),
         String::new(),
@@ -304,8 +306,8 @@ fn gen_cases() -> Vec<Case> {
         .map(|_| {
             let mut b = [0u8; 32];
             rng.fill(&mut b);
-            let sk = SecretKey::from_slice(&b).unwrap();
-            (sk, PublicKey::from_secret_key(&secp, &sk))
+            let sk = SecretKey::from_secret_bytes(b).unwrap();
+            (sk, PublicKey::from_secret_key(&sk))
         })
         .collect();
     for (ki, (sk, pk)) in keys.iter().enumerate() {
@@ -314,7 +316,7 @@ fn gen_cases() -> Vec<Case> {
         for (mi, m) in msgs.iter().enumerate() {
             let sig_hex = sig::sign(sk, m);
             let compact =
-                secp.sign_ecdsa(&Message::from_digest(Sha256::digest(m.as_bytes()).into()), sk).serialize_compact();
+                ecdsa::sign(Message::from_digest(Sha256::digest(m.as_bytes()).into()), sk).serialize_compact();
             let _ = Signature::from_compact(&compact).unwrap();
             for s in variants_sig(&sig_hex, &compact) {
                 cases.push((good_pk.clone(), m.clone(), s));

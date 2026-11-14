@@ -2,7 +2,8 @@
 //! (`epicboxlib verifysignature`): SHA-256 of the UTF-8 message, strict-DER
 //! secp256k1 ECDSA, low-S only; hex is decoded exactly as the oracle decodes it.
 
-use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1, SecretKey};
+use secp256k1::ecdsa::{self, Signature};
+use secp256k1::{Message, PublicKey, SecretKey};
 use sha2::{Digest, Sha256};
 
 /// Version bytes of mainnet Epicbox addresses.
@@ -106,7 +107,7 @@ pub fn verify_with_key(pk: &PublicKey, message: &str, signature_hex: &str) -> Re
     let der = oracle_from_hex(signature_hex)?;
     let sig = Signature::from_der(&der).map_err(|_| SigReject::BadDer)?;
     // libsecp256k1 verify rejects high-S signatures.
-    Secp256k1::verification_only().verify_ecdsa(&digest(message), &sig, pk).map_err(|_| SigReject::Invalid)
+    ecdsa::verify(&sig, digest(message), pk).map_err(|_| SigReject::Invalid)
 }
 
 /// Ok(()) exactly when the oracle prints `true`.
@@ -117,7 +118,7 @@ pub fn verify(public_key_b58: &str, message: &str, signature_hex: &str) -> Resul
 
 /// DER hex, low-S.
 pub fn sign(secret: &SecretKey, message: &str) -> String {
-    let sig = Secp256k1::signing_only().sign_ecdsa(&digest(message), secret);
+    let sig = ecdsa::sign(digest(message), secret);
     hex::encode(sig.serialize_der())
 }
 

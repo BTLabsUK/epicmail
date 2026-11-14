@@ -269,8 +269,8 @@ fn export(cfg: &Config, out: Option<PathBuf>) -> Result<()> {
 }
 
 async fn selftest(cfg: Config) -> Result<()> {
-    let secret = secp256k1::SecretKey::from_slice(&rand::random::<[u8; 32]>())?;
-    let pk = secp256k1::PublicKey::from_secret_key(secp256k1::SECP256K1, &secret);
+    let secret = secp256k1::SecretKey::from_secret_bytes(rand::random())?;
+    let pk = secp256k1::PublicKey::from_secret_key(&secret);
     let s = sig::sign(&secret, "selftest");
     if sig::verify_with_key(&pk, "selftest", &s).is_err() || sig::verify_with_key(&pk, "other", &s).is_ok() {
         bail!("signature check failed");

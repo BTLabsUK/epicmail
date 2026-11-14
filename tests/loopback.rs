@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use secp256k1::{PublicKey, SecretKey, SECP256K1};
+use secp256k1::{PublicKey, SecretKey};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -69,8 +69,8 @@ struct Key {
 
 impl Key {
     fn new() -> Self {
-        let secret = SecretKey::from_slice(&rand::random::<[u8; 32]>()).unwrap();
-        let pk = sig::encode_public_key(&PublicKey::from_secret_key(SECP256K1, &secret), sig::VERSION_MAINNET);
+        let secret = SecretKey::from_secret_bytes(rand::random()).unwrap();
+        let pk = sig::encode_public_key(&PublicKey::from_secret_key(&secret), sig::VERSION_MAINNET);
         Key { secret, pk }
     }
     fn sign(&self, m: &str) -> String {
