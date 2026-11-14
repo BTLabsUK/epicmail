@@ -208,6 +208,8 @@ is accepted once and only inside `http_api.challenge_window_s`.
 | `POST /v1/made` | `{"address","acks":[{"id","signature"}]}`, each signature over the id | `{"removed":n,"refused":n}` |
 
 Pulled messages are leased for `http_api.lease_s` seconds and offered again if not acknowledged.
+One reply carries at most about 4 MiB of slates; when mailboxes or messages were left for the next
+pull it has `"more": true`, and the client should pull again.
 A long poll returns as soon as mail for one of its mailboxes is stored. One prefix may have
 `http_api.max_waiting_per_ip` long polls waiting at once (64 by default); more get 429 with
 `Retry-After`, while pulls with `wait: 0` are not affected.

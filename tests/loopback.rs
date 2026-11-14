@@ -991,3 +991,35 @@ async fn an_unreachable_peer_costs_one_attempt_per_backoff_not_one_per_row() {
     let attempts: i64 = rows.iter().map(|r| r.attempts).sum();
     assert_eq!(attempts, 1, "each tick tried another row of the dead peer");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pull_reply_has_a_byte_budget_and_says_when_there_is_more() {
+    let dir = tempfile::tempdir().unwrap();
+    // With 1 MiB slates allowed, a 4 MiB reply has room for 3 messages counted at full size.
+    let n = start(dir.path(), "relay.test", |c| {
+        c.limits.max_frame_bytes = 2 << 20;
+        c.limits.max_str_bytes = 1 << 20;
+    })
+    .await;
+    let (alice, bob) = (Key::new(), Key::new());
+    for i in 0..5 {
+        let mut f = post_frame(&alice, "relay.test", &bob, "relay.test", i);
+        f.as_object_mut().unwrap().remove("type");
+        assert_eq!(http(&n, "POST", "/v1/post", Some(f)).await.0, 200);
+    }
+    let pull = |n: &Node| {
+        let ch = format!("ebh-{}-{:016x}", now_ms() / 1000, rand::random::<u64>());
+        let body =
+            json!({"mailboxes":[{"address":bob.pk,"challenge":ch,"signature":bob.sign(&ch)}],"limit":20,"wait":0});
+        let addr = n.addr;
+        let relay = n.relay.clone();
+        async move { http(&Node { addr, relay }, "POST", "/v1/pull", Some(body)).await }
+    };
+    let (st, v) = pull(&n).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["mailboxes"][0]["messages"].as_array().unwrap().len(), 3, "{v}");
+    assert_eq!(v["more"], true, "{v}");
+    let (_, v) = pull(&n).await;
+    assert_eq!(v["mailboxes"][0]["messages"].as_array().unwrap().len(), 2, "{v}");
+    assert!(v.get("more").is_none(), "{v}");
+}

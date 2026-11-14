@@ -26,6 +26,10 @@ use crate::store::{ClaimMode, StoredMessage};
 const CHALLENGE_PREFIX: &str = "ebh-";
 const CHALLENGE_FUTURE_S: i64 = 60;
 const PULL_RECHECK: Duration = Duration::from_secs(5);
+/// Most slate bytes one `/v1/pull` response carries. Mailboxes past it are left for the next
+/// pull and the reply says `"more": true`. Without it one pull of 64 mailboxes x 50 messages of
+/// 128 KiB is 400 MiB, held in memory twice while it is serialised.
+const PULL_MAX_BYTES: usize = 4 << 20;
 
 pub(super) async fn info(State(st): State<AppState>) -> Response {
     let cfg = &st.relay.cfg;
@@ -238,12 +242,16 @@ pub(super) async fn pull(
     let mut shutdown = relay.shutdown.subscribe();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(wait);
     loop {
-        let Some((results, found)) = claim_round(&relay, &proven, limit, lease_ms).await else {
+        let Some((results, found, more)) = claim_round(&relay, &proven, limit, lease_ms).await else {
             return err(R, StatusCode::SERVICE_UNAVAILABLE, "Internal error; try again.");
         };
         let now = tokio::time::Instant::now();
         let Some(g) = guard.as_ref().filter(|_| found == 0 && now < deadline && !*shutdown.borrow()) else {
-            return reply(R, StatusCode::OK, json!({ "mailboxes": results }));
+            let mut body = json!({ "mailboxes": results });
+            if more {
+                body["more"] = json!(true);
+            }
+            return reply(R, StatusCode::OK, body);
         };
         // Leases that end on other sockets wake nobody, so look again every few seconds.
         let nap = (deadline - now).min(PULL_RECHECK);
@@ -255,11 +263,22 @@ pub(super) async fn pull(
     }
 }
 
-/// One pass over the proven mailboxes: offer up to `limit` messages from each. Returns the
-/// per-mailbox results and the number of messages offered, or None on a store error.
-async fn claim_round(relay: &Relay, proven: &[Proven], limit: usize, lease_ms: i64) -> Option<(Vec<Value>, usize)> {
+/// One pass over the proven mailboxes: offer up to `limit` messages from each, within
+/// `PULL_MAX_BYTES` in all. Returns the per-mailbox results, the number of messages offered, and
+/// whether the byte budget left mailboxes out; None on a store error.
+async fn claim_round(
+    relay: &Relay,
+    proven: &[Proven],
+    limit: usize,
+    lease_ms: i64,
+) -> Option<(Vec<Value>, usize, bool)> {
     let mut results = Vec::with_capacity(proven.len());
     let mut found = 0usize;
+    let mut bytes = 0usize;
+    let mut more = false;
+    // A claimed message is leased, so claim only what fits: each message counts as the largest
+    // allowed until its real size is known.
+    let max_msg = relay.cfg.limits.max_str_bytes.max(1) + 1024;
     for p in proven {
         let key = match &p.key {
             Ok(k) => k,
@@ -268,17 +287,35 @@ async fn claim_round(relay: &Relay, proven: &[Proven], limit: usize, lease_ms: i
                 continue;
             }
         };
+        let room = PULL_MAX_BYTES.saturating_sub(bytes) / max_msg;
+        let take = limit.min(room);
         let msgs = if relay.is_stalled(key) {
             vec![]
+        } else if take == 0 {
+            more = true;
+            vec![]
         } else {
-            match relay.store.claim(key, now_ms(), limit, vec![], ClaimMode::Offer { lease_ms }).await {
-                Ok(v) => v,
+            // A read first: a long poll looks every few seconds, and an empty mailbox should
+            // not cost a write each time.
+            match relay.store.has_offerable(key, now_ms(), vec![]).await {
+                Ok(false) => vec![],
+                Ok(true) => match relay.store.claim(key, now_ms(), take, vec![], ClaimMode::Offer { lease_ms }).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!(error = %e, "store claim failed");
+                        return None;
+                    }
+                },
                 Err(e) => {
-                    tracing::error!(error = %e, "store claim failed");
+                    tracing::error!(error = %e, "store read failed");
                     return None;
                 }
             }
         };
+        if take < limit && msgs.len() == take {
+            more = true;
+        }
+        bytes += msgs.iter().map(|m| m.body.len() + m.signature.len() + m.sender.len()).sum::<usize>();
         found += msgs.len();
         if !msgs.is_empty() {
             metrics::counter!("epicbox_deliveries_total", "mode" => "https").increment(msgs.len() as u64);
@@ -286,7 +323,7 @@ async fn claim_round(relay: &Relay, proven: &[Proven], limit: usize, lease_ms: i
         let msgs: Vec<Value> = msgs.into_iter().map(message_json).collect();
         results.push(json!({"address": p.address, "messages": msgs}));
     }
-    Some((results, found))
+    Some((results, found, more))
 }
 
 /// A message as `/v1/pull` returns it.
