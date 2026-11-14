@@ -35,10 +35,13 @@ use crate::relay::{session, PostOutcome, PostReq, Refusal, Relay};
 use crate::sig;
 use crate::store::ClaimMode;
 
+/// The /v1 protocol name, as reported by `/v1/info` and the info document.
 pub const HTTPS_PROTOCOL: &str = "epicbox-https/0.1";
 const CHALLENGE_PREFIX: &str = "ebh-";
 const CHALLENGE_FUTURE_S: i64 = 60;
 const PULL_RECHECK: Duration = Duration::from_secs(5);
+/// Initial websocket read buffer; it grows as a large frame arrives.
+const WS_READ_BUFFER: usize = 8 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -121,7 +124,14 @@ fn err(route: &'static str, status: StatusCode, message: impl Into<String>) -> R
     reply(route, status, json!({ "error": message.into() }))
 }
 
-// ---- websocket and plain pages -----------------------------------------------------------
+/// 429 with the wait in both the error text and `Retry-After`.
+fn too_many(route: &'static str, message: String, retry_s: u64) -> Response {
+    let mut resp = err(route, StatusCode::TOO_MANY_REQUESTS, message);
+    if let Ok(v) = HeaderValue::from_str(&retry_s.to_string()) {
+        resp.headers_mut().insert(header::RETRY_AFTER, v);
+    }
+    resp
+}
 
 async fn fallback(
     State(st): State<AppState>,
@@ -162,8 +172,6 @@ async fn fallback(
         .max_frame_size(max)
         .on_upgrade(move |socket| session::run(relay, socket, ip, permit))
 }
-
-const WS_READ_BUFFER: usize = 8 * 1024;
 
 async fn health() -> &'static str {
     "ok\n"
@@ -239,8 +247,8 @@ async fn well_known(State(st): State<AppState>) -> Response {
                     "attach_per_frame": l.mux_attach_per_frame,
                     "mailboxes_per_socket": l.mux_mailboxes_per_socket,
                     "inflight_per_socket": l.mux_inflight,
-                    "ids_per_ack": 256,
-                    "hold_max_s": 3600,
+                    "ids_per_ack": session::MAX_ACK_IDS,
+                    "hold_max_s": session::HOLD_MAX_S,
                     "attach_frames_per_min": l.mux_attach_frames_per_min,
                     "failed_sigs_per_min_per_ip": l.failed_sigs_per_min_per_ip,
                     "mux_sockets_per_ip": l.mux_sockets_per_ip,
@@ -262,8 +270,6 @@ async fn well_known(State(st): State<AppState>) -> Response {
     }))
     .into_response()
 }
-
-// ---- /v1 ---------------------------------------------------------------------------------
 
 async fn v1_info(State(st): State<AppState>) -> Response {
     let cfg = &st.relay.cfg;
@@ -332,11 +338,7 @@ async fn v1_post(
             json!({"error": "The transaction was cancelled.", "epicboxtxid": txid}),
         ),
         PostOutcome::Refused(Refusal::RateLimited(s)) => {
-            let mut resp = err(R, StatusCode::TOO_MANY_REQUESTS, format!("Rate limit exceeded; retry in {s} s."));
-            if let Ok(v) = HeaderValue::from_str(&s.to_string()) {
-                resp.headers_mut().insert(header::RETRY_AFTER, v);
-            }
-            resp
+            too_many(R, format!("Rate limit exceeded; retry in {s} s."), s)
         }
         PostOutcome::Refused(Refusal::Full(d)) => err(R, StatusCode::TOO_MANY_REQUESTS, d),
         PostOutcome::Refused(Refusal::Invalid(_, d)) => err(R, StatusCode::BAD_REQUEST, d),
@@ -439,11 +441,7 @@ async fn v1_pull(
     let ip = client_ip(peer, &headers, &relay.cfg.server.trusted_proxies);
     if let Some(s) = relay.limiter.sig_blocked(ip) {
         metrics::counter!("epicbox_limit_refusals_total", "limit" => "failed_sigs").increment(1);
-        let mut resp = err(R, StatusCode::TOO_MANY_REQUESTS, format!("Too many failed signatures; retry in {s} s."));
-        if let Ok(v) = HeaderValue::from_str(&s.to_string()) {
-            resp.headers_mut().insert(header::RETRY_AFTER, v);
-        }
-        return resp;
+        return too_many(R, format!("Too many failed signatures; retry in {s} s."), s);
     }
 
     let mut proven = Vec::with_capacity(list.len());
@@ -580,8 +578,6 @@ async fn v1_made(
     }
     reply(R, StatusCode::OK, json!({"removed": removed, "refused": refused}))
 }
-
-// ---- test knob ---------------------------------------------------------------------------
 
 /// `POST /test/stall {address, seconds}`: the relay delivers nothing to that mailbox for the
 /// given seconds (0 ends it). Only with `test.stall_endpoint`, only from loopback.
