@@ -243,12 +243,17 @@ impl Relay {
     /// vetted again when the forward manager resolves the name.
     pub fn forward_refusal(&self, domain: &str, port: u16) -> Option<Refusal> {
         let fed = &self.cfg.federation;
-        let d = domain.to_ascii_lowercase();
+        let d = crate::config::normalize_domain(domain).unwrap_or_default();
         let dp = format!("{d}:{port}");
         if !fed.enabled {
             return Some(Refusal::Invalid("InvalidRequest", "This relay does not forward to other relays.".into()));
         }
-        let listed = |l: &Vec<String>| l.iter().any(|x| x.eq_ignore_ascii_case(&d) || x.eq_ignore_ascii_case(&dp));
+        let listed = |l: &Vec<String>| {
+            l.iter().any(|x| {
+                let x = x.strip_suffix('.').unwrap_or(x);
+                x.eq_ignore_ascii_case(&d) || x.eq_ignore_ascii_case(&dp)
+            })
+        };
         if listed(&fed.deny) || (!fed.allow.is_empty() && !listed(&fed.allow)) {
             return Some(Refusal::Invalid("InvalidRequest", format!("Forwarding to {dp} is not allowed.")));
         }
@@ -289,9 +294,12 @@ fn destination(payload: &Value) -> Option<(String, String, u16)> {
     if domain.is_empty() || !domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
         return None;
     }
+    // `relay.example.org.` is the same host as `relay.example.org`: route both the same way, or
+    // an absolute name makes this relay forward to itself and slips past `federation.deny`.
+    let domain = crate::config::normalize_domain(domain)?;
     let addr = parse_address(key).ok()?;
     if addr.domain.is_some() || !addr.public_key_valid() {
         return None;
     }
-    Some((addr.public_key, domain.to_string(), port))
+    Some((addr.public_key, domain, port))
 }

@@ -936,3 +936,34 @@ async fn a_stolen_resume_token_is_revoked_by_the_owners_next_attach() {
     assert_eq!(at["type"], "Attached", "{at}");
     assert_eq!(at["mailboxes"].as_array().unwrap().len(), 0, "stolen token still resumes the mailbox: {at}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_absolute_domain_is_this_relay_not_a_peer() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| c.federation.allow_private = true).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    // The destination inside the slate names this relay with a trailing dot.
+    send(&mut a, post_frame(&alice, "relay.test", &bob, "relay.test.", 1)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    assert_eq!(waiting(&n).await, 1, "stored here");
+    assert_eq!(forwards_waiting_settles(&n, 0).await, 0, "not queued for a forward to itself");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_socket_with_our_own_instance_id_is_a_forward_loop() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let mut req = format!("ws://{}/", n.addr).into_client_request().unwrap();
+    req.headers_mut().insert("x-epicmail-instance", n.relay.instance_id.parse().unwrap());
+    match tokio_tungstenite::connect_async(req).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) => assert_eq!(r.status().as_u16(), 508),
+        other => panic!("expected 508, got {:?}", other.map(|_| ())),
+    }
+    // Another relay's id is a normal peer.
+    let mut req = format!("ws://{}/", n.addr).into_client_request().unwrap();
+    req.headers_mut().insert("x-epicmail-instance", "someone-else".parse().unwrap());
+    assert!(tokio_tungstenite::connect_async(req).await.is_ok());
+}

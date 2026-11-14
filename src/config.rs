@@ -386,13 +386,14 @@ impl Config {
 
     /// True when `domain`/`port` from a destination names this relay.
     pub fn is_local(&self, domain: &str, port: u16) -> bool {
-        let d = domain.to_ascii_lowercase();
-        if d == self.server.domain.to_ascii_lowercase() && port == self.server.port {
+        let Some(d) = normalize_domain(domain) else { return false };
+        if Some(d.clone()) == normalize_domain(&self.server.domain) && port == self.server.port {
             return true;
         }
         let with_port = format!("{d}:{port}");
         self.server.aliases.iter().any(|a| {
             let a = a.to_ascii_lowercase();
+            let a = a.strip_suffix('.').unwrap_or(&a).to_string();
             if a.contains(':') {
                 a == with_port
             } else {
@@ -402,9 +403,36 @@ impl Config {
     }
 }
 
+/// A relay domain in one form: lower case, without the trailing dot of an absolute name.
+/// None when it is empty or not a plausible host name (empty labels, leading dot).
+pub fn normalize_domain(domain: &str) -> Option<String> {
+    let d = domain.to_ascii_lowercase();
+    let d = d.strip_suffix('.').unwrap_or(&d);
+    if d.is_empty() || d.len() > 253 || d.split('.').any(|l| l.is_empty() || l.len() > 63) {
+        return None;
+    }
+    Some(d.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn domains_have_one_normal_form() {
+        assert_eq!(normalize_domain("Relay.Example.org."), Some("relay.example.org".into()));
+        assert_eq!(normalize_domain("relay.example.org"), Some("relay.example.org".into()));
+        for bad in ["", ".", "a..b", ".a.b", "a.b..", "a.b.."] {
+            assert_eq!(normalize_domain(bad), None, "{bad}");
+        }
+        let mut c = Config::default();
+        c.server.domain = "relay.example.org".into();
+        c.server.aliases = vec!["old.example.org.".into()];
+        assert!(c.is_local("relay.example.org.", 443));
+        assert!(c.is_local("RELAY.example.org", 443));
+        assert!(c.is_local("old.example.org", 443));
+        assert!(!c.is_local("relay.example.org.", 444));
+    }
 
     fn base() -> Config {
         let mut c = Config::default();

@@ -61,7 +61,13 @@ pub struct Relay {
     pub last_ready_probe: Mutex<Option<Instant>>,
     /// Store totals from the last housekeeping round, served by `/status.json`.
     pub last_stats: Mutex<Option<crate::store::Stats>>,
+    /// Random per process. Forwards carry it in [`INSTANCE_HEADER`]; a socket that arrives with
+    /// our own value is this relay forwarding to itself under another name, and is refused.
+    pub instance_id: String,
 }
+
+/// Handshake header that carries the forwarding relay's `instance_id`.
+pub const INSTANCE_HEADER: &str = "x-epicmail-instance";
 
 /// A PostSlate, from any entry point.
 #[derive(Debug, Clone, Default)]
@@ -171,6 +177,7 @@ impl Relay {
             store_ok: AtomicBool::new(true),
             last_ready_probe: Mutex::new(None),
             last_stats: Mutex::new(None),
+            instance_id: crate::ids::rand_id(32),
         })
     }
 

@@ -18,6 +18,8 @@ use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::Connector;
@@ -157,6 +159,11 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>) {
                     tracing::warn!(peer, error = %e, attempts, dropped = drop, "peer refused forward");
                     relay.store.forward_failed(row.id, now_ms() + backoff_ms(attempts), &e, drop).await
                 }
+                Err(Failure::Loop) => {
+                    metrics::counter!("epicbox_forwards_total", "result" => "loop").increment(1);
+                    tracing::warn!(peer, "forward dropped: the peer is this relay under another name");
+                    relay.store.forward_failed(row.id, now_ms(), "forward loop", true).await
+                }
                 Err(Failure::Transport(e)) => {
                     metrics::counter!("epicbox_forwards_total", "result" => "failed").increment(1);
                     tracing::warn!(peer, error = %e, attempts, "forward failed");
@@ -181,6 +188,8 @@ enum Failure {
     Refused(String),
     /// No answer: DNS, TCP, TLS, timeout, closed.
     Transport(String),
+    /// The peer is this relay under another name: never worth retrying.
+    Loop,
 }
 
 impl From<anyhow::Error> for Failure {
@@ -231,10 +240,17 @@ async fn deliver(relay: &Relay, peer: &str, row: &ForwardRow, tls: Arc<rustls::C
     let mut cfg = WebSocketConfig::default();
     cfg.max_message_size = Some(relay.cfg.limits.max_frame_bytes);
     cfg.max_frame_size = Some(relay.cfg.limits.max_frame_bytes);
+    let mut req = url.as_str().into_client_request().map_err(|e| Failure::Transport(format!("url: {e}")))?;
+    if let Ok(v) = HeaderValue::from_str(&relay.instance_id) {
+        req.headers_mut().insert(crate::relay::INSTANCE_HEADER, v);
+    }
     let (mut ws, _) =
-        tokio_tungstenite::client_async_tls_with_config(url.as_str(), tcp, Some(cfg), Some(Connector::Rustls(tls)))
+        tokio_tungstenite::client_async_tls_with_config(req, tcp, Some(cfg), Some(Connector::Rustls(tls)))
             .await
-            .map_err(|e| Failure::Transport(format!("handshake: {e}")))?;
+            .map_err(|e| match e {
+                tokio_tungstenite::tungstenite::Error::Http(r) if r.status().as_u16() == 508 => Failure::Loop,
+                e => Failure::Transport(format!("handshake: {e}")),
+            })?;
 
     // The peer greets with a Challenge; the frame goes after it, as the stock relay does.
     let mut sent = false;

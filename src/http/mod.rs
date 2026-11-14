@@ -134,6 +134,10 @@ async fn fallback(
     if relay.draining.load(Ordering::Relaxed) {
         return (StatusCode::SERVICE_UNAVAILABLE, "Relay restarting.\n").into_response();
     }
+    if headers.get(crate::relay::INSTANCE_HEADER).is_some_and(|v| v.as_bytes() == relay.instance_id.as_bytes()) {
+        metrics::counter!("epicbox_forward_loops_total").increment(1);
+        return (StatusCode::LOOP_DETECTED, "This relay forwarded to itself.\n").into_response();
+    }
     let ip = client_ip(peer, &headers, &relay.cfg.server.trusted_proxies);
     let permit = match relay.limiter.open_socket(ip) {
         Ok(p) => p,
