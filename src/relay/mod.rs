@@ -8,6 +8,7 @@ mod post;
 pub mod registry;
 pub mod session;
 mod tokens;
+pub mod waiters;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -39,6 +40,8 @@ pub struct Relay {
     pub registry: Registry,
     /// Events published after a commit.
     pub bus: Bus,
+    /// `/v1/pull` long polls waiting for mail, by mailbox.
+    pub pull_waiters: waiters::PullWaiters,
     pub limiter: Arc<Limiter>,
     /// mux/1 resume tokens by SHA-256 hash. Memory only.
     tokens: Mutex<tokens::Tokens>,
@@ -157,6 +160,7 @@ impl Relay {
             store,
             registry: Registry::new(),
             bus: Bus::new(),
+            pull_waiters: waiters::PullWaiters::new(),
             tokens: Mutex::new(tokens),
             forward_notify: Notify::new(),
             stalled: Mutex::new(HashMap::new()),

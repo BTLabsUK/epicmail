@@ -41,8 +41,10 @@ All of it shares one `Relay` value (`src/relay/mod.rs`).
    transaction. The call returns after the commit; only then does the wallet get `Ok`.
 3. **Wake.** After the commit the relay wakes the mailbox's holder through the registry and
    publishes `MailStored` on the bus. The registry pushes to one socket per mailbox: the mux/1
-   holder if there is one, else the newest classic subscriber. `/v1` long polls listen on the
-   bus.
+   holder if there is one, else the newest classic subscriber. `/v1` long polls waiting on that
+   mailbox are woken through `relay/waiters.rs`, which wakes only the pulls for that mailbox;
+   waiting pulls are capped per IP prefix and in total (`http_api.max_waiting_per_ip`,
+   `http_api.max_waiting`).
 4. **Deliver.** The woken session claims the next message from the store. A claim is a lease
    (`OFFER_LEASE_MS`, 60 s on classic sockets; `http_api.lease_s` on `/v1`), so a socket that
    dies does not block the mailbox. Classic sockets have one message in flight; mux/1 sockets

@@ -158,6 +158,7 @@ impl Relay {
         match self.store.put_message(m).await {
             Ok(PutOutcome::Stored { msgid }) => {
                 self.registry.wake(&dest_key);
+                self.pull_waiters.wake(&dest_key);
                 self.bus.publish(Event::MailStored { queue: dest_key });
                 PostOutcome::Stored { msgid, txid }
             }

@@ -1,6 +1,7 @@
-//! Events published after a commit. The /v1 long poll listens here. A slow listener misses
-//! events instead of slowing the publisher (`broadcast` drops the oldest), so a listener that
-//! lags must re-read the store.
+//! Events published after a commit, for listeners that want every event (nothing in the relay
+//! subscribes today; `/v1` long polls use the per-mailbox waiters in `relay::waiters`). A slow
+//! listener misses events instead of slowing the publisher (`broadcast` drops the oldest), so a
+//! listener that lags must re-read the store.
 
 use tokio::sync::broadcast;
 

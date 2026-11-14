@@ -13,13 +13,12 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use serde_json::{json, Value};
-use tokio::sync::broadcast::error::RecvError;
 
 use super::{client_ip, err, reply, too_many, AppState, HTTPS_PROTOCOL};
 use crate::address::parse_address;
-use crate::bus::Event;
 use crate::clock::now_ms;
 use crate::ids::is_msgid;
+use crate::relay::waiters::WaitRefusal;
 use crate::relay::{PostOutcome, PostReq, Refusal, Relay};
 use crate::sig;
 use crate::store::{ClaimMode, StoredMessage};
@@ -50,6 +49,7 @@ pub(super) async fn info(State(st): State<AppState>) -> Response {
             "max_wait_seconds": h.max_wait_s,
             "redeliver_after_seconds": h.lease_s,
             "mailboxes_and_acks_per_min_per_ip": cfg.limits.http_per_min_per_ip,
+            "max_waiting_pulls_per_ip": h.max_waiting_per_ip,
         }),
     )
 }
@@ -216,8 +216,25 @@ pub(super) async fn pull(
     let keys: HashSet<String> = proven.iter().filter_map(|p| p.key.clone().ok()).collect();
     let lease_ms = (h.lease_s.max(1) * 1000) as i64;
 
-    // Subscribe before the first claim so a message stored in between still wakes us.
-    let mut events = relay.bus.subscribe();
+    // A long poll registers before the first claim, so a message stored in between still
+    // wakes it. Waiting pulls are capped per prefix and in total.
+    let guard = if wait > 0 && !keys.is_empty() {
+        let (prefix, mult) = relay.limiter.prefix(ip);
+        let per_ip = (f64::from(h.max_waiting_per_ip) * mult) as u32;
+        match relay.pull_waiters.register(keys.iter().cloned(), prefix, per_ip, h.max_waiting) {
+            Ok(g) => Some(g),
+            Err(why) => {
+                let (limit, text) = match why {
+                    WaitRefusal::PerIp => ("http_waiting_per_ip", "Too many waiting pulls from this network"),
+                    WaitRefusal::Total => ("http_waiting", "Too many waiting pulls"),
+                };
+                metrics::counter!("epicbox_limit_refusals_total", "limit" => limit).increment(1);
+                return too_many(R, format!("{text}; retry in {} s.", PULL_RECHECK.as_secs()), PULL_RECHECK.as_secs());
+            }
+        }
+    } else {
+        None
+    };
     let mut shutdown = relay.shutdown.subscribe();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(wait);
     loop {
@@ -225,22 +242,13 @@ pub(super) async fn pull(
             return err(R, StatusCode::SERVICE_UNAVAILABLE, "Internal error; try again.");
         };
         let now = tokio::time::Instant::now();
-        if found > 0 || now >= deadline || keys.is_empty() || *shutdown.borrow() {
+        let Some(g) = guard.as_ref().filter(|_| found == 0 && now < deadline && !*shutdown.borrow()) else {
             return reply(R, StatusCode::OK, json!({ "mailboxes": results }));
-        }
-        let nap = (deadline - now).min(PULL_RECHECK);
-        let woken = async {
-            loop {
-                match events.recv().await {
-                    Ok(Event::MailStored { queue }) if keys.contains(&queue) => return,
-                    Ok(_) => continue,
-                    Err(RecvError::Lagged(_)) => return,
-                    Err(RecvError::Closed) => std::future::pending::<()>().await,
-                }
-            }
         };
+        // Leases that end on other sockets wake nobody, so look again every few seconds.
+        let nap = (deadline - now).min(PULL_RECHECK);
         tokio::select! {
-            _ = woken => {}
+            _ = g.notified() => {}
             _ = tokio::time::sleep(nap) => {}
             _ = shutdown.changed() => {}
         }

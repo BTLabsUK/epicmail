@@ -193,6 +193,7 @@ async fn housekeeping(relay: Arc<Relay>) {
         metrics::gauge!("epicbox_listening_mailboxes").set(mailboxes as f64);
         metrics::gauge!("epicbox_mux_holders").set(mux as f64);
         metrics::gauge!("epicbox_mux_tokens").set(relay.tokens_live() as f64);
+        metrics::gauge!("epicbox_http_waiting_pulls").set(f64::from(relay.pull_waiters.waiting()));
         metrics::gauge!("epicbox_store_ok").set(if relay.store_ok.load(Ordering::Relaxed) { 1.0 } else { 0.0 });
 
         if n % 4 == 0 {

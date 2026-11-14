@@ -187,6 +187,10 @@ pub struct HttpApi {
     pub challenge_window_s: u64,
     /// Seconds a pulled message stays leased to the puller.
     pub lease_s: u64,
+    /// Long polls (`wait` > 0) waiting at once per IP prefix.
+    pub max_waiting_per_ip: u32,
+    /// Long polls waiting at once in total.
+    pub max_waiting: u32,
 }
 
 /// `[log]`: logging to stderr.
@@ -300,6 +304,8 @@ impl Default for HttpApi {
             max_wait_s: 25,
             challenge_window_s: 20 * 60,
             lease_s: 30,
+            max_waiting_per_ip: 64,
+            max_waiting: 10_000,
         }
     }
 }

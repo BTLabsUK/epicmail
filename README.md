@@ -169,7 +169,7 @@ reference is `src/config.rs`.
 | `[protocol]` | Challenge interval, version answered to `GetVersion`, cancel and mux/1 switches, ping and idle timeouts |
 | `[limits]` | Frame and slate sizes, rates per IP prefix and per address, socket caps, mailbox caps, mux/1 and `/v1` budgets |
 | `[federation]` | Forwarding to other relays: on/off, allow and deny lists, timeouts |
-| `[http_api]` | The `/v1` HTTPS API: on/off, batch sizes, long-poll time, challenge window, lease |
+| `[http_api]` | The `/v1` HTTPS API: on/off, batch sizes, long-poll time and how many may wait at once, challenge window, lease |
 | `[log]` | `text` or `json`, and a log filter (the `RUST_LOG` variable overrides it) |
 
 Per-IP limits apply per network prefix (`/24` for IPv4, `/48` for IPv6). List addresses many
@@ -208,6 +208,9 @@ is accepted once and only inside `http_api.challenge_window_s`.
 | `POST /v1/made` | `{"address","acks":[{"id","signature"}]}`, each signature over the id | `{"removed":n,"refused":n}` |
 
 Pulled messages are leased for `http_api.lease_s` seconds and offered again if not acknowledged.
+A long poll returns as soon as mail for one of its mailboxes is stored. One prefix may have
+`http_api.max_waiting_per_ip` long polls waiting at once (64 by default); more get 429 with
+`Retry-After`, while pulls with `wait: 0` are not affected.
 
 ### Other HTTP endpoints
 
@@ -256,8 +259,8 @@ restricts forwarding to listed relays; `federation.enabled = false` turns it off
   `test.stall_endpoint`, which must stay off on a public relay.
 - **Resource limits.** Every input is bounded: frame and slate size, frames per socket, posts
   and bytes per IP prefix and per address, sockets per prefix and in total, waiting messages per
-  mailbox and per sender, mux/1 mailboxes and in-flight messages, `/v1` work per prefix, and the
-  memory held by mux/1 resume tokens. A socket whose client stops reading is closed after
+  mailbox and per sender, mux/1 mailboxes and in-flight messages, `/v1` work per prefix, waiting
+  `/v1` long polls per prefix and in total, and the memory held by mux/1 resume tokens. A socket whose client stops reading is closed after
   `protocol.idle_timeout_s`.
 - **Sandbox.** The systemd unit runs with a dynamic user, no capabilities, a read-only system,
   a private `/tmp` and a system call filter. The container runs as an unprivileged user on an

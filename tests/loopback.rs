@@ -773,3 +773,40 @@ async fn mux_waiting_counts_every_mailbox_and_has_a_budget() {
     let e = recv(&mut m).await;
     assert_eq!(e["code"], "rate_limited", "{e}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn https_long_polls_are_capped_per_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| c.http_api.max_waiting_per_ip = 1).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let pull = |k: &Key, wait: u64| {
+        let ch = format!("ebh-{}-{:016x}", now_ms() / 1000, rand::random::<u64>());
+        json!({"mailboxes":[{"address":k.pk,"challenge":ch,"signature":k.sign(&ch)}],"wait":wait})
+    };
+    let n2 = Node { addr: n.addr, relay: n.relay.clone() };
+    let first = pull(&bob, 20);
+    let t0 = std::time::Instant::now();
+    let poll = tokio::spawn(async move { http(&n2, "POST", "/v1/pull", Some(first)).await });
+    while n.relay.pull_waiters.waiting() == 0 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // A second long poll from the same prefix is refused; a plain pull is not.
+    let (st, head, v) = http_with_head(&n, "POST", "/v1/pull", Some(pull(&bob, 20))).await;
+    assert_eq!(st, 429, "{v}");
+    assert!(head.to_ascii_lowercase().contains("retry-after:"), "{head}");
+    assert_eq!(http(&n, "POST", "/v1/pull", Some(pull(&bob, 0))).await.0, 200);
+    // Mail for another mailbox does not end the poll; mail for bob does.
+    let mut f = post_frame(&alice, "relay.test", &alice, "relay.test", 1);
+    f.as_object_mut().unwrap().remove("type");
+    assert_eq!(http(&n, "POST", "/v1/post", Some(f)).await.0, 200);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!poll.is_finished(), "woken by mail for another mailbox");
+    let mut f = post_frame(&alice, "relay.test", &bob, "relay.test", 2);
+    f.as_object_mut().unwrap().remove("type");
+    assert_eq!(http(&n, "POST", "/v1/post", Some(f)).await.0, 200);
+    let (st, v) = poll.await.unwrap();
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["mailboxes"][0]["messages"].as_array().unwrap().len(), 1, "{v}");
+    assert!(t0.elapsed() < Duration::from_secs(5));
+    assert_eq!(n.relay.pull_waiters.waiting(), 0);
+}

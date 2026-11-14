@@ -72,6 +72,8 @@ max_per_mailbox = 50             # messages per mailbox per request
 max_wait_s = 25                  # longest long-poll, seconds
 challenge_window_s = 1200        # seconds a /v1 challenge stays valid
 lease_s = 30                     # seconds a pulled message stays leased
+max_waiting_per_ip = 64          # long polls waiting at once per IP prefix (x shared_multiplier for shared_sources)
+max_waiting = 10000              # long polls waiting at once in total
 
 [log]
 format = "text"                  # "text" or "json"
