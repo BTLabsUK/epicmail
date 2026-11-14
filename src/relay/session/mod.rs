@@ -302,9 +302,14 @@ impl Session {
             return self.bad_json(ws).await;
         };
         let ty = msg.get("type").and_then(|t| t.as_str()).map(|t| t.to_ascii_lowercase());
-        // A PostSlate pays for its body in `post_slate`; every other frame pays here, so large
-        // frames of any other kind cannot be sent without limit.
-        if ty.as_deref() != Some("postslate") && self.relay.limiter.frame_bytes(self.ip, t.len()).is_err() {
+        // Every frame pays its size into the prefix's byte budget. A PostSlate pays for its
+        // `str` in `post_slate` and for the rest of the frame here, so neither a large frame of
+        // another kind nor a PostSlate padded outside `str` goes unmetered.
+        let charge = match ty.as_deref() {
+            Some("postslate") => t.len().saturating_sub(msg.get("str").and_then(|s| s.as_str()).map_or(0, str::len)),
+            _ => t.len(),
+        };
+        if self.relay.limiter.frame_bytes(self.ip, charge).is_err() {
             metrics::counter!("epicbox_limit_refusals_total", "limit" => "bytes_per_ip").increment(1);
             return Flow::Close(1008, "Too many bytes.");
         }

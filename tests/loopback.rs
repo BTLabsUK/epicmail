@@ -1084,3 +1084,26 @@ async fn a_failed_subscribe_hands_back_the_message_in_flight() {
     subscribe(&mut b, &bob, "3.0.0").await;
     assert_eq!(recv_type(&mut b, "Slate").await["from"], alice.at("relay.test"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_post_padded_outside_str_pays_for_the_padding() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| c.limits.bytes_per_min_per_ip = 100_000).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    // A small slate with 60 KB of junk beside it: the junk counts.
+    let mut f = post_frame(&alice, "relay.test", &bob, "relay.test", 1);
+    f["junk"] = json!("a".repeat(60_000));
+    send(&mut a, f).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    let mut f = post_frame(&alice, "relay.test", &bob, "relay.test", 2);
+    f["junk"] = json!("a".repeat(60_000));
+    send(&mut a, f).await;
+    assert_eq!(recv(&mut a).await, json!({"closed": 1008}));
+    // The same through /v1/post.
+    let mut f = post_frame(&alice, "relay.test", &bob, "relay.test", 3);
+    f.as_object_mut().unwrap().remove("type");
+    f["junk"] = json!("a".repeat(60_000));
+    assert_eq!(http(&n, "POST", "/v1/post", Some(f)).await.0, 429);
+}

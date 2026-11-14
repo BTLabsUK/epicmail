@@ -84,6 +84,12 @@ pub(super) async fn post(
         }
     }
     let ip = client_ip(peer, &headers, &relay.cfg.server.trusted_proxies);
+    // `str` pays in post_slate; the rest of the body pays here, as a websocket frame does.
+    let outside = body.len().saturating_sub(m.get("str").and_then(|s| s.as_str()).map_or(0, str::len));
+    if let Err(s) = relay.limiter.frame_bytes(ip, outside) {
+        metrics::counter!("epicbox_limit_refusals_total", "limit" => "bytes_per_ip").increment(1);
+        return too_many(R, format!("Rate limit exceeded; retry in {s} s."), s);
+    }
     let req = PostReq::from_json(&Value::Object(m));
     match relay.post_slate(ip, req, true).await {
         PostOutcome::Stored { msgid, txid } => {
