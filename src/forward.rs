@@ -97,12 +97,24 @@ pub fn is_public(ip: IpAddr) -> bool {
                 return is_public(IpAddr::V4(m));
             }
             let s = v.segments();
+            let o = v.octets();
+            // Transition ranges that carry an IPv4 address: judge that address. Through a NAT64
+            // gateway (64:ff9b::/96) or a 6to4 relay (2002::/16) a public-looking IPv6 address
+            // can reach a private IPv4 one.
+            if s[0] == 0x0064 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0] {
+                return is_public(IpAddr::V4(std::net::Ipv4Addr::new(o[12], o[13], o[14], o[15])));
+            }
+            if s[0] == 0x2002 {
+                return is_public(IpAddr::V4(std::net::Ipv4Addr::new(o[2], o[3], o[4], o[5])));
+            }
             !(v.is_loopback()
                 || v.is_unspecified()
                 || v.is_multicast()
                 || (s[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
                 || (s[0] & 0xffc0) == 0xfe80 // fe80::/10 link local
                 || (s[0] == 0x2001 && s[1] == 0x0db8) // documentation
+                || (s[0] == 0x2001 && s[1] == 0x0000) // 2001::/32 Teredo: the real address is hidden
+                || (s[0] & 0xffc0) == 0xfec0 // fec0::/10 site local (deprecated)
                 || (s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 1) // 64:ff9b:1::/48 local NAT64
                 || s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0)
             // ::/96 compat
@@ -338,6 +350,20 @@ async fn deliver(relay: &Relay, peer: &str, row: &ForwardRow, tls: Arc<rustls::C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipv6_transition_ranges_are_judged_by_their_ipv4() {
+        let p = |a: &str| is_public(a.parse().unwrap());
+        assert!(!p("64:ff9b::10.0.0.1"), "NAT64 to a private address");
+        assert!(!p("64:ff9b::7f00:1"), "NAT64 to loopback");
+        assert!(p("64:ff9b::8.8.8.8"), "NAT64 to a public address");
+        assert!(!p("2002:0a00:0001::1"), "6to4 of 10.0.0.1");
+        assert!(!p("2002:c0a8:0101::1"), "6to4 of 192.168.1.1");
+        assert!(p("2002:0808:0808::1"), "6to4 of 8.8.8.8");
+        assert!(!p("2001:0:4136:e378::1"), "Teredo");
+        assert!(!p("fec0::1"), "site local");
+        assert!(p("2606:4700::1111"), "ordinary public address");
+    }
 
     #[test]
     fn an_unreachable_peer_waits_as_a_whole() {
