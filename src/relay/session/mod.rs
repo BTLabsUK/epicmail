@@ -387,10 +387,7 @@ impl Session {
             Cmd::Detached { mailbox, reason } => self.mux_lost(ws, &mailbox, reason).await,
             Cmd::Cancelled { txid } => {
                 if self.ver == Some(Ver::V31) && self.key.is_some() {
-                    self.inflight = None;
-                    self.attempts = 0;
-                    self.send(ws, json!({"type":"TransactionCancelled","epicboxtxid":txid})).await;
-                    self.pending_cancel_ack = Some(txid);
+                    self.send_cancelled(ws, txid).await;
                 }
             }
         }

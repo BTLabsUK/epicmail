@@ -105,13 +105,12 @@ impl Session {
     /// and deliver.
     pub(super) async fn subscribe(&mut self, ws: &mut WebSocket, msg: &Value) -> Flow {
         let r = self.relay.clone();
-        if let Some(v) = msg.get("ver") {
-            self.ver = Some(match v.as_str() {
-                Some("2.0.0") => Ver::V2,
-                Some("3.1.0") if r.cfg.protocol.cancel => Ver::V31,
-                _ => Ver::V3,
-            });
-        }
+        // Taken only once the signature verifies, so a refused Subscribe changes nothing.
+        let ver = msg.get("ver").map(|v| match v.as_str() {
+            Some("2.0.0") => Ver::V2,
+            Some("3.1.0") if r.cfg.protocol.cancel => Ver::V31,
+            _ => Ver::V3,
+        });
         let invalid = json!({"type":"Error","kind":"InvalidSignature","description":"Invalid signature."});
         if let Some(s) = r.limiter.sig_blocked(self.ip) {
             let e = Refusal::RateLimited(s).classic_frame();
@@ -147,6 +146,9 @@ impl Session {
             return Flow::Continue;
         };
         metrics::counter!("epicbox_subscribe_total", "result" => "ok").increment(1);
+        if ver.is_some() {
+            self.ver = ver;
+        }
         self.prev_challenge = None;
 
         // 3.1.0: a successful Subscribe acknowledges the TransactionCancelled sent before it.
@@ -205,10 +207,7 @@ impl Session {
         if ver == Ver::V31 {
             match r.store.pending_cancel(&key).await {
                 Ok(Some(txid)) => {
-                    self.inflight = None;
-                    self.attempts = 0;
-                    self.send(ws, json!({"type":"TransactionCancelled","epicboxtxid":txid})).await;
-                    self.pending_cancel_ack = Some(txid);
+                    self.send_cancelled(ws, txid).await;
                     return;
                 }
                 Ok(None) => {}
@@ -257,6 +256,20 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// Send TransactionCancelled; the next successful Subscribe acknowledges it. The message in
+    /// flight, if any, steps aside with its lease released, so it is offered again on that
+    /// Subscribe instead of after the lease runs out.
+    pub(super) async fn send_cancelled(&mut self, ws: &mut WebSocket, txid: String) {
+        if let Some(i) = self.inflight.take() {
+            if let Err(e) = self.relay.store.release(vec![i.id]).await {
+                tracing::warn!(error = %e, "store release failed");
+            }
+        }
+        self.attempts = 0;
+        self.send(ws, json!({"type":"TransactionCancelled","epicboxtxid":txid})).await;
+        self.pending_cancel_ack = Some(txid);
     }
 
     /// The Slate frame for `m` in the form `ver` expects.

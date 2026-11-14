@@ -1321,3 +1321,69 @@ async fn a_cancel_crosses_two_relays_and_the_loop_back_ends() {
     send(&mut bs, post_tx_frame(&bob, "relayb.test", &alice, "relaya.test", txid)).await;
     assert_eq!(recv(&mut bs).await["type"], "TransactionCancelled");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_subscribe_does_not_change_the_socket_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob, mallory) = (Key::new(), Key::new(), Key::new());
+
+    let mut b = connect(&n).await;
+    subscribe(&mut b, &bob, "3.0.0").await;
+    assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+    // A Subscribe with a wrong signature and another version is refused.
+    send(&mut b, json!({"type":"Subscribe","address":bob.pk,"ver":"2.0.0","signature":mallory.sign("x")})).await;
+    assert_eq!(recv(&mut b).await["kind"], "InvalidSignature");
+    // A good Subscribe without ver keeps the version the socket proved, 3.0.0.
+    send(&mut b, json!({"type":"Challenge"})).await;
+    let c = recv(&mut b).await;
+    send(&mut b, json!({"type":"Subscribe","address":bob.pk,"signature":bob.sign(c["str"].as_str().unwrap())})).await;
+    assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    send(&mut a, post_frame(&alice, "relay.test", &bob, "relay.test", 1)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    assert_eq!(recv_type(&mut b, "Slate").await["ver"], "3.0.0");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancel_hands_the_message_in_flight_back_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let txid = "0123456789abcdef0123456789abcdef";
+
+    let mut b = connect(&n).await;
+    subscribe(&mut b, &bob, "3.1.0").await;
+    assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+
+    // A plain slate goes out to bob and stays in flight (no Made).
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    send(&mut a, post_frame(&alice, "relay.test", &bob, "relay.test", 1)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    let first = recv_type(&mut b, "Slate").await;
+
+    // A 3.1.0 transaction between them is posted and cancelled by alice.
+    let mut post = post_frame(&alice, "relay.test", &bob, "relay.test", 2);
+    post["epicboxtxid"] = json!(txid);
+    post["epicboxtxidsig"] = json!(alice.sign(txid));
+    send(&mut a, post).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    let asig = alice.sign(&format!("{}{txid}", epicmail::relay::CANCEL_SIG_PREFIX));
+    send(&mut a, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":txid,"signature":asig})).await;
+    assert_eq!(recv(&mut a).await["type"], "TransactionCancelled");
+    assert_eq!(recv_type(&mut b, "TransactionCancelled").await["epicboxtxid"], txid);
+
+    // The Subscribe that acknowledges the cancel gets the first slate again, not a 60 s wait.
+    send(&mut b, json!({"type":"Challenge"})).await;
+    let c = recv(&mut b).await;
+    send(
+        &mut b,
+        json!({"type":"Subscribe","address":bob.pk,"ver":"3.1.0","signature":bob.sign(c["str"].as_str().unwrap())}),
+    )
+    .await;
+    let again = recv_type(&mut b, "Slate").await;
+    assert_eq!(again["epicboxmsgid"], first["epicboxmsgid"]);
+}
