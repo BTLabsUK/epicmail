@@ -1,5 +1,6 @@
-//! Events published after a commit. The /v1 long poll listens here today; webhooks would
-//! subscribe the same way (docs/webhooks.md).
+//! Events published after a commit. The /v1 long poll listens here. A slow listener misses
+//! events instead of slowing the publisher (`broadcast` drops the oldest), so a listener that
+//! lags must re-read the store.
 
 use tokio::sync::broadcast;
 
@@ -11,6 +12,7 @@ pub enum Event {
     TxCancelled { txid: String, queues: Vec<String> },
 }
 
+/// A broadcast channel of [`Event`]s. Cloning shares the channel.
 #[derive(Clone)]
 pub struct Bus {
     tx: broadcast::Sender<Event>,
@@ -22,6 +24,7 @@ impl Bus {
         Self { tx }
     }
 
+    /// Sends to every current subscriber; with none, the event is dropped.
     pub fn publish(&self, e: Event) {
         let _ = self.tx.send(e);
     }

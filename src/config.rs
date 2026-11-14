@@ -9,7 +9,8 @@ use anyhow::{bail, Context, Result};
 use ipnet::IpNet;
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Deserialize)]
+/// The whole file. Each field is one `[section]`.
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
     pub server: Server,
@@ -22,13 +23,14 @@ pub struct Config {
     pub test: TestCfg,
 }
 
+/// `[server]`: listeners and the relay's identity.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Server {
     /// Websocket and HTTP listener.
     pub listen: SocketAddr,
     /// Separate listener for /metrics. When unset, /metrics is served on `listen` to loopback
-    /// and trusted-proxy peers only.
+    /// peers whose request has no X-Forwarded-For.
     pub metrics_listen: Option<SocketAddr>,
     /// The domain wallets write in their addresses for this relay (epicbox_domain).
     pub domain: String,
@@ -44,9 +46,11 @@ pub struct Server {
     pub name: String,
 }
 
+/// `[store]`: the SQLite database.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct StoreCfg {
+    /// The database file. Created if missing.
     pub path: PathBuf,
     /// Days a message is kept when nobody collects it. 7 is the protocol minimum.
     pub retention_days: u32,
@@ -54,10 +58,11 @@ pub struct StoreCfg {
     pub group_commit_max: usize,
     /// Reader connections.
     pub readers: usize,
-    /// UTC hour of the nightly sweep (incremental vacuum).
+    /// UTC hour of the daily incremental vacuum.
     pub vacuum_hour_utc: u8,
 }
 
+/// The Challenge sent when a socket opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FirstChallenge {
@@ -67,9 +72,11 @@ pub enum FirstChallenge {
     Random,
 }
 
+/// `[protocol]`: the websocket protocol.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Protocol {
+    /// The Challenge sent when a socket opens.
     pub first_challenge: FirstChallenge,
     /// Seconds between Challenge rounds on 3.0.0 sockets.
     pub challenge_interval_s: u64,
@@ -85,48 +92,71 @@ pub struct Protocol {
     pub idle_timeout_s: u64,
     /// Unanswered Challenges, with mail waiting, before the watchdog closes a socket with 1001.
     pub watchdog_misses: u32,
-    /// Also forward CancelTx signed over the bare txid (the 3.1.0 fork's form) to other relays.
-    /// Off: only `epicbox-cancel/1:<txid>` signatures leave this relay, since a bare txid
-    /// signature can be replayed by anyone who saw the PostSlate.
+    /// Also forward CancelTx signed over the bare txid (the 3.1.0 form) to other relays. When
+    /// off, only CancelTx signed over `epicbox-cancel/1:<txid>` is forwarded: a signature over
+    /// the bare txid is the same one the PostSlate carried, so it does not show that the sender
+    /// asked to cancel.
     pub forward_bare_cancel: bool,
 }
 
+/// `[limits]`. "Per IP" means per IP prefix (`ipv4_prefix`, `ipv6_prefix`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Limits {
+    /// Largest websocket frame, bytes.
     pub max_frame_bytes: usize,
+    /// Largest string field (a slate), bytes. Not above `max_frame_bytes`.
     pub max_str_bytes: usize,
+    /// PostSlate rate per sender address.
     pub posts_per_min_per_address: u32,
+    /// Burst allowance for `posts_per_min_per_address`.
     pub posts_burst_per_address: u32,
+    /// PostSlate rate per IP.
     pub posts_per_min_per_ip: u32,
+    /// Burst allowance for `posts_per_min_per_ip`.
     pub posts_burst_per_ip: u32,
+    /// Posted bytes per IP per minute.
     pub bytes_per_min_per_ip: u64,
+    /// Frames one socket may send per minute.
     pub frames_per_min_per_socket: u32,
+    /// Waiting messages per mailbox.
     pub queue_cap: u32,
+    /// Waiting messages per mailbox from one sender.
     pub per_sender_cap: u32,
+    /// Open sockets per IP.
     pub sockets_per_ip: u32,
+    /// Classic sockets kept per subscribed address.
     pub sockets_per_address: u32,
+    /// Failed signature checks per IP per minute before posts from it are refused.
     pub failed_sigs_per_min_per_ip: u32,
+    /// Mailboxes one mux/1 socket may attach.
     pub mux_mailboxes_per_socket: u32,
+    /// Mailboxes in one Attach or Resume frame.
     pub mux_attach_per_frame: u32,
+    /// Mail pushed on one mux/1 socket and not yet acked or held.
     pub mux_inflight: u32,
+    /// Attach and Resume frames per mux/1 socket per minute.
     pub mux_attach_frames_per_min: u32,
     /// Prefix length used to group IPv4 clients.
     pub ipv4_prefix: u8,
     /// Prefix length used to group IPv6 clients.
     pub ipv6_prefix: u8,
+    /// Open sockets in total.
     pub max_sockets: u32,
     /// Sources many users share (Tor exits, the onion service's loopback). Per-prefix limits are
     /// multiplied by `shared_multiplier` for them.
     pub shared_sources: Vec<IpNet>,
+    /// Factor for `shared_sources`.
     pub shared_multiplier: u32,
     /// mux/1 sockets per IP prefix.
     pub mux_sockets_per_ip: u32,
 }
 
+/// `[federation]`: forwarding mail to other relays.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Federation {
+    /// Forward mail addressed to other relays. When off, such posts are refused.
     pub enabled: bool,
     /// Only these domains (lowercase `domain` or `domain:port`) are forwarded to. Empty means any
     /// domain that resolves to public addresses only.
@@ -144,17 +174,25 @@ pub struct Federation {
     pub max_lanes: usize,
 }
 
+/// `[http_api]`: the /v1 HTTPS mailbox API.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct HttpApi {
+    /// Serve /v1.
     pub enabled: bool,
+    /// Mailboxes per request.
     pub max_mailboxes: usize,
+    /// Messages per mailbox per pull.
     pub max_per_mailbox: usize,
+    /// Longest long poll, seconds.
     pub max_wait_s: u64,
+    /// Seconds a client-made challenge stays valid.
     pub challenge_window_s: u64,
+    /// Seconds a pulled message stays leased to the puller.
     pub lease_s: u64,
 }
 
+/// `[log]`: logging to stderr.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Log {
@@ -164,27 +202,14 @@ pub struct Log {
     pub level: String,
 }
 
+/// `[test]`: switches for test rigs.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct TestCfg {
-    /// Enables POST /test/stall on loopback: stops Challenges and pushes to an address's sockets,
-    /// to reproduce the stock relay's stalled delivery. Never enable on a public relay.
+    /// Enables POST /test/stall on loopback: stops Challenges and pushes to an address's sockets
+    /// for a while, to test how wallets handle a relay that stops delivering. Never enable on a
+    /// public relay.
     pub stall_endpoint: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            server: Server::default(),
-            store: StoreCfg::default(),
-            protocol: Protocol::default(),
-            limits: Limits::default(),
-            federation: Federation::default(),
-            http_api: HttpApi::default(),
-            log: Log::default(),
-            test: TestCfg::default(),
-        }
-    }
 }
 
 impl Default for Server {
@@ -294,6 +319,7 @@ impl Default for Log {
 }
 
 impl Config {
+    /// Reads, parses and validates a config file.
     pub fn load(path: &std::path::Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading {}", path.display()))?;
@@ -303,6 +329,7 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Checks the values serde cannot: required fields, ranges and cross-field rules.
     pub fn validate(&self) -> Result<()> {
         if self.server.domain.is_empty() {
             bail!("server.domain must be set: the domain wallets use in their addresses");
@@ -330,6 +357,7 @@ impl Config {
         Ok(())
     }
 
+    /// `store.retention_days` in seconds.
     pub fn retention_secs(&self) -> i64 {
         i64::from(self.store.retention_days) * 86_400
     }
