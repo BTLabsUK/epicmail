@@ -208,6 +208,15 @@ impl Relay {
         if let Some(t) = &txid {
             match self.store.tx_info(t).await {
                 Ok(info) if info.tombstone.is_some() => return PostOutcome::Cancelled { txid: t.clone() },
+                // The same rule as for local mail: once a transaction has participants here, a
+                // stranger cannot post under its txid, or the forward would link them as a
+                // participant and let them cancel it.
+                Ok(info) if !info.participants.is_empty() && !info.participants.contains(&from.public_key) => {
+                    return Refused(Refusal::Invalid(
+                        "InvalidRequest",
+                        "Posting address is not a participant of epicboxtxid.".into(),
+                    ));
+                }
                 Ok(_) => {}
                 Err(_) => return Refused(Refusal::Internal),
             }

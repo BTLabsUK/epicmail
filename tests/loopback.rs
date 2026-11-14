@@ -1023,3 +1023,35 @@ async fn a_pull_reply_has_a_byte_budget_and_says_when_there_is_more() {
     assert_eq!(v["mailboxes"][0]["messages"].as_array().unwrap().len(), 2, "{v}");
     assert!(v.get("more").is_none(), "{v}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stranger_cannot_join_a_transaction_through_a_forward() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| {
+        c.federation.peers.insert("remote.test:443".into(), "ws://127.0.0.1:9/".into());
+    })
+    .await;
+    let (alice, bob, mallory) = (Key::new(), Key::new(), Key::new());
+    let txid = "0123456789abcdef0123456789abcdef";
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    let mut post = post_frame(&alice, "relay.test", &bob, "relay.test", 1);
+    post["epicboxtxid"] = json!(txid);
+    post["epicboxtxidsig"] = json!(alice.sign(txid));
+    send(&mut a, post).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    // Mallory knows the txid and posts under it to another relay, signing it herself.
+    let mut m = connect(&n).await;
+    recv_type(&mut m, "Challenge").await;
+    let mut f = post_frame(&mallory, "relay.test", &Key::new(), "remote.test", 2);
+    f["epicboxtxid"] = json!(txid);
+    f["epicboxtxidsig"] = json!(mallory.sign(txid));
+    send(&mut m, f).await;
+    let r = recv(&mut m).await;
+    assert!(r["description"].as_str().unwrap_or("").contains("not a participant"), "{r}");
+    // So her cancel is not a participant's and changes nothing.
+    let msig = mallory.sign(&format!("{}{txid}", epicmail::relay::CANCEL_SIG_PREFIX));
+    send(&mut m, json!({"type":"CancelTx","address":mallory.pk,"epicboxtxid":txid,"signature":msig})).await;
+    assert_eq!(recv(&mut m).await, json!({"type":"Ok"}));
+    assert_eq!(waiting(&n).await, 1, "Alice's slate is still there");
+}
