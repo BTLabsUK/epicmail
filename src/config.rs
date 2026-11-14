@@ -60,6 +60,10 @@ pub struct StoreCfg {
     pub readers: usize,
     /// UTC hour of the daily incremental vacuum.
     pub vacuum_hour_utc: u8,
+    /// Posts are refused while the database holds this many bytes of live data (pages in use,
+    /// not the file size); 0 means no cap. Mail for self-made addresses is limited only per
+    /// prefix and per minute, so without a cap enough prefixes could fill the disk.
+    pub max_bytes: u64,
 }
 
 /// `[protocol]`: the websocket protocol. Every Challenge, the first included, is fresh and
@@ -230,7 +234,14 @@ impl Default for Server {
 
 impl Default for StoreCfg {
     fn default() -> Self {
-        Self { path: "epicmail.db".into(), retention_days: 7, group_commit_max: 256, readers: 4, vacuum_hour_utc: 3 }
+        Self {
+            path: "epicmail.db".into(),
+            retention_days: 7,
+            group_commit_max: 256,
+            readers: 4,
+            vacuum_hour_utc: 3,
+            max_bytes: 2 << 30,
+        }
     }
 }
 

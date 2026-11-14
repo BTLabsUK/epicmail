@@ -185,6 +185,7 @@ async fn housekeeping(relay: Arc<Relay>) {
                 metrics::gauge!("epicbox_oldest_forward_seconds").set(s.oldest_forward_ms as f64 / 1000.0);
                 metrics::gauge!("epicbox_tombstones").set(s.tombstones as f64);
                 metrics::gauge!("epicbox_db_bytes").set(s.db_bytes as f64);
+                metrics::gauge!("epicbox_store_used_bytes").set(s.used_bytes as f64);
                 *relay.last_stats.lock() = Some(s);
             }
             Err(e) => tracing::error!(error = %e, "store stats failed"),

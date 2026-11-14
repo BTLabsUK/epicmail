@@ -810,3 +810,25 @@ async fn https_long_polls_are_capped_per_prefix() {
     assert!(t0.elapsed() < Duration::from_secs(5));
     assert_eq!(n.relay.pull_waiters.waiting(), 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn posts_are_refused_when_the_store_is_full() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| c.store.max_bytes = 1).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    send(&mut a, post_frame(&alice, "relay.test", &bob, "relay.test", 1)).await;
+    let r = recv(&mut a).await;
+    assert_eq!(r["type"], "Error", "{r}");
+    assert!(r["description"].as_str().unwrap().contains("storage is full"), "{r}");
+    let mut f = post_frame(&alice, "relay.test", &bob, "relay.test", 2);
+    f.as_object_mut().unwrap().remove("type");
+    let (st, v) = http(&n, "POST", "/v1/post", Some(f)).await;
+    assert_eq!(st, 429, "{v}");
+    assert_eq!(waiting(&n).await, 0);
+    // Only posts are refused: a full relay still lets wallets subscribe and collect.
+    let mut b = connect(&n).await;
+    subscribe(&mut b, &bob, "3.0.0").await;
+    assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+}

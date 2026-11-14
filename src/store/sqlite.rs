@@ -4,7 +4,7 @@
 //! read-only connections; WAL lets them read while the writer commits.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -87,6 +87,16 @@ pub struct SqliteStore {
     tx: mpsc::Sender<Job>,
     readers: Arc<Vec<Mutex<Connection>>>,
     next_reader: AtomicUsize,
+    /// Live data bytes, updated by the writer after each commit.
+    used: Arc<AtomicU64>,
+}
+
+/// Bytes in pages that hold data: page count less free pages, times the page size.
+fn used_bytes_of(c: &Connection) -> rusqlite::Result<u64> {
+    let pages: i64 = c.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+    let free: i64 = c.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+    let psize: i64 = c.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    Ok(((pages - free).max(0) * psize) as u64)
 }
 
 fn open(path: &Path, flags: OpenFlags) -> Result<Connection> {
@@ -161,14 +171,16 @@ impl SqliteStore {
             pool.push(Mutex::new(c));
         }
 
+        let used = Arc::new(AtomicU64::new(used_bytes_of(&writer)?));
         let (tx, rx) = mpsc::channel::<Job>(8192);
+        let used_w = used.clone();
         std::thread::Builder::new().name("store-writer".into()).spawn(move || {
-            let run = std::panic::AssertUnwindSafe(|| writer_loop(writer, rx, group_max.max(1)));
+            let run = std::panic::AssertUnwindSafe(|| writer_loop(writer, rx, group_max.max(1), used_w));
             if std::panic::catch_unwind(run).is_err() {
                 on_writer_panic();
             }
         })?;
-        Ok(Self { tx, readers: Arc::new(pool), next_reader: AtomicUsize::new(0) })
+        Ok(Self { tx, readers: Arc::new(pool), next_reader: AtomicUsize::new(0), used })
     }
 
     async fn write<T, F>(&self, f: F) -> Result<T>
@@ -238,7 +250,7 @@ fn made_one(c: &Connection, queues: &[&str], msgid: &str) -> rusqlite::Result<Op
     Ok(Some(queue))
 }
 
-fn writer_loop(conn: Connection, mut rx: mpsc::Receiver<Job>, group_max: usize) {
+fn writer_loop(conn: Connection, mut rx: mpsc::Receiver<Job>, group_max: usize, used: Arc<AtomicU64>) {
     while let Some(first) = rx.blocking_recv() {
         let mut batch = Vec::with_capacity(16);
         batch.push(first);
@@ -270,6 +282,8 @@ fn writer_loop(conn: Connection, mut rx: mpsc::Receiver<Job>, group_max: usize) 
         metrics::histogram!("epicbox_store_commit_batch").record(n as f64);
         if res.is_err() {
             metrics::counter!("epicbox_store_commit_errors_total").increment(1);
+        } else if let Ok(u) = used_bytes_of(&conn) {
+            used.store(u, Ordering::Relaxed);
         }
         for d in done {
             d(res.clone());
@@ -738,6 +752,7 @@ impl Store for SqliteStore {
             let t: i64 = c.query_row("SELECT count(*) FROM cancels", [], |r| r.get(0))?;
             let pages: i64 = c.query_row("PRAGMA page_count", [], |r| r.get(0))?;
             let psize: i64 = c.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+            let used_bytes = used_bytes_of(c)? as i64;
             Ok(Stats {
                 messages_waiting: n,
                 mailboxes_waiting: q,
@@ -748,9 +763,14 @@ impl Store for SqliteStore {
                 oldest_forward_ms: fo.map(|o| (now - o).max(0)).unwrap_or(0),
                 tombstones: t,
                 db_bytes: pages * psize,
+                used_bytes,
             })
         })
         .await
+    }
+
+    fn used_bytes(&self) -> Option<u64> {
+        Some(self.used.load(Ordering::Relaxed))
     }
 
     async fn check_writable(&self) -> Result<()> {
@@ -822,6 +842,24 @@ mod tests {
         assert_eq!(sw.messages_expired, 2);
         s.check_writable().await.unwrap();
         s.vacuum().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn used_bytes_follow_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = SqliteStore::open(&dir.path().join("t.db"), 2, 64).unwrap();
+        let empty = s.used_bytes().unwrap();
+        assert!(empty > 0);
+        let mut m = msg("q", "a", &"x".repeat(200_000), 10);
+        m.msgid = "big".into();
+        assert_eq!(s.put_message(m).await.unwrap(), PutOutcome::Stored { msgid: "big".into() });
+        let full = s.used_bytes().unwrap();
+        assert!(full >= empty + 180_000, "{empty} -> {full}");
+        assert_eq!(s.made("q", vec!["big".into()]).await.unwrap(), vec![true]);
+        let after = s.used_bytes().unwrap();
+        assert!(after + 150_000 < full, "pages were not freed: {full} -> {after}");
+        let stats = s.stats(10).await.unwrap().used_bytes as u64;
+        assert!(stats.abs_diff(after) <= 8192, "stats {stats}, writer {after}");
     }
 
     #[tokio::test]

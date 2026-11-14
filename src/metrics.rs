@@ -23,6 +23,7 @@ fn describe() {
     describe_gauge!("epicbox_forward_lanes", "Peers being forwarded to right now.");
     describe_gauge!("epicbox_tombstones", "Cancelled transactions remembered.");
     describe_gauge!("epicbox_db_bytes", "Size of the SQLite file.");
+    describe_gauge!("epicbox_store_used_bytes", "Bytes of live data in the SQLite file; store.max_bytes caps posts.");
     describe_gauge!("epicbox_mux_tokens", "Live mux/1 resume tokens.");
     describe_gauge!("epicbox_http_waiting_pulls", "/v1 long polls waiting for mail.");
     describe_gauge!("epicbox_store_ok", "1 when the last store check (/ready probe or expiry sweep) succeeded.");

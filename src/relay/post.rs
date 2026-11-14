@@ -55,6 +55,9 @@ impl Relay {
             Ok(s) => s,
             Err(r) => return PostOutcome::Refused(r),
         };
+        if let Some(r) = self.store_full() {
+            return PostOutcome::Refused(r);
+        }
         let now = now_ms();
         let expires_at = now + self.retention_ms();
         if self.cfg.is_local(&slate.dest_domain, slate.dest_port) {
@@ -128,6 +131,16 @@ impl Relay {
             return Err(Refusal::Invalid("InvalidRequest", "Invalid slate destination.".into()));
         };
         Ok(Slate { from_s, to_s, from, body, signature, txid, txidsig, dest_key, dest_domain, dest_port })
+    }
+
+    /// A refusal when the store holds `store.max_bytes` of live data or more.
+    fn store_full(&self) -> Option<Refusal> {
+        let cap = self.cfg.store.max_bytes;
+        if cap == 0 || self.store.used_bytes()? < cap {
+            return None;
+        }
+        metrics::counter!("epicbox_limit_refusals_total", "limit" => "store_bytes").increment(1);
+        Some(Refusal::Full("Relay storage is full; try again later.".into()))
     }
 
     /// Store a checked slate for one of this relay's mailboxes and wake its listener.

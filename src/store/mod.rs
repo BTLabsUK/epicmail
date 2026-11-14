@@ -128,6 +128,8 @@ pub struct Stats {
     pub oldest_forward_ms: i64,
     pub tombstones: i64,
     pub db_bytes: i64,
+    /// Bytes in pages that hold data: `db_bytes` less the free pages.
+    pub used_bytes: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -217,6 +219,10 @@ pub trait Store: Send + Sync + 'static {
     async fn sweep(&self, now: i64, retention_ms: i64) -> Result<SweepStats>;
     async fn vacuum(&self) -> Result<()>;
     async fn stats(&self, now: i64) -> Result<Stats>;
+    /// Bytes of live data as of the last commit, if the store tracks it. Cheap: no store work.
+    fn used_bytes(&self) -> Option<u64> {
+        None
+    }
     /// A write round trip, for /ready.
     async fn check_writable(&self) -> Result<()>;
 }

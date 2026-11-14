@@ -165,7 +165,7 @@ reference is `src/config.rs`.
 | Section | Holds |
 |---|---|
 | `[server]` | Listener, identity (`domain`, `port`, `aliases`), trusted proxies, metrics listener, drain time |
-| `[store]` | Database path, retention, group commit size, reader connections, vacuum hour |
+| `[store]` | Database path, retention, size cap, group commit size, reader connections, vacuum hour |
 | `[protocol]` | Challenge interval, version answered to `GetVersion`, cancel and mux/1 switches, ping and idle timeouts |
 | `[limits]` | Frame and slate sizes, rates per IP prefix and per address, socket caps, mailbox caps, mux/1 and `/v1` budgets |
 | `[federation]` | Forwarding to other relays: on/off, allow and deny lists, timeouts |

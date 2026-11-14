@@ -17,6 +17,7 @@ retention_days = 7               # days an uncollected message is kept; 7 is the
 group_commit_max = 256           # most writes per commit
 readers = 4                      # reader connections
 vacuum_hour_utc = 3              # UTC hour of the daily incremental vacuum
+max_bytes = 2147483648           # refuse posts while this much live data is stored (2 GiB); 0 = no cap
 
 [protocol]
 challenge_interval_s = 60        # seconds between Challenge rounds on 3.0.0 sockets (minimum 5)
