@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use axum::serve::ListenerExt;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -89,9 +90,14 @@ async fn serve(cfg: Config) -> Result<()> {
     store.check_writable().await.context("store is not writable")?;
     let relay = Relay::new(cfg.clone(), store);
 
+    // Frames are small and written one at a time. With Nagle's algorithm on, a frame that follows
+    // an unacknowledged one waits for the peer's delayed ACK (up to 40 ms on Linux).
     let main_listener = tokio::net::TcpListener::bind(cfg.server.listen)
         .await
-        .with_context(|| format!("binding {}", cfg.server.listen))?;
+        .with_context(|| format!("binding {}", cfg.server.listen))?
+        .tap_io(|tcp| {
+            let _ = tcp.set_nodelay(true);
+        });
     let state = AppState {
         relay: relay.clone(),
         metrics: Some(handle.clone()),
