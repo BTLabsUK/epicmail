@@ -1,6 +1,6 @@
 # mux/1: one socket, many mailboxes
 
-Status: **agreed, frozen** (draft 2, 2026-11-14). The relay (this repo) and the LEPIC client (`lepic-epicbox`, feat/epicbox-mux) both implement it; the client passed a live run against this relay. Wire changes from here need a new version (mux/2).
+This document describes mux/1 as epicmail implements it. The protocol is frozen: a wire change needs a new version (mux/2).
 
 mux/1 is an optional extension to the Epicbox 3.0.0 websocket protocol. One socket carries any number of proven mailboxes. The relay pushes each message as soon as it is stored. The client acknowledges messages without signatures. A token lets a client resume a session after a reconnect without signing again.
 
@@ -13,7 +13,7 @@ A client that does not ask for mux/1 sees plain 3.0.0. A relay that does not off
 - `id` is the relay's message id, the same value as `epicboxmsgid` in 3.0.0. It matches `[A-Za-z0-9_-]{1,64}`; this relay issues 32 alphanumeric characters. A message keeps its `id` for life: across sockets, resumes, holds and relay restarts. Clients deduplicate by it.
 - `ref` is optional on every client frame. It is a string of at most 64 characters. The relay copies it into the `Ok`, `Error` or `Attached` that answers that frame. Pushed frames (`Mail`, `Detached`) carry no `ref`.
 - Unknown fields are ignored on both sides. Unknown frame types from the client get `Error` with `code: "unknown_type"`. The socket stays open.
-- Liveness uses websocket ping frames. The relay pings every 30 s and closes a socket after 90 s without a pong. The client may ping too, and the relay answers. The relay sends no periodic `Challenge` to a mux/1 socket.
+- Liveness uses websocket ping frames. The relay pings every 30 s and closes a socket that has sent nothing, pong included, for 90 s (both operator settings). The client may ping too, and the relay answers. The relay sends no periodic `Challenge` to a mux/1 socket.
 
 ### Errors
 
@@ -25,17 +25,17 @@ A client that does not ask for mux/1 sees plain 3.0.0. A relay that does not off
 
 | code | kind | when |
 |---|---|---|
-| `bad_frame` | InvalidRequest | missing or wrong-typed field, frame over the size limit |
+| `bad_frame` | InvalidRequest | not JSON, no `type`, or a missing or wrong-typed field |
 | `unknown_type` | InvalidRequest | frame type not known in this mode |
-| `not_mux` | InvalidRequest | mux/1 frame on a socket that did not negotiate it |
-| `classic_only` | InvalidRequest | `Subscribe`, `Made` or `Unsubscribe` on a mux/1 socket |
+| `classic_only` | InvalidRequest | `Subscribe`, `Made`, `Unsubscribe` or `Challenge` on a mux/1 socket |
 | `bad_address` | InvalidRequest | address does not parse or its key is invalid |
 | `bad_signature` | InvalidSignature | signature does not verify over the socket challenge |
-| `too_many_mailboxes` | TooManySubscriptions | over the per-Attach or per-socket cap; `retry_after` is set when an operator limit (not the fixed cap) refused it |
+| `too_many_mailboxes` | TooManySubscriptions | over the per-Attach or per-socket cap |
 | `token_unknown` | InvalidChallenge | resume token not known, used already, or expired |
-| `not_attached` | InvalidRequest | Hold names a message of a mailbox not attached here |
 | `unknown_id` | InvalidRequest | Hold names an id that is not in flight on this socket |
 | `rate_limited` | InvalidRequest | a limit was hit; `retry_after` (seconds) is set |
+
+A mux/1 frame type sent on a socket that did not negotiate mux/1 is ignored, as the classic protocol ignores unknown types. A frame larger than the frame limit closes the socket.
 | `post_refused` | InvalidRequest | PostSlate refused; `description` says why |
 | `internal` | UnknownError | store error; the frame had no effect and can be retried |
 
@@ -179,7 +179,7 @@ Delivery rules:
 - So a message can arrive more than once across sockets. Clients deduplicate by `id`, as they do today.
 - Mail that has expired (7 days after it was stored) is never pushed.
 - On one socket, `Attached` for a mailbox always comes before any `Mail` for it, and `Detached` comes after the last `Mail` for it.
-- Frame sizes: an inbound frame (any client frame, PostSlate included) is at most 1 MiB, and its `str` at most 128 KiB. An outbound `Mail` is at most `str` plus 16 KiB, so at most 144 KiB with the defaults. Both limits are in the info document. Clients sized at max message + 64 KiB are safe.
+- Frame sizes: an inbound frame (any client frame, PostSlate included) is at most 1 MiB, and its `str` at most 128 KiB (operator settings `limits.max_frame_bytes` and `limits.max_str_bytes`). An outbound `Mail` is at most `str` plus 16 KiB, so at most 144 KiB with the defaults. Clients sized at max message + 64 KiB are safe.
 
 ### Detached
 
@@ -187,11 +187,11 @@ Delivery rules:
 {"type":"Detached","mailbox":"<key>","reason":"replaced"}
 ```
 
-The relay stopped delivering this mailbox on this socket. Reasons: `replaced` (attached or subscribed on another socket), `limit` (operator limit lowered), `shutdown` (relay draining). The client may attach it again, which will in turn replace the other socket.
+The relay stopped delivering this mailbox on this socket. Reasons: `replaced` (attached or resumed on another mux/1 socket) and `shutdown` (relay draining). After `shutdown` the client reconnects and resumes. After `replaced` it must not re-attach on its own (section 3).
 
 ### Shutdown
 
-On SIGTERM the relay closes every socket with code 1001. Clients reconnect, to another instance if there is one, and Resume. Tokens do not survive a restart.
+On SIGTERM the relay sends `Detached` with `reason: "shutdown"` for every attached mailbox, then closes the socket with code 1001. Clients reconnect, to another instance if there is one, and Resume. Tokens do not survive a restart.
 
 ## 5. Limits
 
@@ -206,7 +206,9 @@ The relay publishes these limits in the `Ok` and in its info document (`/.well-k
 | hold | 1 to 3600 s |
 | Attach and Resume frames per socket | 30 per minute |
 | failed signatures per IP prefix | 120 per minute, then `rate_limited` |
-| mux/1 sockets per IP prefix | operator setting, default 64 |
+| mux/1 sockets per IP prefix | 64 |
+
+All but "ids per Ack" and "hold" are operator settings in `[limits]`.
 
 IP prefixes are /24 for IPv4 and /48 for IPv6. Every user of one Tor exit, and every client of an onion service (all arrive from loopback), shares one prefix. Operators list such sources in `limits.shared_sources` (CIDRs); per-prefix limits are multiplied by `limits.shared_multiplier` (default 16) for them. Per-address and per-socket limits are unchanged.
 
@@ -234,6 +236,3 @@ C: {"type":"Resume","ref":"r1","token":"q9..."}
 R: {"type":"Attached","ref":"r1","mailboxes":[...],"token":"Hk...","token_expires":...}
 ```
 
-## 8. Open points
-
-None. Settled in draft 2: a mux/1 holder wins over 3.0.0 sockets, and only mux-vs-mux sends `replaced` (section 3); tokens live 24 h; 3.1.0 cancel stays out of mux/1.
