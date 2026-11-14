@@ -20,7 +20,7 @@ use epicmail::relay::Relay;
 use epicmail::sig;
 use epicmail::store::sqlite::SqliteStore;
 use epicmail::store::Store;
-use epicmail::util::now_ms;
+use epicmail::clock::now_ms;
 
 const STATIC: &str = "7WUDtkSaKyGRUnQ22rE3QUXChV8DmA6NnunDYP4vheTpc";
 

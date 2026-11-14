@@ -9,10 +9,11 @@ use serde_json::{json, Value};
 
 use super::{ok, with_ref, Flow, Session};
 use crate::address::parse_address;
+use crate::clock::now_ms;
+use crate::ids::{is_msgid, rand_b64url};
 use crate::relay::{Cmd, PostOutcome, PostReq, Refusal, OFFER_LEASE_MS};
 use crate::sig;
 use crate::store::ClaimMode;
-use crate::util::{is_msgid, now_ms, rand_b64url};
 
 /// Most message ids one Ack may carry.
 pub const MAX_ACK_IDS: usize = 256;

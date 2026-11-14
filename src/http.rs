@@ -28,11 +28,12 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::address::parse_address;
 use crate::bus::Event;
+use crate::clock::now_ms;
+use crate::ids::is_msgid;
 use crate::limits::SocketRefusal;
 use crate::relay::{session, PostOutcome, PostReq, Refusal, Relay};
 use crate::sig;
 use crate::store::ClaimMode;
-use crate::util::{is_msgid, now_ms};
 
 pub const HTTPS_PROTOCOL: &str = "epicbox-https/0.1";
 const CHALLENGE_PREFIX: &str = "ebh-";

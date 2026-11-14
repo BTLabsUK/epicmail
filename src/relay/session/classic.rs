@@ -8,11 +8,12 @@ use serde_json::{json, Value};
 
 use super::{ok, Flow, Session, STATIC_CHALLENGE};
 use crate::address::parse_address;
+use crate::clock::now_ms;
 use crate::config::FirstChallenge;
+use crate::ids::{is_msgid, rand_id};
 use crate::relay::{CancelOutcome, Cmd, PostOutcome, PostReq, Refusal, OFFER_LEASE_MS};
 use crate::sig;
 use crate::store::{ClaimMode, StoredMessage};
-use crate::util::{is_msgid, now_ms, rand_id};
 
 /// Protocol version a classic socket announced in Subscribe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

@@ -8,8 +8,22 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+use crate::clock::now_ms;
 use crate::config::Limits;
-use crate::util::{ip_prefix, now_ms};
+
+/// The key used to group clients for per-IP limits: the network prefix. IPv4-mapped IPv6
+/// addresses count as IPv4.
+pub fn ip_prefix(ip: IpAddr, v4: u8, v6: u8) -> String {
+    let ip = match ip {
+        IpAddr::V6(v6addr) => v6addr.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+        other => other,
+    };
+    let net = match ip {
+        IpAddr::V4(_) => ipnet::IpNet::new(ip, v4),
+        IpAddr::V6(_) => ipnet::IpNet::new(ip, v6),
+    };
+    net.map(|n| n.trunc().to_string()).unwrap_or_else(|_| ip.to_string())
+}
 
 /// A token bucket per key. `take` returns the seconds to wait when the bucket is empty.
 pub struct Buckets {
@@ -224,6 +238,13 @@ impl Drop for SocketPermit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefixes() {
+        assert_eq!(ip_prefix("10.1.2.3".parse().unwrap(), 24, 48), "10.1.2.0/24");
+        assert_eq!(ip_prefix("::ffff:10.1.2.3".parse().unwrap(), 24, 48), "10.1.2.0/24");
+        assert_eq!(ip_prefix("2001:db8:1:2::5".parse().unwrap(), 24, 48), "2001:db8:1::/48");
+    }
 
     #[test]
     fn bucket_burst_then_refuse() {

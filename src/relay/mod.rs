@@ -13,15 +13,17 @@ use std::time::Instant;
 
 use parking_lot::Mutex;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::sync::{watch, Notify};
 
 use crate::address::parse_address;
 use crate::bus::{Bus, Event};
+use crate::clock::now_ms;
 use crate::config::Config;
+use crate::ids::{is_txid, rand_b64url, rand_id};
 use crate::limits::Limiter;
 use crate::sig;
 use crate::store::{ForwardKind, NewForward, NewMessage, PutOutcome, Store};
-use crate::util::{is_txid, now_ms, rand_id, sha256};
 
 pub use registry::{Cmd, Registry, SockHandle};
 
@@ -192,7 +194,7 @@ impl Relay {
 
     /// Issue a token for `mailboxes`, ending `old`. Returns (token, expires unix seconds).
     pub fn issue_token(&self, old: Option<[u8; 32]>, mailboxes: Vec<String>) -> (String, [u8; 32], i64) {
-        let token = crate::util::rand_b64url(32);
+        let token = rand_b64url(32);
         let hash = sha256(token.as_bytes());
         let expires_at = now_ms() + TOKEN_TTL_MS;
         let mut t = self.tokens.lock();
@@ -555,4 +557,9 @@ pub fn destination(payload: &Value) -> Option<(String, String, u16)> {
         return None;
     }
     Some((addr.public_key, domain.to_string(), port))
+}
+
+/// The token map is keyed by SHA-256 of the token, so the plain token is never stored.
+fn sha256(data: &[u8]) -> [u8; 32] {
+    Sha256::digest(data).into()
 }

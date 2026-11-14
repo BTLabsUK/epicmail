@@ -22,9 +22,9 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::Connector;
 
+use crate::clock::now_ms;
 use crate::relay::Relay;
 use crate::store::ForwardRow;
-use crate::util::now_ms;
 
 const TICK: Duration = Duration::from_secs(5);
 const BATCH: usize = 50;

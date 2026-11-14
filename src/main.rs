@@ -15,7 +15,7 @@ use epicmail::http::{self, AppState};
 use epicmail::relay::Relay;
 use epicmail::store::sqlite::SqliteStore;
 use epicmail::store::Store;
-use epicmail::util::now_ms;
+use epicmail::clock::now_ms;
 use epicmail::{forward, metrics as relay_metrics, migrate, sig};
 
 #[derive(Parser)]

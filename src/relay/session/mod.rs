@@ -24,8 +24,8 @@ use tokio::time::{interval_at, MissedTickBehavior};
 
 use super::{Cmd, Relay, SockHandle};
 use crate::config::FirstChallenge;
+use crate::ids::rand_id;
 use crate::limits::SocketPermit;
-use crate::util::rand_id;
 use classic::{Inflight, Ver};
 use mux::{mux_error, ref_of, Mux, MUX_PUMP_TICK};
 
