@@ -150,6 +150,9 @@ pub struct Limits {
     pub shared_multiplier: u32,
     /// mux/1 sockets per IP prefix.
     pub mux_sockets_per_ip: u32,
+    /// Mailboxes held by all mux/1 resume tokens together. Past this the oldest tokens are
+    /// dropped. Tokens outlive their sockets, so the socket limits do not bound them.
+    pub mux_token_mailboxes: u32,
 }
 
 /// `[federation]`: forwarding mail to other relays.
@@ -275,6 +278,7 @@ impl Default for Limits {
             shared_sources: vec![],
             shared_multiplier: 16,
             mux_sockets_per_ip: 64,
+            mux_token_mailboxes: 1_000_000,
         }
     }
 }

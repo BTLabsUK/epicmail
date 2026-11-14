@@ -41,7 +41,7 @@ pub struct Relay {
     pub bus: Bus,
     pub limiter: Arc<Limiter>,
     /// mux/1 resume tokens by SHA-256 hash. Memory only.
-    tokens: Mutex<HashMap<[u8; 32], tokens::TokenEntry>>,
+    tokens: Mutex<tokens::Tokens>,
     /// Wakes the forward manager after a forward is committed.
     pub forward_notify: Notify,
     /// Test knob: mailbox key -> stalled until (ms).
@@ -146,13 +146,14 @@ impl Relay {
     /// A relay with no sockets, not draining.
     pub fn new(cfg: Arc<Config>, store: Arc<dyn Store>) -> Arc<Self> {
         let (shutdown, _) = watch::channel(false);
+        let tokens = tokens::Tokens::new(cfg.limits.mux_token_mailboxes as usize);
         Arc::new(Self {
             limiter: Arc::new(Limiter::new(&cfg.limits)),
             cfg,
             store,
             registry: Registry::new(),
             bus: Bus::new(),
-            tokens: Mutex::new(HashMap::new()),
+            tokens: Mutex::new(tokens),
             forward_notify: Notify::new(),
             stalled: Mutex::new(HashMap::new()),
             draining: AtomicBool::new(false),

@@ -40,5 +40,9 @@ fn describe() {
     describe_counter!("epicbox_limit_refusals_total", "Requests refused by a limit.");
     describe_counter!("epicbox_mux_sessions_total", "Sockets that switched to mux/1.");
     describe_counter!("epicbox_mux_resumes_total", "mux/1 Resume frames that found their token.");
+    describe_counter!(
+        "epicbox_mux_tokens_evicted_total",
+        "mux/1 resume tokens dropped to stay under mux_token_mailboxes."
+    );
     describe_counter!("epicbox_http_requests_total", "/v1 requests by route and status.");
 }

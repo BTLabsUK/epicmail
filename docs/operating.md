@@ -90,6 +90,7 @@ Per-IP limits group clients by prefix (`ipv4_prefix` 24, `ipv6_prefix` 48). Sour
 | `shared_sources` | empty | Tor exits and the onion loopback being limited as one client |
 | `shared_multiplier` | 16 | Factor applied for `shared_sources` |
 | `mux_sockets_per_ip` | 64 | One prefix holding many mux/1 sockets |
+| `mux_token_mailboxes` | 1000000 | Memory held by mux/1 resume tokens of closed sockets (oldest dropped first) |
 
 `queue_cap` and the retention below bound database size: roughly `addresses × queue_cap × message size` in the worst case.
 
