@@ -7,12 +7,31 @@ use std::sync::atomic::Ordering;
 use serde_json::{json, Value};
 
 use super::{PostOutcome, PostReq, Refusal, Relay};
-use crate::address::parse_address;
+use crate::address::{parse_address, EpicboxAddress};
 use crate::bus::Event;
 use crate::clock::now_ms;
 use crate::ids::{is_txid, rand_id};
 use crate::sig;
 use crate::store::{ForwardKind, NewForward, NewMessage, PutOutcome};
+
+/// The refusal text for a PostSlate with missing fields or half the 3.1.0 fields, worded as the
+/// stock relay words it.
+const MISSING_FIELDS: &str = "PostSlate requires from, to, str, and signature. epicboxtxid and epicboxtxidsig \
+                              must either both be absent (legacy) or both be valid (protocol 3.1.0).";
+
+/// A slate that passed every check in `check_post`.
+struct Slate {
+    from_s: String,
+    to_s: String,
+    from: EpicboxAddress,
+    body: String,
+    signature: String,
+    txid: Option<String>,
+    txidsig: Option<String>,
+    dest_key: String,
+    dest_domain: String,
+    dest_port: u16,
+}
 
 impl Relay {
     /// Validate, store or queue a slate. `allow_cancel` accepts the 3.1.0 fields.
@@ -32,17 +51,30 @@ impl Relay {
     }
 
     async fn post_slate_inner(&self, ip: IpAddr, req: PostReq, allow_cancel: bool) -> PostOutcome {
-        use PostOutcome::Refused;
+        let slate = match self.check_post(ip, req, allow_cancel) {
+            Ok(s) => s,
+            Err(r) => return PostOutcome::Refused(r),
+        };
+        let now = now_ms();
+        let expires_at = now + self.retention_ms();
+        if self.cfg.is_local(&slate.dest_domain, slate.dest_port) {
+            self.store_local(slate, now, expires_at).await
+        } else {
+            self.store_forward(slate, now, expires_at).await
+        }
+    }
+
+    /// Every check that needs no store: limits, sizes, addresses, signatures and the
+    /// destination inside the slate.
+    fn check_post(&self, ip: IpAddr, req: PostReq, allow_cancel: bool) -> Result<Slate, Refusal> {
         let lim = &self.cfg.limits;
         let body_len = req.str_.as_ref().map(|s| s.len()).unwrap_or(0);
-        if let Err(s) = self.limiter.post_ip(ip, body_len) {
-            return Refused(Refusal::RateLimited(s));
-        }
+        self.limiter.post_ip(ip, body_len).map_err(Refusal::RateLimited)?;
         if let Some(s) = self.limiter.sig_blocked(ip) {
-            return Refused(Refusal::RateLimited(s));
+            return Err(Refusal::RateLimited(s));
         }
         if body_len > lim.max_str_bytes {
-            return Refused(Refusal::Invalid(
+            return Err(Refusal::Invalid(
                 "InvalidRequest",
                 format!("Slate is larger than {} bytes.", lim.max_str_bytes),
             ));
@@ -58,119 +90,107 @@ impl Relay {
                 (Some(Value::String(t)), Some(Value::String(s))) if is_txid(t) => {
                     (Some(t.clone()), Some(s.clone()))
                 }
-                _ => {
-                    return Refused(Refusal::Invalid(
-                        "InvalidRequest",
-                        "PostSlate requires from, to, str, and signature. epicboxtxid and epicboxtxidsig \
-                         must either both be absent (legacy) or both be valid (protocol 3.1.0)."
-                            .into(),
-                    ))
-                }
+                _ => return Err(Refusal::Invalid("InvalidRequest", MISSING_FIELDS.into())),
             }
         } else {
             (None, None)
         };
         if cancel_fields && (req.str_.is_none() || req.signature.is_none() || req.from.is_none() || req.to.is_none()) {
-            return Refused(Refusal::Invalid(
-                "InvalidRequest",
-                "PostSlate requires from, to, str, and signature. epicboxtxid and epicboxtxidsig \
-                 must either both be absent (legacy) or both be valid (protocol 3.1.0)."
-                    .into(),
-            ));
+            return Err(Refusal::Invalid("InvalidRequest", MISSING_FIELDS.into()));
         }
 
         let wrong = || {
-            Refused(Refusal::Invalid(
-                "InvalidRequest",
-                format!("Wrong address format. From: {from_s}, To: {to_s}"),
-            ))
+            Refusal::Invalid("InvalidRequest", format!("Wrong address format. From: {from_s}, To: {to_s}"))
         };
         let (Ok(from), Ok(to)) = (parse_address(&from_s), parse_address(&to_s)) else {
-            return wrong();
+            return Err(wrong());
         };
         if !from.public_key_valid() || !to.public_key_valid() {
-            return wrong();
+            return Err(wrong());
         }
         let (Some(body), Some(signature)) = (req.str_.clone(), req.signature.clone()) else {
             self.limiter.sig_failed(ip);
-            return Refused(Refusal::Invalid("InvalidRequest", "Error postslate signature.".into()));
+            return Err(Refusal::Invalid("InvalidRequest", "Error postslate signature.".into()));
         };
         if sig::verify(&from.public_key, &body, &signature).is_err() {
             self.limiter.sig_failed(ip);
-            return Refused(Refusal::Invalid("InvalidRequest", "Error postslate signature.".into()));
+            return Err(Refusal::Invalid("InvalidRequest", "Error postslate signature.".into()));
         }
         if let (Some(t), Some(ts)) = (&txid, &txidsig) {
             if sig::verify(&from.public_key, t, ts).is_err() {
                 self.limiter.sig_failed(ip);
-                return Refused(Refusal::Invalid("InvalidSignature", "Invalid epicboxtxid signature.".into()));
+                return Err(Refusal::Invalid("InvalidSignature", "Invalid epicboxtxid signature.".into()));
             }
         }
-        if let Err(s) = self.limiter.post_addr(&from.public_key) {
-            return Refused(Refusal::RateLimited(s));
-        }
+        self.limiter.post_addr(&from.public_key).map_err(Refusal::RateLimited)?;
 
         // Route by the destination inside the signed slate, as the stock relay does.
         let Ok(payload) = serde_json::from_str::<Value>(&body) else {
-            return Refused(Refusal::Invalid("InvalidRequest", "Invalid Slate payload.".into()));
+            return Err(Refusal::Invalid("InvalidRequest", "Invalid Slate payload.".into()));
         };
         let Some((dest_key, dest_domain, dest_port)) = destination(&payload) else {
-            return Refused(Refusal::Invalid("InvalidRequest", "Invalid slate destination.".into()));
+            return Err(Refusal::Invalid("InvalidRequest", "Invalid slate destination.".into()));
         };
-        let now = now_ms();
-        let expires_at = now + self.retention_ms();
+        Ok(Slate { from_s, to_s, from, body, signature, txid, txidsig, dest_key, dest_domain, dest_port })
+    }
 
-        if self.cfg.is_local(&dest_domain, dest_port) {
-            let remote_endpoint = endpoint_of(from.domain.as_deref(), from.port)
-                .filter(|_| !self.cfg.is_local(from.domain.as_deref().unwrap_or(""), from.port.unwrap_or(443)));
-            let m = NewMessage {
-                queue: dest_key.clone(),
-                sender: from_s.clone(),
-                sender_key: from.public_key.clone(),
-                recipient: to_s.clone(),
-                body,
-                signature,
-                challenge: String::new(),
-                txid: txid.clone(),
-                txidsig,
-                remote_endpoint,
-                msgid: rand_id(32),
-                created_at: now,
-                expires_at,
-                deliveries: 0,
-                queue_cap: lim.queue_cap,
-                per_sender_cap: lim.per_sender_cap,
-            };
-            return match self.store.put_message(m).await {
-                Ok(PutOutcome::Stored { msgid }) => {
-                    self.registry.wake(&dest_key);
-                    self.bus.publish(Event::MailStored { queue: dest_key });
-                    PostOutcome::Stored { msgid, txid }
-                }
-                Ok(PutOutcome::Duplicate { msgid }) => {
-                    // Wake anyway: the earlier copy may be waiting for a listener that just came.
-                    self.registry.wake(&dest_key);
-                    PostOutcome::Stored { msgid, txid }
-                }
-                Ok(PutOutcome::QueueFull) => {
-                    Refused(Refusal::Full("Recipient mailbox is full; try again later.".into()))
-                }
-                Ok(PutOutcome::SenderCapped) => Refused(Refusal::Full(
-                    "Too many messages from this sender are waiting for the recipient.".into(),
-                )),
-                Ok(PutOutcome::Cancelled) => PostOutcome::Cancelled { txid: txid.unwrap_or_default() },
-                Ok(PutOutcome::NotParticipant) => Refused(Refusal::Invalid(
-                    "InvalidRequest",
-                    "Posting address is not a participant of epicboxtxid.".into(),
-                )),
-                Err(e) => {
-                    tracing::error!(error = %e, "store put_message failed");
-                    self.store_ok.store(false, Ordering::Relaxed);
-                    Refused(Refusal::Internal)
-                }
-            };
+    /// Store a checked slate for one of this relay's mailboxes and wake its listener.
+    async fn store_local(&self, slate: Slate, now: i64, expires_at: i64) -> PostOutcome {
+        use PostOutcome::Refused;
+        let lim = &self.cfg.limits;
+        let Slate { from_s, to_s, from, body, signature, txid, txidsig, dest_key, .. } = slate;
+        let remote_endpoint = endpoint_of(from.domain.as_deref(), from.port)
+            .filter(|_| !self.cfg.is_local(from.domain.as_deref().unwrap_or(""), from.port.unwrap_or(443)));
+        let m = NewMessage {
+            queue: dest_key.clone(),
+            sender: from_s,
+            sender_key: from.public_key,
+            recipient: to_s,
+            body,
+            signature,
+            challenge: String::new(),
+            txid: txid.clone(),
+            txidsig,
+            remote_endpoint,
+            msgid: rand_id(32),
+            created_at: now,
+            expires_at,
+            deliveries: 0,
+            queue_cap: lim.queue_cap,
+            per_sender_cap: lim.per_sender_cap,
+        };
+        match self.store.put_message(m).await {
+            Ok(PutOutcome::Stored { msgid }) => {
+                self.registry.wake(&dest_key);
+                self.bus.publish(Event::MailStored { queue: dest_key });
+                PostOutcome::Stored { msgid, txid }
+            }
+            Ok(PutOutcome::Duplicate { msgid }) => {
+                // Wake anyway: the earlier copy may be waiting for a listener that just came.
+                self.registry.wake(&dest_key);
+                PostOutcome::Stored { msgid, txid }
+            }
+            Ok(PutOutcome::QueueFull) => Refused(Refusal::Full("Recipient mailbox is full; try again later.".into())),
+            Ok(PutOutcome::SenderCapped) => Refused(Refusal::Full(
+                "Too many messages from this sender are waiting for the recipient.".into(),
+            )),
+            Ok(PutOutcome::Cancelled) => PostOutcome::Cancelled { txid: txid.unwrap_or_default() },
+            Ok(PutOutcome::NotParticipant) => Refused(Refusal::Invalid(
+                "InvalidRequest",
+                "Posting address is not a participant of epicboxtxid.".into(),
+            )),
+            Err(e) => {
+                tracing::error!(error = %e, "store put_message failed");
+                self.store_ok.store(false, Ordering::Relaxed);
+                Refused(Refusal::Internal)
+            }
         }
+    }
 
-        // Another relay.
+    /// Queue a checked slate for another relay and wake the forward manager.
+    async fn store_forward(&self, slate: Slate, now: i64, expires_at: i64) -> PostOutcome {
+        use PostOutcome::Refused;
+        let Slate { from_s, to_s, from, body, signature, txid, txidsig, dest_key, dest_domain, dest_port } = slate;
         let peer = format!("{}:{}", dest_domain.to_ascii_lowercase(), dest_port);
         if let Some(r) = self.forward_refusal(&dest_domain, dest_port) {
             return Refused(r);
@@ -192,7 +212,7 @@ impl Relay {
             kind: ForwardKind::PostSlate,
             frame: frame.to_string(),
             txid: txid.clone(),
-            tx_keys: vec![from.public_key.clone(), dest_key],
+            tx_keys: vec![from.public_key, dest_key],
             created_at: now,
             expires_at,
             attempts: 0,
