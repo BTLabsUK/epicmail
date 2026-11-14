@@ -19,12 +19,12 @@ Each scenario starts with an empty database. The payload is 2 KiB, which is abou
 To repeat a run:
 
 ```sh
-cargo build --release --bin epicbox-relay --example loadgen
-target/release/epicbox-relay --config relay-load.toml serve &
+cargo build --release --bin epicmail --example loadgen
+target/release/epicmail --config epicmail-load.toml serve &
 target/release/examples/loadgen --pid $! --listeners 10000 --senders 1000 --rate 1000 --duration 60
 ```
 
-`relay-load.toml` is a plain config (listen `127.0.0.1:3430`, domain `loadtest.local`, federation off). The runs above 500 posts/s raise the per-prefix post limits (see "Limits" below).
+`epicmail-load.toml` is a plain config (listen `127.0.0.1:3430`, domain `loadtest.local`, federation off). The runs above 500 posts/s raise the per-prefix post limits (see "Limits" below).
 
 ## Results
 
@@ -56,7 +56,7 @@ At 500 and 1,000 posts/s the p99 of post Ok (330 to 490 ms) is higher than at 2,
 
 ### Limits
 
-With default limits, one /24 may post 240 times a minute (burst 480). The smoke run (10 senders on 10 prefixes, 100 posts/s, so 600 a minute per prefix) accepted the burst and then refused the rest with `Rate limit exceeded; retry in 1 s.`: 1,391 accepted, 618 refused. Every accepted post was delivered. That is the limit doing its job. With 250 prefixes the default limits allow 1,000 posts/s in total, so the 1,000/s and higher runs used `relay-load-hi.toml` with the per-prefix post, byte and frame limits raised.
+With default limits, one /24 may post 240 times a minute (burst 480). The smoke run (10 senders on 10 prefixes, 100 posts/s, so 600 a minute per prefix) accepted the burst and then refused the rest with `Rate limit exceeded; retry in 1 s.`: 1,391 accepted, 618 refused. Every accepted post was delivered. That is the limit doing its job. With 250 prefixes the default limits allow 1,000 posts/s in total, so the 1,000/s and higher runs used `epicmail-load-hi.toml` with the per-prefix post, byte and frame limits raised.
 
 ## Not measured
 

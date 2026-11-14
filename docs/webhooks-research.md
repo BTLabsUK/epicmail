@@ -146,7 +146,7 @@ It then sends one `epicbox.hook.verify` callback (format below) whose `data` car
 POST /epicbox HTTP/1.1
 Host: hooks.example-shop.com
 Content-Type: application/json
-User-Agent: epicbox-relay
+User-Agent: epicmail
 webhook-id: evt_<random, unique per hint>
 webhook-timestamp: 1763040000
 webhook-signature: v1,<base64 HMAC-SHA256(secret, id + "." + timestamp + "." + body)>

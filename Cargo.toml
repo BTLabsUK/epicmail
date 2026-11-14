@@ -1,17 +1,17 @@
 [package]
-name = "epicbox-relay"
+name = "epicmail"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
-description = "An Epicbox relay: one binary, SQLite inside, wire-compatible with Epicbox 2.0.0/3.0.0"
+description = "epicmail: an Epicbox-compatible relay. One binary, SQLite inside, wire-compatible with Epicbox 2.0.0/3.0.0"
 publish = false
 
 [lib]
 path = "src/lib.rs"
 
 [[bin]]
-name = "epicbox-relay"
+name = "epicmail"
 path = "src/main.rs"
 
 [dependencies]

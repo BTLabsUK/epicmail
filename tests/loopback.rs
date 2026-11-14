@@ -14,13 +14,13 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-use epicbox_relay::config::Config;
-use epicbox_relay::http::{self, AppState};
-use epicbox_relay::relay::Relay;
-use epicbox_relay::sig;
-use epicbox_relay::store::sqlite::SqliteStore;
-use epicbox_relay::store::Store;
-use epicbox_relay::util::now_ms;
+use epicmail::config::Config;
+use epicmail::http::{self, AppState};
+use epicmail::relay::Relay;
+use epicmail::sig;
+use epicmail::store::sqlite::SqliteStore;
+use epicmail::store::Store;
+use epicmail::util::now_ms;
 
 const STATIC: &str = "7WUDtkSaKyGRUnQ22rE3QUXChV8DmA6NnunDYP4vheTpc";
 
@@ -47,7 +47,7 @@ async fn start(dir: &Path, domain: &str, tweak: impl FnOnce(&mut Config)) -> Nod
     let app = http::router(AppState { relay: relay.clone(), metrics: None, metrics_on_main: false })
         .into_make_service_with_connect_info::<SocketAddr>();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    tokio::spawn(epicbox_relay::forward::run(relay.clone()));
+    tokio::spawn(epicmail::forward::run(relay.clone()));
     Node { addr, relay }
 }
 
@@ -444,13 +444,13 @@ async fn cancel_forged_refused_real_cancel_works() {
     assert_eq!(waiting(&n).await, 1);
 
     // A valid signature from someone who is not a participant changes nothing.
-    let msig = mallory.sign(&format!("{}{txid}", epicbox_relay::relay::CANCEL_SIG_PREFIX));
+    let msig = mallory.sign(&format!("{}{txid}", epicmail::relay::CANCEL_SIG_PREFIX));
     send(&mut m, json!({"type":"CancelTx","address":mallory.pk,"epicboxtxid":txid,"signature":msig})).await;
     assert_eq!(recv(&mut m).await, json!({"type":"Ok"}));
     assert_eq!(waiting(&n).await, 1);
 
     // The sender cancels with the domain-separated signature.
-    let asig = alice.sign(&format!("{}{txid}", epicbox_relay::relay::CANCEL_SIG_PREFIX));
+    let asig = alice.sign(&format!("{}{txid}", epicmail::relay::CANCEL_SIG_PREFIX));
     send(&mut a, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":txid,"signature":asig})).await;
     assert_eq!(recv(&mut a).await, json!({"type":"TransactionCancelled","epicboxtxid":txid}));
     assert_eq!(waiting(&n).await, 0);

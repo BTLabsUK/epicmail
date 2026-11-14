@@ -1,4 +1,4 @@
-//! epicbox-relay: serve, check-config, import, export, selftest.
+//! epicmail: serve, check-config, import, export, selftest.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -10,19 +10,19 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use epicbox_relay::config::Config;
-use epicbox_relay::http::{self, AppState};
-use epicbox_relay::relay::Relay;
-use epicbox_relay::store::sqlite::SqliteStore;
-use epicbox_relay::store::Store;
-use epicbox_relay::util::now_ms;
-use epicbox_relay::{forward, metrics as relay_metrics, migrate, sig};
+use epicmail::config::Config;
+use epicmail::http::{self, AppState};
+use epicmail::relay::Relay;
+use epicmail::store::sqlite::SqliteStore;
+use epicmail::store::Store;
+use epicmail::util::now_ms;
+use epicmail::{forward, metrics as relay_metrics, migrate, sig};
 
 #[derive(Parser)]
-#[command(name = "epicbox-relay", version, about = "An Epicbox relay")]
+#[command(name = "epicmail", version, about = "An Epicbox relay")]
 struct Cli {
     /// Configuration file (TOML).
-    #[arg(long, short, global = true, default_value = "/etc/epicbox-relay/relay.toml")]
+    #[arg(long, short, global = true, default_value = "/etc/epicmail/epicmail.toml")]
     config: PathBuf,
     #[command(subcommand)]
     cmd: Command,

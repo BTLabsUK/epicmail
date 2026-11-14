@@ -2,7 +2,7 @@
 //! Generated cases: tests/data/sigcases.jsonl (throwaway keys).
 //! Real corpus: $SIGDIFF_CORPUS (jsonl built by `sigdiff-gen corpus`), skipped when unset.
 
-use epicbox_relay::sig;
+use epicmail::sig;
 
 fn check(path: &str) -> (usize, usize, usize) {
     let text = std::fs::read_to_string(path).unwrap();

@@ -251,7 +251,7 @@ async fn well_known(State(st): State<AppState>) -> Response {
         features.insert("https".into(), json!({"protocol": HTTPS_PROTOCOL, "base": "/v1"}));
     }
     Json(json!({
-        "software": "epicbox-relay",
+        "software": "epicmail",
         "version": env!("CARGO_PKG_VERSION"),
         "name": cfg.server.name,
         "identity": format!("{}:{}", cfg.server.domain, cfg.server.port),

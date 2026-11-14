@@ -25,7 +25,7 @@ use tokio::sync::Semaphore;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
-use epicbox_relay::sig;
+use epicmail::sig;
 
 #[derive(Parser, Clone)]
 struct Args {

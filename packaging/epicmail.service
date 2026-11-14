@@ -1,17 +1,17 @@
 [Unit]
-Description=Epicbox relay
+Description=epicmail (Epicbox-compatible relay)
 Documentation=https://example.org/docs/operating.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/epicbox-relay serve --config /etc/epicbox-relay/relay.toml
-# Config sets store.path = "/var/lib/epicbox-relay/epicbox-relay.db"
+ExecStart=/usr/local/bin/epicmail serve --config /etc/epicmail/epicmail.toml
+# Config sets store.path = "/var/lib/epicmail/epicmail.db"
 DynamicUser=yes
-StateDirectory=epicbox-relay
+StateDirectory=epicmail
 StateDirectoryMode=0750
-ConfigurationDirectory=epicbox-relay
+ConfigurationDirectory=epicmail
 Restart=on-failure
 RestartSec=2
 

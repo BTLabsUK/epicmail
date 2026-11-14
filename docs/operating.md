@@ -3,10 +3,10 @@
 One binary, one TOML file, one SQLite database.
 
 ```
-epicbox-relay serve        --config relay.toml
-epicbox-relay check-config --config relay.toml
-epicbox-relay import       --config relay.toml <file>
-epicbox-relay export       --config relay.toml [--out file]
+epicmail serve        --config epicmail.toml
+epicmail check-config --config epicmail.toml
+epicmail import       --config epicmail.toml <file>
+epicmail export       --config epicmail.toml [--out file]
 ```
 
 ## 1. Install
@@ -15,34 +15,34 @@ epicbox-relay export       --config relay.toml [--out file]
 
 ```
 tools/build-static.sh        # static x86_64 musl binary
-install -m 0755 target/x86_64-unknown-linux-musl/release/epicbox-relay /usr/local/bin/
-install -d /etc/epicbox-relay
-cp packaging/relay.example.toml /etc/epicbox-relay/relay.toml   # edit server.domain, store.path
-epicbox-relay check-config --config /etc/epicbox-relay/relay.toml
+install -m 0755 target/x86_64-unknown-linux-musl/release/epicmail /usr/local/bin/
+install -d /etc/epicmail
+cp packaging/epicmail.example.toml /etc/epicmail/epicmail.toml   # edit server.domain, store.path
+epicmail check-config --config /etc/epicmail/epicmail.toml
 ```
 
 ### Docker
 
 ```
-docker build -t epicbox-relay .
+docker build -t epicmail .
 docker run -d --name relay --restart on-failure \
   -p 127.0.0.1:3423:3423 \
   -v relay-data:/data \
-  -v /etc/epicbox-relay/relay.toml:/etc/epicbox-relay/relay.toml:ro \
-  epicbox-relay
+  -v /etc/epicmail/epicmail.toml:/etc/epicmail/epicmail.toml:ro \
+  epicmail
 ```
 
-In the container config set `server.listen = "0.0.0.0:3423"` and `store.path = "/data/epicbox-relay.db"`. The image runs as uid 65532 on a `scratch` base and has no shell, so there is no HEALTHCHECK. Check from outside instead: `curl -fsS http://127.0.0.1:3423/ready` from the host or the reverse proxy, or a Compose/orchestrator probe on `/ready`. Stop with `docker stop -t 30`: the default 10 s equals `drain_seconds`.
+In the container config set `server.listen = "0.0.0.0:3423"` and `store.path = "/data/epicmail.db"`. The image runs as uid 65532 on a `scratch` base and has no shell, so there is no HEALTHCHECK. Check from outside instead: `curl -fsS http://127.0.0.1:3423/ready` from the host or the reverse proxy, or a Compose/orchestrator probe on `/ready`. Stop with `docker stop -t 30`: the default 10 s equals `drain_seconds`.
 
 ### systemd
 
 ```
-install -m 0644 packaging/epicbox-relay.service /etc/systemd/system/
+install -m 0644 packaging/epicmail.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now epicbox-relay
+systemctl enable --now epicmail
 ```
 
-The unit uses `DynamicUser` and `StateDirectory=epicbox-relay`, so set `store.path = "/var/lib/epicbox-relay/epicbox-relay.db"`. `LimitNOFILE=262144` covers `max_sockets = 150000`. `TimeoutStopSec=30` must stay above `server.drain_seconds`.
+The unit uses `DynamicUser` and `StateDirectory=epicmail`, so set `store.path = "/var/lib/epicmail/epicmail.db"`. `LimitNOFILE=262144` covers `max_sockets = 150000`. `TimeoutStopSec=30` must stay above `server.drain_seconds`.
 
 ### Reverse proxy
 
@@ -57,7 +57,7 @@ List the proxy in `server.trusted_proxies`. Without it the relay sees every clie
 
 ## 2. Configuration
 
-All settings, with defaults and one-line comments, are in `packaging/relay.example.toml`. The code is the reference: `src/config.rs`. Unknown keys are rejected. Run `check-config` after every edit. Only `server.domain` is required.
+All settings, with defaults and one-line comments, are in `packaging/epicmail.example.toml`. The code is the reference: `src/config.rs`. Unknown keys are rejected. Run `check-config` after every edit. Only `server.domain` is required.
 
 ## 3. Limits
 
@@ -100,19 +100,19 @@ Per-IP limits group clients by prefix (`ipv4_prefix` 24, `ipv6_prefix` 48). Sour
 
 ## 5. Backup and restore
 
-The store is one SQLite file in WAL mode: `epicbox-relay.db`, plus `epicbox-relay.db-wal` and `epicbox-relay.db-shm` while running. The WAL holds committed writes that are not yet in the main file.
+The store is one SQLite file in WAL mode: `epicmail.db`, plus `epicmail.db-wal` and `epicmail.db-shm` while running. The WAL holds committed writes that are not yet in the main file.
 
 Online backup, relay running:
 
 ```
-sqlite3 /var/lib/epicbox-relay/epicbox-relay.db ".backup '/backup/epicbox-relay-$(date +%F).db'"
+sqlite3 /var/lib/epicmail/epicmail.db ".backup '/backup/epicmail-$(date +%F).db'"
 ```
 
 Offline: stop the relay, then copy the `.db` file. Copy the `-wal` file with it if it exists. Never copy only the `.db` of a running relay.
 
 Restore: stop the relay, put the backup file in place as `store.path`, remove old `-wal` and `-shm` files, start. Restoring an old backup drops messages posted since; senders got Ok for those. Prefer a recent backup.
 
-A portable alternative is `epicbox-relay export --config relay.toml --out file`, and `import` into a stopped or empty store. Mail is short lived (7 days), so a nightly backup is usually enough.
+A portable alternative is `epicmail export --config epicmail.toml --out file`, and `import` into a stopped or empty store. Mail is short lived (7 days), so a nightly backup is usually enough.
 
 ## 6. Retention and sweep
 

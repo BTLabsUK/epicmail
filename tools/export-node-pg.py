@@ -2,7 +2,7 @@
 """Export queued Epicbox messages from a Postgres-backed relay as JSON Lines.
 
 Output goes to stdout, one object per line, in the format read by
-`epicbox-relay import`. A summary goes to stderr. The script only reads.
+`epicmail import`. A summary goes to stderr. The script only reads.
 
 Sources (--source):
   node    The Node relay (app_mongo.js + pgstore.js): tables `slates` and

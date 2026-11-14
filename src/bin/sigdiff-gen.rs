@@ -7,7 +7,7 @@
 //! The oracle is `epicboxlib verifysignature`, path from $ORACLE
 //! (default ~/epic-build/epicbox-cache/epicboxlib). Only `true` on stdout counts as valid.
 
-use epicbox_relay::sig::{self, encode_public_key, VERSION_FLOONET, VERSION_MAINNET};
+use epicmail::sig::{self, encode_public_key, VERSION_FLOONET, VERSION_MAINNET};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1, SecretKey};
 use serde_json::json;

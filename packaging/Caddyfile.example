@@ -1,5 +1,5 @@
 # Caddy in front of the relay. TLS certificates are automatic.
-# server.trusted_proxies in relay.toml must list this proxy (here 127.0.0.1/32),
+# server.trusted_proxies in epicmail.toml must list this proxy (here 127.0.0.1/32),
 # or the relay sees every client as the proxy address.
 relay.example.org {
 	# Websocket upgrade, /health, /ready, /status.json, /.well-known/epicbox.json and /v1/* all go to the relay.

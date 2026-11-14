@@ -160,7 +160,7 @@ pub struct HttpApi {
 pub struct Log {
     /// "text" or "json".
     pub format: String,
-    /// tracing filter, e.g. "info" or "epicbox_relay=debug".
+    /// tracing filter, e.g. "info" or "epicmail=debug".
     pub level: String,
 }
 
@@ -197,7 +197,7 @@ impl Default for Server {
             aliases: vec![],
             trusted_proxies: vec![],
             drain_seconds: 10,
-            name: "epicbox-relay".into(),
+            name: "epicmail".into(),
         }
     }
 }
@@ -205,7 +205,7 @@ impl Default for Server {
 impl Default for StoreCfg {
     fn default() -> Self {
         Self {
-            path: "epicbox-relay.db".into(),
+            path: "epicmail.db".into(),
             retention_days: 7,
             group_commit_max: 256,
             readers: 4,

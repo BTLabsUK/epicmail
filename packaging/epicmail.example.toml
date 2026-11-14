@@ -1,5 +1,5 @@
 # Every setting with its default. Only server.domain has no default and must be set.
-# Check a file with: epicbox-relay check-config --config relay.toml
+# Check a file with: epicmail check-config --config epicmail.toml
 
 [server]
 listen = "127.0.0.1:3423"        # websocket and HTTP listener (use "0.0.0.0:3423" in Docker)
@@ -9,10 +9,10 @@ port = 443                       # port wallets write in their addresses (epicbo
 aliases = []                     # other "domain" or "domain:port" names that mean this relay
 trusted_proxies = ["127.0.0.1/32"]  # default []; peers whose X-Forwarded-For is trusted (your reverse proxy)
 drain_seconds = 10               # seconds a SIGTERM drain waits for sockets to close
-name = "epicbox-relay"           # name shown in the info document and status.json
+name = "epicmail"           # name shown in the info document and status.json
 
 [store]
-path = "epicbox-relay.db"        # SQLite file; /var/lib/epicbox-relay/... under systemd, /data/... in Docker
+path = "epicmail.db"        # SQLite file; /var/lib/epicmail/... under systemd, /data/... in Docker
 retention_days = 7               # days an uncollected message is kept; 7 is the minimum
 group_commit_max = 256           # most writes per commit
 readers = 4                      # reader connections
@@ -74,7 +74,7 @@ lease_s = 30                     # seconds a pulled message stays leased
 
 [log]
 format = "text"                  # "text" or "json"
-level = "info"                   # tracing filter, e.g. "info" or "epicbox_relay=debug"
+level = "info"                   # tracing filter, e.g. "info" or "epicmail=debug"
 
 [test]
 stall_endpoint = false           # POST /test/stall on loopback; never enable on a public relay

@@ -16,7 +16,7 @@
 
 set -u
 
-RELAY_BIN="${RELAY_BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/debug/epicbox-relay}"
+RELAY_BIN="${RELAY_BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/debug/epicmail}"
 WALLET_BIN="${WALLET_BIN:?set WALLET_BIN to a classic epic-wallet binary}"
 NET="${NET:?set NET to the local network directory}"
 CFG_A="${CFG_A:?}"
