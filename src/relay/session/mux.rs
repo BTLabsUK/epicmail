@@ -376,7 +376,7 @@ impl Session {
         }
         let ids: Vec<String> =
             ids.iter().filter_map(|i| i.as_str()).filter(|i| is_msgid(i)).map(String::from).collect();
-        let attached: Vec<String> = self.mux.as_ref().map(|m| m.attached.iter().cloned().collect()).unwrap_or_default();
+        let attached = self.held_mailboxes(ws).await;
         if !ids.is_empty() && !attached.is_empty() {
             match self.relay.store.made_in(attached, ids.clone()).await {
                 Ok(n) => metrics::counter!("epicbox_made_total", "mode" => "mux").increment(n),
@@ -485,6 +485,33 @@ impl Session {
         self.pump(ws).await;
     }
 
+    /// The attached mailboxes this socket still holds in the registry. A mailbox another socket
+    /// took is dropped here even if its Detached never arrived (a full command queue loses it).
+    async fn held_mailboxes(&mut self, ws: &mut WebSocket) -> Vec<String> {
+        let attached: Vec<String> = self.mux.as_ref().map(|m| m.attached.iter().cloned().collect()).unwrap_or_default();
+        let mut held = Vec::with_capacity(attached.len());
+        for k in attached {
+            if self.relay.registry.is_mux_holder(&k, self.id) {
+                held.push(k);
+            } else {
+                self.lost_mailbox(ws, &k).await;
+            }
+        }
+        held
+    }
+
+    /// Another socket holds `key`: forget it here and tell the client, as Detached would have.
+    async fn lost_mailbox(&mut self, ws: &mut WebSocket, key: &str) {
+        let Some(m) = self.mux.as_mut() else { return };
+        if !m.attached.remove(key) {
+            return;
+        }
+        m.dirty.remove(key);
+        m.inflight.retain(|_, (_, k)| k != key);
+        self.sync_token();
+        self.send(ws, json!({"type":"Detached","mailbox":key,"reason":"replaced"})).await;
+    }
+
     /// Push Mail for dirty mailboxes while in-flight slots are free.
     pub(super) async fn pump(&mut self, ws: &mut WebSocket) {
         let r = self.relay.clone();
@@ -500,6 +527,11 @@ impl Session {
             if !m.attached.contains(&key) || r.is_stalled(&key) {
                 continue;
             }
+            if !r.registry.is_mux_holder(&key, self.id) {
+                self.lost_mailbox(ws, &key).await;
+                continue;
+            }
+            let Some(m) = self.mux.as_mut() else { return };
             let exclude: Vec<i64> = m.inflight.values().filter(|(_, k)| *k == key).map(|(id, _)| *id).collect();
             let got =
                 match r.store.claim(&key, now_ms(), free, exclude, ClaimMode::Offer { lease_ms: OFFER_LEASE_MS }).await

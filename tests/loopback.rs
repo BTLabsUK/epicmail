@@ -1135,3 +1135,27 @@ async fn pulls_stop_a_quarter_above_the_store_cap() {
     let (st, v) = http(&n, "POST", "/v1/pull", Some(body)).await;
     assert_eq!(st, 503, "{v}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_socket_that_missed_its_detached_can_no_longer_ack() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let (mut m, ch) = mux_open(&n).await;
+    send(&mut m, json!({"type":"Attach","ref":"a","mailboxes":[{"address":bob.pk,"signature":bob.sign(&ch)}]})).await;
+    assert_eq!(recv(&mut m).await["type"], "Attached");
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    send(&mut a, post_frame(&alice, "relay.test", &bob, "relay.test", 1)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    let mail = recv(&mut m).await;
+    assert_eq!(mail["type"], "Mail", "{mail}");
+    // Another socket takes the mailbox and the Detached for this one is lost on the way.
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    n.relay.registry.attach_mux(&bob.pk, epicmail::relay::SockHandle { id: u64::MAX, tx, cancel: false });
+    send(&mut m, json!({"type":"Ack","ref":"k","ids":[mail["id"]]})).await;
+    let d = recv(&mut m).await;
+    assert_eq!(d, json!({"type":"Detached","mailbox":bob.pk,"reason":"replaced"}), "{d}");
+    assert_eq!(recv(&mut m).await, json!({"type":"Ok","ref":"k"}));
+    assert_eq!(waiting(&n).await, 1, "the ack of a mailbox this socket no longer holds deleted mail");
+}
