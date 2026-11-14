@@ -20,9 +20,9 @@ use crate::address::parse_address;
 use crate::bus::Event;
 use crate::clock::now_ms;
 use crate::ids::is_msgid;
-use crate::relay::{PostOutcome, PostReq, Refusal};
+use crate::relay::{PostOutcome, PostReq, Refusal, Relay};
 use crate::sig;
-use crate::store::ClaimMode;
+use crate::store::{ClaimMode, StoredMessage};
 
 const CHALLENGE_PREFIX: &str = "ebh-";
 const CHALLENGE_FUTURE_S: i64 = 60;
@@ -217,46 +217,9 @@ pub(super) async fn pull(
     let mut shutdown = relay.shutdown.subscribe();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(wait);
     loop {
-        let mut results = Vec::with_capacity(proven.len());
-        let mut found = 0usize;
-        for p in &proven {
-            let key = match &p.key {
-                Ok(k) => k,
-                Err(e) => {
-                    results.push(json!({"address": p.address, "error": e}));
-                    continue;
-                }
-            };
-            let msgs = if relay.is_stalled(key) {
-                vec![]
-            } else {
-                match relay.store.claim(key, now_ms(), limit, vec![], ClaimMode::Offer { lease_ms }).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::error!(error = %e, "store claim failed");
-                        return err(R, StatusCode::SERVICE_UNAVAILABLE, "Internal error; try again.");
-                    }
-                }
-            };
-            found += msgs.len();
-            if !msgs.is_empty() {
-                metrics::counter!("epicbox_deliveries_total", "mode" => "https").increment(msgs.len() as u64);
-            }
-            let msgs: Vec<Value> = msgs
-                .into_iter()
-                .map(|s| {
-                    let mut v = json!({
-                        "id": s.msgid, "from": s.sender, "str": s.body,
-                        "signature": s.signature, "attempt": s.deliveries,
-                    });
-                    if let Some(t) = s.txid {
-                        v["epicboxtxid"] = json!(t);
-                    }
-                    v
-                })
-                .collect();
-            results.push(json!({"address": p.address, "messages": msgs}));
-        }
+        let Some((results, found)) = claim_round(&relay, &proven, limit, lease_ms).await else {
+            return err(R, StatusCode::SERVICE_UNAVAILABLE, "Internal error; try again.");
+        };
         let now = tokio::time::Instant::now();
         if found > 0 || now >= deadline || keys.is_empty() || *shutdown.borrow() {
             return reply(R, StatusCode::OK, json!({ "mailboxes": results }));
@@ -278,6 +241,52 @@ pub(super) async fn pull(
             _ = shutdown.changed() => {}
         }
     }
+}
+
+/// One pass over the proven mailboxes: offer up to `limit` messages from each. Returns the
+/// per-mailbox results and the number of messages offered, or None on a store error.
+async fn claim_round(relay: &Relay, proven: &[Proven], limit: usize, lease_ms: i64) -> Option<(Vec<Value>, usize)> {
+    let mut results = Vec::with_capacity(proven.len());
+    let mut found = 0usize;
+    for p in proven {
+        let key = match &p.key {
+            Ok(k) => k,
+            Err(e) => {
+                results.push(json!({"address": p.address, "error": e}));
+                continue;
+            }
+        };
+        let msgs = if relay.is_stalled(key) {
+            vec![]
+        } else {
+            match relay.store.claim(key, now_ms(), limit, vec![], ClaimMode::Offer { lease_ms }).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(error = %e, "store claim failed");
+                    return None;
+                }
+            }
+        };
+        found += msgs.len();
+        if !msgs.is_empty() {
+            metrics::counter!("epicbox_deliveries_total", "mode" => "https").increment(msgs.len() as u64);
+        }
+        let msgs: Vec<Value> = msgs.into_iter().map(message_json).collect();
+        results.push(json!({"address": p.address, "messages": msgs}));
+    }
+    Some((results, found))
+}
+
+/// A message as `/v1/pull` returns it.
+fn message_json(s: StoredMessage) -> Value {
+    let mut v = json!({
+        "id": s.msgid, "from": s.sender, "str": s.body,
+        "signature": s.signature, "attempt": s.deliveries,
+    });
+    if let Some(t) = s.txid {
+        v["epicboxtxid"] = json!(t);
+    }
+    v
 }
 
 pub(super) async fn made(
