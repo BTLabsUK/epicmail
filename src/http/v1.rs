@@ -1,6 +1,4 @@
-//! HTTP: the websocket upgrade (any path, as the stock relay), health and readiness, metrics,
-//! a status document, the info document, the HTTPS mailbox API (/v1, epicbox-https/0.1) and the
-//! test stall knob.
+//! The HTTPS mailbox API under /v1 (`epicbox-https/0.1`): info, post, pull and made.
 //!
 //! /v1 authenticates like Subscribe without the handshake: the client makes its own challenge,
 //! `ebh-<unix seconds>-<random hex>`, and signs it. Each challenge is accepted once per key and
@@ -8,270 +6,29 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Bytes;
-use axum::extract::rejection::JsonRejection;
-use axum::extract::ws::rejection::WebSocketUpgradeRejection;
-use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::{Json, Router};
-use ipnet::IpNet;
-use metrics_exporter_prometheus::PrometheusHandle;
+use axum::extract::{ConnectInfo, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::Response;
 use serde_json::{json, Value};
 use tokio::sync::broadcast::error::RecvError;
 
+use super::{client_ip, err, reply, too_many, AppState, HTTPS_PROTOCOL};
 use crate::address::parse_address;
 use crate::bus::Event;
 use crate::clock::now_ms;
 use crate::ids::is_msgid;
-use crate::limits::SocketRefusal;
-use crate::relay::{session, PostOutcome, PostReq, Refusal, Relay};
+use crate::relay::{PostOutcome, PostReq, Refusal};
 use crate::sig;
 use crate::store::ClaimMode;
 
-/// The /v1 protocol name, as reported by `/v1/info` and the info document.
-pub const HTTPS_PROTOCOL: &str = "epicbox-https/0.1";
 const CHALLENGE_PREFIX: &str = "ebh-";
 const CHALLENGE_FUTURE_S: i64 = 60;
 const PULL_RECHECK: Duration = Duration::from_secs(5);
-/// Initial websocket read buffer; it grows as a large frame arrives.
-const WS_READ_BUFFER: usize = 8 * 1024;
 
-#[derive(Clone)]
-pub struct AppState {
-    pub relay: Arc<Relay>,
-    pub metrics: Option<PrometheusHandle>,
-    /// Serve /metrics on the main listener (loopback callers only).
-    pub metrics_on_main: bool,
-}
-
-/// The main listener's routes.
-pub fn router(state: AppState) -> Router {
-    let cfg = &state.relay.cfg;
-    let body_limit = cfg.limits.max_frame_bytes.max(64 * 1024);
-    let mut r = Router::new()
-        .route("/health", get(health))
-        .route("/ready", get(ready))
-        .route("/metrics", get(metrics_main))
-        .route("/status.json", get(status))
-        .route("/.well-known/epicbox.json", get(well_known));
-    if cfg.http_api.enabled {
-        r = r
-            .route("/v1/info", get(v1_info))
-            .route("/v1/post", post(v1_post))
-            .route("/v1/pull", post(v1_pull))
-            .route("/v1/made", post(v1_made));
-    }
-    if cfg.test.stall_endpoint {
-        r = r.route("/test/stall", post(test_stall));
-    }
-    r.fallback(fallback).layer(DefaultBodyLimit::max(body_limit)).with_state(state)
-}
-
-/// The separate metrics listener (`server.metrics_listen`).
-pub fn metrics_router(handle: PrometheusHandle) -> Router {
-    Router::new().route("/metrics", get(move || async move { handle.render() }))
-}
-
-fn canon(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V6(v) => v.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
-        v4 => v4,
-    }
-}
-
-/// The client address. X-Forwarded-For is read only when the connection comes from a trusted
-/// proxy, and then from the right: the first address that is not a trusted proxy is the client.
-pub fn client_ip(peer: SocketAddr, headers: &HeaderMap, trusted: &[IpNet]) -> IpAddr {
-    let mut ip = canon(peer.ip());
-    let is_trusted = |ip: &IpAddr| trusted.iter().any(|n| n.contains(ip));
-    if !is_trusted(&ip) {
-        return ip;
-    }
-    let hops: Vec<&str> = headers
-        .get_all("x-forwarded-for")
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .collect();
-    for hop in hops.iter().rev() {
-        let Ok(h) = hop.trim().parse::<IpAddr>() else { break };
-        ip = canon(h);
-        if !is_trusted(&ip) {
-            break;
-        }
-    }
-    ip
-}
-
-fn count(route: &'static str, status: StatusCode) {
-    metrics::counter!("epicbox_http_requests_total", "route" => route, "status" => status.as_str().to_string())
-        .increment(1);
-}
-
-fn reply(route: &'static str, status: StatusCode, body: Value) -> Response {
-    count(route, status);
-    (status, Json(body)).into_response()
-}
-
-fn err(route: &'static str, status: StatusCode, message: impl Into<String>) -> Response {
-    reply(route, status, json!({ "error": message.into() }))
-}
-
-/// 429 with the wait in both the error text and `Retry-After`.
-fn too_many(route: &'static str, message: String, retry_s: u64) -> Response {
-    let mut resp = err(route, StatusCode::TOO_MANY_REQUESTS, message);
-    if let Ok(v) = HeaderValue::from_str(&retry_s.to_string()) {
-        resp.headers_mut().insert(header::RETRY_AFTER, v);
-    }
-    resp
-}
-
-async fn fallback(
-    State(st): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    method: Method,
-    headers: HeaderMap,
-    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
-) -> Response {
-    let relay = st.relay.clone();
-    let ws = match ws {
-        Ok(ws) => ws,
-        Err(_) if method == Method::GET => {
-            return (StatusCode::OK, "Epicbox relay. Connect with a websocket.\n").into_response();
-        }
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
-    };
-    if relay.draining.load(Ordering::Relaxed) {
-        return (StatusCode::SERVICE_UNAVAILABLE, "Relay restarting.\n").into_response();
-    }
-    let ip = client_ip(peer, &headers, &relay.cfg.server.trusted_proxies);
-    let permit = match relay.limiter.open_socket(ip) {
-        Ok(p) => p,
-        Err(SocketRefusal::Total) => {
-            metrics::counter!("epicbox_limit_refusals_total", "limit" => "sockets_total").increment(1);
-            return (StatusCode::SERVICE_UNAVAILABLE, "Relay is full.\n").into_response();
-        }
-        Err(SocketRefusal::PerIp) => {
-            metrics::counter!("epicbox_limit_refusals_total", "limit" => "sockets_per_ip").increment(1);
-            return (StatusCode::TOO_MANY_REQUESTS, "Too many connections from this network.\n").into_response();
-        }
-    };
-    let max = relay.cfg.limits.max_frame_bytes;
-    // Small socket buffers: the 128 KiB defaults cost about 136 KiB of RSS per idle socket.
-    // Reads grow past 8 KiB as a large frame arrives; writes go out at each flush.
-    ws.read_buffer_size(WS_READ_BUFFER)
-        .write_buffer_size(0)
-        .max_message_size(max)
-        .max_frame_size(max)
-        .on_upgrade(move |socket| session::run(relay, socket, ip, permit))
-}
-
-async fn health() -> &'static str {
-    "ok\n"
-}
-
-async fn ready(State(st): State<AppState>) -> Response {
-    let r = &st.relay;
-    if r.draining.load(Ordering::Relaxed) {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"ready":false,"reason":"draining"}))).into_response();
-    }
-    match r.store.check_writable().await {
-        Ok(()) => {
-            r.store_ok.store(true, Ordering::Relaxed);
-            Json(json!({"ready":true})).into_response()
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "store write check failed");
-            r.store_ok.store(false, Ordering::Relaxed);
-            (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"ready":false,"reason":"store"}))).into_response()
-        }
-    }
-}
-
-async fn metrics_main(
-    State(st): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> Response {
-    // Behind a proxy on the same host every request comes from loopback: a forwarded request is
-    // a public one.
-    let local = canon(peer.ip()).is_loopback() && !headers.contains_key("x-forwarded-for");
-    match (&st.metrics, st.metrics_on_main && local) {
-        (Some(h), true) => h.render().into_response(),
-        _ => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
-/// Aggregate counts only: no addresses, keys or IPs.
-async fn status(State(st): State<AppState>) -> Response {
-    let r = &st.relay;
-    let (mailboxes, mux, classic) = r.registry.counts();
-    let stats = r.store.stats(now_ms()).await.ok();
-    Json(json!({
-        "name": r.cfg.server.name,
-        "identity": format!("{}:{}", r.cfg.server.domain, r.cfg.server.port),
-        "version": env!("CARGO_PKG_VERSION"),
-        "uptime_s": r.started.elapsed().as_secs(),
-        "draining": r.draining.load(Ordering::Relaxed),
-        "store_ok": r.store_ok.load(Ordering::Relaxed),
-        "sockets": r.limiter.sockets_open(),
-        "listening_mailboxes": mailboxes,
-        "mux_holders": mux,
-        "classic_subscriptions": classic,
-        "mux_tokens": r.tokens_live(),
-        "store": stats,
-    }))
-    .into_response()
-}
-
-async fn well_known(State(st): State<AppState>) -> Response {
-    let cfg = &st.relay.cfg;
-    let mut versions = vec!["2.0.0", "3.0.0"];
-    if cfg.protocol.cancel {
-        versions.push("3.1.0");
-    }
-    let mut features = serde_json::Map::new();
-    if cfg.protocol.mux {
-        let l = &cfg.limits;
-        features.insert(
-            "mux/1".into(),
-            json!({
-                "limits": {
-                    "attach_per_frame": l.mux_attach_per_frame,
-                    "mailboxes_per_socket": l.mux_mailboxes_per_socket,
-                    "inflight_per_socket": l.mux_inflight,
-                    "ids_per_ack": session::MAX_ACK_IDS,
-                    "hold_max_s": session::HOLD_MAX_S,
-                    "attach_frames_per_min": l.mux_attach_frames_per_min,
-                    "failed_sigs_per_min_per_ip": l.failed_sigs_per_min_per_ip,
-                    "mux_sockets_per_ip": l.mux_sockets_per_ip,
-                }
-            }),
-        );
-    }
-    if cfg.http_api.enabled {
-        features.insert("https".into(), json!({"protocol": HTTPS_PROTOCOL, "base": "/v1"}));
-    }
-    Json(json!({
-        "software": "epicmail",
-        "version": env!("CARGO_PKG_VERSION"),
-        "name": cfg.server.name,
-        "identity": format!("{}:{}", cfg.server.domain, cfg.server.port),
-        "protocol_versions": versions,
-        "federation": cfg.federation.enabled,
-        "features": features,
-    }))
-    .into_response()
-}
-
-async fn v1_info(State(st): State<AppState>) -> Response {
+pub(super) async fn info(State(st): State<AppState>) -> Response {
     let cfg = &st.relay.cfg;
     let h = &cfg.http_api;
     reply(
@@ -304,7 +61,7 @@ fn parse_body(body: &Bytes) -> Result<serde_json::Map<String, Value>, String> {
     }
 }
 
-async fn v1_post(
+pub(super) async fn post(
     State(st): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -350,7 +107,7 @@ async fn v1_post(
 
 /// `ebh-<digits>-<lowercase hex>`, at most 64 characters, issued no later than a minute from now
 /// and inside the window. Returns the issue time in seconds.
-pub fn challenge_issued(challenge: &str, now_s: i64, window_s: i64) -> Option<i64> {
+fn challenge_issued(challenge: &str, now_s: i64, window_s: i64) -> Option<i64> {
     if challenge.len() > 64 {
         return None;
     }
@@ -402,7 +159,7 @@ async fn prove(st: &AppState, ip: IpAddr, mb: &Value) -> Result<Proven, String> 
     }
 }
 
-async fn v1_pull(
+pub(super) async fn pull(
     State(st): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -523,7 +280,7 @@ async fn v1_pull(
     }
 }
 
-async fn v1_made(
+pub(super) async fn made(
     State(st): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -579,35 +336,6 @@ async fn v1_made(
     reply(R, StatusCode::OK, json!({"removed": removed, "refused": refused}))
 }
 
-/// `POST /test/stall {address, seconds}`: the relay delivers nothing to that mailbox for the
-/// given seconds (0 ends it). Only with `test.stall_endpoint`, only from loopback.
-async fn test_stall(
-    State(st): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response {
-    if !canon(peer.ip()).is_loopback() || headers.contains_key("x-forwarded-for") {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let Ok(Json(v)) = body else {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"body must be {address, seconds}"}))).into_response();
-    };
-    let key = match v.get("address").and_then(|a| a.as_str()).map(parse_address) {
-        Some(Ok(a)) => a.public_key,
-        _ => return (StatusCode::BAD_REQUEST, Json(json!({"error":"malformed address"}))).into_response(),
-    };
-    let Some(seconds) = v.get("seconds").and_then(|s| s.as_u64()) else {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"seconds must be a number"}))).into_response();
-    };
-    st.relay.stall(&key, seconds);
-    if seconds == 0 {
-        st.relay.registry.wake(&key);
-    }
-    tracing::info!(seconds, "test stall set");
-    Json(json!({"ok": true, "seconds": seconds})).into_response()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,17 +350,5 @@ mod tests {
         assert!(challenge_issued(&format!("ebh-{now}-"), now, 1200).is_none());
         assert!(challenge_issued(&format!("ebh-{now}-{}", "a".repeat(60)), now, 1200).is_none());
         assert!(challenge_issued("ebh--00ff", now, 1200).is_none());
-    }
-
-    #[test]
-    fn forwarded_for_only_through_trusted_proxies() {
-        let trusted: Vec<IpNet> = vec!["127.0.0.1/32".parse().unwrap(), "10.0.0.0/8".parse().unwrap()];
-        let mut h = HeaderMap::new();
-        h.insert("x-forwarded-for", "6.6.6.6, 1.2.3.4, 10.0.0.5".parse().unwrap());
-        let local: SocketAddr = "127.0.0.1:5000".parse().unwrap();
-        let public: SocketAddr = "9.9.9.9:5000".parse().unwrap();
-        assert_eq!(client_ip(local, &h, &trusted), "1.2.3.4".parse::<IpAddr>().unwrap());
-        assert_eq!(client_ip(public, &h, &trusted), "9.9.9.9".parse::<IpAddr>().unwrap());
-        assert_eq!(client_ip(local, &HeaderMap::new(), &trusted), "127.0.0.1".parse::<IpAddr>().unwrap());
     }
 }
