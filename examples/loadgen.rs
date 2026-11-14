@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
-use rand::Rng;
+use rand::RngExt;
 use secp256k1::{PublicKey, SecretKey};
 use serde_json::{json, Value};
 use tokio::net::TcpSocket;

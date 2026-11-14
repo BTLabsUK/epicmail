@@ -7,7 +7,6 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use rand::RngCore;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 
@@ -93,9 +92,7 @@ fn sender_key(from: &str) -> String {
 }
 
 fn random_msgid() -> String {
-    let mut b = [0u8; 16];
-    rand::rng().fill_bytes(&mut b);
-    hex::encode(b)
+    hex::encode(rand::random::<[u8; 16]>())
 }
 
 fn secs_to_ms(s: i64) -> Option<i64> {

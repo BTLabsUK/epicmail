@@ -106,7 +106,8 @@ federation and the background tasks.
 
 ## Build and run
 
-Rust 1.89 or newer.
+Rust 1.100 or newer. `rust-toolchain.toml` pins the version the project is tested with, and
+rustup picks it up.
 
 ```sh
 cargo build --release                 # target/release/epicmail

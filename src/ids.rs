@@ -1,7 +1,7 @@
 //! Random identifiers the relay makes, and the identifier formats it accepts from clients.
 
 use base64::Engine;
-use rand::Rng;
+use rand::RngExt;
 
 const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 

@@ -5,7 +5,7 @@
 # The config must set server.listen = "0.0.0.0:3423" and store.path = "/data/epicmail.db".
 # No HEALTHCHECK: scratch has no shell or curl. Check from outside, see docs/operating.md.
 
-FROM rust:1-alpine AS build
+FROM rust:1.100-alpine AS build
 RUN apk add --no-cache musl-dev build-base
 WORKDIR /src
 ENV RUSTFLAGS="-C target-feature=+crt-static"

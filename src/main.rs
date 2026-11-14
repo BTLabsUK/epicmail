@@ -203,7 +203,7 @@ async fn housekeeping(relay: Arc<Relay>) {
         metrics::gauge!("epicbox_http_waiting_pulls").set(f64::from(relay.pull_waiters.waiting()));
         metrics::gauge!("epicbox_store_ok").set(if relay.store_ok.load(Ordering::Relaxed) { 1.0 } else { 0.0 });
 
-        if n % 4 == 0 {
+        if n.is_multiple_of(4) {
             relay.limiter.prune();
             relay.prune_tokens();
         }

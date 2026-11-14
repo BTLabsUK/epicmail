@@ -9,7 +9,7 @@
 //! See tools/sigdiff/README.md for the whole procedure.
 
 use epicmail::sig::{self, encode_public_key, VERSION_FLOONET, VERSION_MAINNET};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngExt, SeedableRng};
 use secp256k1::{
     ecdsa::{self, Signature},
     Message, PublicKey, SecretKey,
