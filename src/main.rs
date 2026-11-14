@@ -100,11 +100,7 @@ async fn serve(cfg: Config) -> Result<()> {
     let app = http::router(state).into_make_service_with_connect_info::<SocketAddr>();
     tracing::info!(listen = %cfg.server.listen, identity = %format!("{}:{}", cfg.server.domain, cfg.server.port),
         version = env!("CARGO_PKG_VERSION"), "relay listening");
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(main_listener, app).await {
-            tracing::error!(error = %e, "listener stopped");
-        }
-    });
+    let mut listener = tokio::spawn(async move { axum::serve(main_listener, app).await });
     if let Some(addr) = cfg.server.metrics_listen {
         let l = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
         let app = http::metrics_router(handle.clone());
@@ -118,7 +114,20 @@ async fn serve(cfg: Config) -> Result<()> {
     tokio::spawn(forward::run(relay.clone()));
     tokio::spawn(housekeeping(relay.clone()));
 
-    shutdown_signal().await;
+    // If the listener ever stops, exit with an error so the supervisor restarts the relay
+    // instead of leaving a process that serves nothing.
+    tokio::select! {
+        () = shutdown_signal() => {}
+        r = &mut listener => {
+            relay.draining.store(true, Ordering::Relaxed);
+            let _ = relay.shutdown.send(true);
+            match r {
+                Ok(Ok(())) => bail!("listener stopped"),
+                Ok(Err(e)) => return Err(e).context("listener failed"),
+                Err(e) => bail!("listener task ended: {e}"),
+            }
+        }
+    }
     tracing::info!(drain_seconds = cfg.server.drain_seconds, "shutting down");
     relay.draining.store(true, Ordering::Relaxed);
     let _ = relay.shutdown.send(true);
