@@ -7,7 +7,10 @@ epicmail serve        --config epicmail.toml
 epicmail check-config --config epicmail.toml
 epicmail import       --config epicmail.toml <file>
 epicmail export       --config epicmail.toml [--out file]
+epicmail selftest     --config epicmail.toml
 ```
+
+`--config` (`-c`) defaults to `/etc/epicmail/epicmail.toml`. `selftest` signs and verifies a test message, checks that the store is writable, then exits.
 
 ## 1. Install
 
@@ -80,7 +83,7 @@ Per-IP limits group clients by prefix (`ipv4_prefix` 24, `ipv6_prefix` 48). Sour
 | `failed_sigs_per_min_per_ip` | 120 | Signature guessing, CPU burn on verification |
 | `mux_mailboxes_per_socket` | 256 | One mux/1 socket attaching everything |
 | `mux_attach_per_frame` | 64 | Large attach frames |
-| `mux_inflight` | 32 | Unanswered mux/1 requests piling up |
+| `mux_inflight` | 32 | Mail pushed on one mux/1 socket and not yet acked or held |
 | `mux_attach_frames_per_min` | 30 | Attach/detach churn |
 | `ipv4_prefix` / `ipv6_prefix` | 24 / 48 | Sets how clients are grouped for per-IP limits |
 | `max_sockets` | 150000 | Total file descriptors and memory |
@@ -94,9 +97,9 @@ Per-IP limits group clients by prefix (`ipv4_prefix` 24, `ipv6_prefix` 48). Sour
 
 - `/health`: the process is up and answering. Use it for liveness. It does not look at the store.
 - `/ready`: the store is writable. Use it for load balancer and orchestrator checks. A failure means the disk is full or read-only, or the DB file is damaged. During a SIGTERM drain it may also report not ready.
-- `/metrics`: Prometheus text, metric names start with `epicbox_`. Look first at open sockets (against `max_sockets`), posts accepted and rejected (rejects by limit name show which limit fires), write queue depth and commit latency, and federation deliveries and failures. It is served on `server.listen` to loopback and trusted proxies only. Set `server.metrics_listen` to scrape it from another host on a private address.
+- `/metrics`: Prometheus text, metric names start with `epicbox_`. Look first at open sockets (against `max_sockets`), posts accepted and rejected (rejects by limit name show which limit fires), write queue depth and commit latency, and federation deliveries and failures. When `server.metrics_listen` is unset, it is served on `server.listen` to loopback peers whose request carries no `X-Forwarded-For`, so requests that came through the reverse proxy get 404. Set `server.metrics_listen` to serve it on a separate address instead, for example a private one a scraper on another host can reach.
 - `/status.json`: a small JSON summary for people and status pages: name, version, sockets, queue totals, uptime. It is public; it holds no per-address data.
-- `/.well-known/epicbox.json`: the info document wallets and peers read (domain, port, and the onion name if configured).
+- `/.well-known/epicbox.json`: the info document wallets and peers read: software and version, `server.name`, identity (`domain:port`), protocol versions, whether federation is on, and the mux/1 and HTTPS features with their limits.
 
 ## 5. Backup and restore
 
@@ -116,7 +119,7 @@ A portable alternative is `epicmail export --config epicmail.toml --out file`, a
 
 ## 6. Retention and sweep
 
-Messages nobody collects are deleted after `store.retention_days` (default 7, the protocol minimum). Collected messages are removed when delivered. A sweep runs at start and nightly at `store.vacuum_hour_utc` (UTC): it deletes expired rows and runs an incremental vacuum so the file shrinks. The file does not shrink until that vacuum, so a size peak after a flood falls back within a day.
+Messages nobody collects are deleted after `store.retention_days` (default 7, the protocol minimum). Collected messages are removed when the wallet acknowledges them (Made or Ack; wallets older than 2.0.0 send no Made, so theirs are removed on delivery). An expiry sweep runs at start and every 5 minutes. Once a day, at `store.vacuum_hour_utc` (UTC), an incremental vacuum returns free pages so the file shrinks. The file does not shrink before that vacuum, so a size peak after a flood falls back within a day.
 
 ## 7. When to switch to Postgres
 
@@ -124,8 +127,8 @@ The store is single-writer SQLite. One writer thread collects pending writes and
 
 Stay on SQLite until one of these holds:
 
-1. Sustained write rate near the single-writer ceiling: about 2,000 messages per second end to end on an 8-core desktop with NVMe (docs/loadtest.md). Measure the production host before relying on it. Act when the sustained rate stays above about half of it, not on peaks.
-2. The database no longer fits in the page cache. Reads then hit disk and commit latency rises. Watch commit latency in `/metrics` against RAM.
+1. Sustained write rate near the single-writer ceiling: about 2,000 messages per second end to end on an 8-core desktop with NVMe (docs/loadtest.md). Measure your own host before relying on it. Act when the sustained rate stays above about half of it, not on peaks.
+2. The database no longer fits in the page cache. Reads then hit disk and commit latency rises. Watch commit latency (`epicbox_store_commit_seconds`) against RAM.
 3. More than one relay process must share one store (active-active, or a standby that takes over without a copy). SQLite cannot be shared safely by processes on different hosts.
 
 Retention, mailbox caps and the 7 day limit keep the database small for most relays. A relay that meets none of the three gains nothing from Postgres. A backup and a cold standby restored from backup covers most availability needs.
