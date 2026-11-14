@@ -13,14 +13,29 @@
 #
 # Env: RELAY_BIN, CFG_A, CFG_B, WALLET_BIN (classic wallet), NET, WORK.
 # Usage: tools/compat-classic.sh [same|offline|federate|all]
+#
+# Remote mode, against a deployed relay (no local relays are started; federate is skipped):
+#   REMOTE_HOST=relay.example.org REMOTE_SSH=<ssh alias> REMOTE_UNIT=epicmail WALLET_BIN=... NET=... WORK=... \
+#     tools/compat-classic.sh [same|offline|all]
+# Both wallets' epic-wallet.toml must already point at REMOTE_HOST (epicbox_port, epicbox_protocol_unsecure =
+# false). Use copies of the test wallets. The offline step restarts the unit over ssh (needs passwordless sudo).
 
 set -u
 
 RELAY_BIN="${RELAY_BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/debug/epicmail}"
 WALLET_BIN="${WALLET_BIN:?set WALLET_BIN to a classic epic-wallet binary}"
 NET="${NET:?set NET to the local network directory}"
-CFG_A="${CFG_A:?}"
-CFG_B="${CFG_B:?}"
+REMOTE_HOST="${REMOTE_HOST:-}"
+REMOTE_PORT="${REMOTE_PORT:-443}"
+REMOTE_SSH="${REMOTE_SSH:-}"
+REMOTE_UNIT="${REMOTE_UNIT:-epicmail}"
+if [ -n "$REMOTE_HOST" ]; then
+    RELAY_DEST="$REMOTE_HOST:$REMOTE_PORT"; STATUS_URL="https://$REMOTE_HOST/status.json"
+else
+    CFG_A="${CFG_A:?}"
+    CFG_B="${CFG_B:?}"
+    RELAY_DEST="localhost:3423"; STATUS_URL="http://127.0.0.1:3423/status.json"
+fi
 WORK="${WORK:?set WORK to a scratch directory}"
 AMOUNT_BASE="${AMOUNT_BASE:-0.1}"
 WAIT_S="${WAIT_S:-120}"
@@ -49,6 +64,7 @@ wal() {
 relay_pid_a=""
 relay_pid_b=""
 start_relay() {
+    [ -n "$REMOTE_HOST" ] && return 0
     local which="$1" cfg log
     if [ "$which" = a ]; then cfg="$CFG_A"; else cfg="$CFG_B"; fi
     log="$WORK/relay-$which.log"
@@ -65,6 +81,7 @@ start_relay() {
     return 1
 }
 stop_relay() {
+    [ -n "$REMOTE_HOST" ] && return 0
     local which="$1" pid
     if [ "$which" = a ]; then pid="$relay_pid_a"; else pid="$relay_pid_b"; fi
     [ -n "$pid" ] || return 0
@@ -164,21 +181,21 @@ trap cleanup EXIT
 
 step "setup"
 "$WALLET_BIN" --version | sed 's/^/        /'
-"$RELAY_BIN" --version | sed 's/^/        /'
+if [ -n "$REMOTE_HOST" ]; then info "remote relay $REMOTE_HOST:$REMOTE_PORT"; else "$RELAY_BIN" --version | sed 's/^/        /'; fi
 start_relay a || exit 1
 start_relay b || exit 1
 ALICE_KEY="$(key_of alice)"; BOB_KEY="$(key_of bob)"
 [ -n "$ALICE_KEY" ] && [ -n "$BOB_KEY" ] || { bad "could not read the wallets' epicbox addresses"; exit 1; }
 info "alice $ALICE_KEY"
 info "bob   $BOB_KEY"
-first="$(curl -fsS http://127.0.0.1:3423/status.json 2>/dev/null | head -c 200)"
+first="$(curl -fsS "$STATUS_URL" 2>/dev/null | head -c 200)"
 info "relay A status: $first"
 
 same() {
     step "same: both wallets on relay A"
     start_listener alice; start_listener bob
     read -r bb ba <<<"$(counts)"
-    transfer same "$BOB_KEY@localhost:3423" "${AMOUNT_BASE}1" && expect_flow same "$bb" "$ba"
+    transfer same "$BOB_KEY@$RELAY_DEST" "${AMOUNT_BASE}1" && expect_flow same "$bb" "$ba"
     stop_listener bob
 }
 
@@ -187,18 +204,24 @@ offline() {
     stop_listener bob
     start_listener alice 2>/dev/null || true
     read -r bb ba <<<"$(counts)"
-    transfer offline "$BOB_KEY@localhost:3423" "${AMOUNT_BASE}2" || return
+    transfer offline "$BOB_KEY@$RELAY_DEST" "${AMOUNT_BASE}2" || return
     sleep 2
-    w="$(curl -fsS http://127.0.0.1:3423/status.json | grep -oE '"messages_waiting":[0-9]+' | grep -oE '[0-9]+$')"
+    w="$(curl -fsS "$STATUS_URL" | grep -oE '"messages_waiting":[0-9]+' | grep -oE '[0-9]+$')"
     if [ "${w:-0}" -ge 1 ]; then ok "offline: relay A holds the slate ($w waiting)"; else bad "offline: relay A reports nothing waiting"; fi
-    stop_relay a; start_relay a || return
-    ok "offline: relay A restarted"
+    if [ -n "$REMOTE_HOST" ]; then
+        ssh -o BatchMode=yes "$REMOTE_SSH" "sudo systemctl restart $REMOTE_UNIT" && ok "offline: relay unit restarted over ssh" || { bad "offline: restart failed"; return; }
+        for _ in $(seq 1 30); do curl -fsS "https://$REMOTE_HOST/ready" >/dev/null 2>&1 && break; sleep 1; done
+    else
+        stop_relay a; start_relay a || return
+        ok "offline: relay A restarted"
+    fi
     start_listener bob
     expect_flow offline "$bb" "$ba"
     stop_listener bob
 }
 
 federate() {
+    [ -z "$REMOTE_HOST" ] || { info "federate: skipped in remote mode"; return 0; }
     step "federate: bob on relay B, alice on relay A"
     stop_listener bob
     set_bob_relay 127.0.0.1 3424
@@ -216,7 +239,7 @@ case "${1:-all}" in
     same) same ;;
     offline) offline ;;
     federate) federate ;;
-    all) same; offline; federate ;;
+    all) same; offline; [ -n "$REMOTE_HOST" ] || federate ;;
 esac
 
 printf '\n%s passed, %s failed\n' "$PASSED" "$FAILED"
