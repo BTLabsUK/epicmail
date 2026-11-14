@@ -20,7 +20,7 @@ pub struct EpicboxAddress {
 pub enum AddressError {
     #[error("address does not match the epicbox address grammar")]
     Malformed,
-    /// Stock relay panics here.
+    /// A port that is present but empty or above 65535.
     #[error("port is empty or not a valid u16")]
     BadPort,
 }

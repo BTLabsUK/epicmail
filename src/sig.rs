@@ -1,6 +1,6 @@
 //! Signature verification, bit-compatible with the stock relay's oracle
 //! (`epicboxlib verifysignature`): SHA-256 of the UTF-8 message, strict-DER
-//! secp256k1 ECDSA, low-S only; the oracle's hex decoder quirks are kept.
+//! secp256k1 ECDSA, low-S only; hex is decoded exactly as the oracle decodes it.
 
 use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
@@ -72,19 +72,19 @@ pub fn parse_public_key(b58: &str) -> Result<PublicKey, SigReject> {
 /// Port of the stock `from_hex`: length parity is checked on the raw string,
 /// then an optional `0x` is dropped, the rest trimmed and split into byte
 /// pairs parsed with `u8::from_str_radix` (which accepts a leading `+`).
-/// Every case where the stock code errors or panics is `BadHex`.
+/// Every input the oracle does not decode is `BadHex`.
 fn oracle_from_hex(s: &str) -> Result<Vec<u8>, SigReject> {
     if s.len() % 2 == 1 || s.len() < 2 {
         return Err(SigReject::BadHex);
     }
-    // `&s[..2]` panics when byte 2 is not a char boundary.
+    // `get`, because slicing would panic when byte 2 is not a char boundary.
     let rest = match s.get(..2) {
         None => return Err(SigReject::BadHex),
         Some("0x") => &s[2..],
         Some(_) => s,
     };
     let t = rest.trim();
-    // Stock chunking panics for an empty or odd-length trimmed string.
+    // The oracle does not decode an empty or odd-length trimmed string.
     if t.len() < 2 || t.len() % 2 == 1 {
         return Err(SigReject::BadHex);
     }
