@@ -214,14 +214,14 @@ async fn sender(
     let pad = "0".repeat(args.payload.saturating_sub(24));
     let gap = Duration::from_secs_f64(1.0 / per_sender);
     // Spread the senders' start times over one gap.
-    let jitter: f64 = rand::thread_rng().gen_range(0.0..1.0);
+    let jitter: f64 = rand::rng().random_range(0.0..1.0);
     tokio::time::sleep(gap.mul_f64(jitter)).await;
     let mut tick = tokio::time::interval(gap);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut seq: u32 = 0;
     while Instant::now() < stop {
         tick.tick().await;
-        let pick: usize = rand::thread_rng().gen_range(0..keys.len());
+        let pick: usize = rand::rng().random_range(0..keys.len());
         let to = &keys[pick];
         seq = seq.wrapping_add(1);
         let t0 = now_us();

@@ -977,7 +977,7 @@ async fn spam(
                 while Instant::now() < until {
                     tick.tick().await;
                     seq += 1;
-                    let to = &dests[rand::random::<usize>() % dests.len()];
+                    let to = &dests[rand::random_range(0..dests.len())];
                     let f = post_frame(&me, &d, to, &d, &format!("{seq:016x}{pad}"));
                     let t1 = Instant::now();
                     if send(&mut ws, &f).await.is_err() {

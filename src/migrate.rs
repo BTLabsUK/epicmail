@@ -89,7 +89,7 @@ fn sender_key(from: &str) -> String {
 
 fn random_msgid() -> String {
     let mut b = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut b);
+    rand::rng().fill_bytes(&mut b);
     hex::encode(b)
 }
 

@@ -1,13 +1,13 @@
 //! Epicbox address parsing (same grammar as the stock relay).
 
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::sig;
 
 const ADDRESS_REGEX: &str = r"^(epicbox://)?(?P<public_key>[123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]{52})(@(?P<domain>[a-zA-Z0-9\.]+)(:(?P<port>[0-9]*))?)?$";
 
-static RE: Lazy<Regex> = Lazy::new(|| Regex::new(ADDRESS_REGEX).unwrap());
+static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(ADDRESS_REGEX).unwrap());
 
 /// `[epicbox://]<public key>[@domain[:port]]`, split into its parts.
 #[derive(Debug, Clone, PartialEq, Eq)]

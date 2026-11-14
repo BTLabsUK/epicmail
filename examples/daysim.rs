@@ -145,7 +145,7 @@ impl Shared {
     }
     fn take_occ(&self) -> Option<usize> {
         for _ in 0..64 {
-            let i = rand::random::<usize>() % self.okeys.len();
+            let i = rand::random_range(0..self.okeys.len());
             if self.busy[i].compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
                 return Some(i);
             }
@@ -157,7 +157,7 @@ impl Shared {
     }
     fn online_listener(&self) -> Option<usize> {
         for _ in 0..64 {
-            let i = rand::random::<usize>() % self.lkeys.len();
+            let i = rand::random_range(0..self.lkeys.len());
             if self.online[i].load(Ordering::Relaxed) {
                 return Some(i);
             }

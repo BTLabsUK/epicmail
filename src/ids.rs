@@ -7,14 +7,14 @@ const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234
 
 /// `n` random alphanumeric characters (message ids, random challenges).
 pub fn rand_id(n: usize) -> String {
-    let mut rng = rand::thread_rng();
-    (0..n).map(|_| ALNUM[rng.gen_range(0..ALNUM.len())] as char).collect()
+    let mut rng = rand::rng();
+    (0..n).map(|_| ALNUM[rng.random_range(0..ALNUM.len())] as char).collect()
 }
 
 /// `n` random bytes as unpadded base64url (mux/1 challenges and resume tokens).
 pub fn rand_b64url(n: usize) -> String {
     let mut b = vec![0u8; n];
-    rand::thread_rng().fill(&mut b[..]);
+    rand::rng().fill(&mut b[..]);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&b)
 }
 
