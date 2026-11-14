@@ -143,6 +143,18 @@ async fn waiting(n: &Node) -> u64 {
     n.relay.store.stats(now_ms()).await.unwrap().messages_waiting as u64
 }
 
+/// Queued forwards on `n`, read until they equal `want` or 5 s pass. Returns the last count.
+async fn forwards_waiting_settles(n: &Node, want: i64) -> i64 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let got = n.relay.store.stats(now_ms()).await.unwrap().forwards_waiting;
+        if got == want || std::time::Instant::now() >= deadline {
+            return got;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// Subscribe a classic 3.0.0 socket; returns the challenge it signed.
 async fn subscribe(ws: &mut Ws, k: &Key, ver: &str) {
     let c = recv_type(ws, "Challenge").await;
@@ -440,8 +452,9 @@ async fn federation_between_two_relays() {
 
     let slate = recv_type(&mut bs, "Slate").await;
     assert_eq!(slate["from"], alice.at("relaya.test"));
-    let stats = a.relay.store.stats(now_ms()).await.unwrap();
-    assert_eq!(stats.forwards_waiting, 0);
+    // Relay B pushes the slate to bob before relay A has read B's Ok and deleted its forward
+    // row, so wait for A to catch up instead of reading its queue at once.
+    assert_eq!(forwards_waiting_settles(&a, 0).await, 0);
 
     // A destination that is neither local nor reachable stays queued; a private one is refused
     // by vetting rather than connected to.
