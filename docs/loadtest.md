@@ -46,7 +46,7 @@ An idle subscribed socket costs about 15 KiB of relay RSS (20,000 sockets: 307 M
 
 ### Throughput ceiling
 
-The ceiling is the single SQLite writer. Each message costs two commits' worth of work: the insert before Ok, and the delete when the listener answers Made. Group commit batches both. On this host the relay held 2,000 messages per second end to end (posted, stored, delivered, acknowledged and deleted) with p99 under 100 ms. At a 4,000/s target it accepted about 1,700 posts/s, and deliveries fell behind posts at about 1,000/s. Clients then waited longer for Ok (p50 2.3 s), which slowed the senders. Nothing was lost, refused or delivered twice, and the backlog drained after posting stopped. Overload shows up as latency, which `/metrics` reports as commit latency and write queue depth.
+The ceiling is the single SQLite writer. Each message costs two commits' worth of work: the insert before Ok, and the delete when the listener answers Made. Group commit batches both. On this host the relay held 2,000 messages per second end to end (posted, stored, delivered, acknowledged and deleted) with p99 under 100 ms. At a 4,000/s target it accepted about 1,700 posts/s, and deliveries fell behind posts at about 1,000/s. Clients then waited longer for Ok (p50 2.3 s), which slowed the senders. Nothing was lost, refused or delivered twice, and the backlog drained after posting stopped. Overload shows up as latency, which `/metrics` reports as commit latency (`epicbox_store_commit_seconds`) and batch size (`epicbox_store_commit_batch`).
 
 ### Tail latency
 
