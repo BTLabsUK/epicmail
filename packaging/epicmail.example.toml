@@ -79,7 +79,8 @@ max_waiting = 10000              # long polls waiting at once in total
 
 [log]
 format = "text"                  # "text" or "json"
-level = "info"                   # tracing filter, e.g. "info" or "epicmail=debug"
+level = "info"                   # tracing filter; to trace a problem "info,epicmail=debug"
+                                 # (docs/operating.md, section 8; RUST_LOG overrides it)
 
 [test]
 stall_endpoint = false           # POST /test/stall on loopback; never enable on a public relay

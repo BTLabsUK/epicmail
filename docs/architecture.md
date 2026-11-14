@@ -24,6 +24,7 @@ All of it shares one `Relay` value (`src/relay/mod.rs`).
 | `limits.rs` | Rate limits and socket counts per IP prefix |
 | `address.rs`, `sig.rs` | Address grammar and signature checks, both matching the stock relay |
 | `metrics.rs` | Prometheus exporter and metric descriptions |
+| `logging.rs` | Log setup, shortened identifiers for log lines, sampling of lines that repeat |
 | `migrate.rs` | JSON Lines import and export |
 | `clock.rs`, `ids.rs` | Wall-clock milliseconds, random ids and id checks |
 
@@ -39,8 +40,8 @@ All of it shares one `Relay` value (`src/relay/mod.rs`).
    `per_sender_cap`, keeps one copy of a slate posted twice, and links the message to its 3.1.0
    transaction. The call returns after the commit; only then does the wallet get `Ok`.
 3. **Wake.** After the commit the relay wakes the mailbox's holder through the registry. The
-   registry pushes to one socket per mailbox: the mux/1
-   holder if there is one, else the newest classic subscriber. `/v1` long polls waiting on that
+   registry pushes to one socket per mailbox: the mux/1 holder if there is one, else the newest
+   classic subscriber. `/v1` long polls waiting on that
    mailbox are woken through `relay/waiters.rs`, which wakes only the pulls for that mailbox;
    waiting pulls are capped per IP prefix and in total (`http_api.max_waiting_per_ip`,
    `http_api.max_waiting`).
@@ -106,7 +107,8 @@ writer's latency and batch size.
   (`mux_token_mailboxes`); the oldest tokens go first.
 - In the store: `queue_cap` and `per_sender_cap`.
 
-A refusal increments `epicbox_limit_refusals_total{limit=...}`. Rate refusals tell the client
+A refusal increments `epicbox_limit_refusals_total{limit=...}` and writes a sampled `info`
+line with the limit and the client's network prefix (`Limiter::refused`). Rate refusals tell the client
 when to retry: in the error text on websockets, in `Retry-After` on `/v1`.
 
 ## Background tasks
@@ -129,6 +131,14 @@ up to `server.drain_seconds` for them to finish.
 `metrics.rs` installs the Prometheus exporter. All names start with `epicbox_`. Labels carry
 outcomes and limit names only, never addresses, keys, IPs or payloads. See `docs/operating.md`
 for which metrics to watch first.
+
+## Logging
+
+`logging.rs` sets up `tracing` and holds the helpers every log line uses: `short` and
+`short_addr` cut keys and addresses to their first and last six characters, `clean` strips
+control characters from text that came from outside, and the `sampled!` macro limits a call
+site to 10 lines a minute with a `suppressed` count. The policy (levels, fields, what is never
+logged, rotation) is in `docs/operating.md`, section 8.
 
 ## Ideas not built
 

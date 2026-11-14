@@ -126,7 +126,7 @@ Offline: stop the relay, then copy the `.db` file. Copy the `-wal` file with it 
 
 Restore: stop the relay, put the backup file in place as `store.path`, remove old `-wal` and `-shm` files, start. Restoring an old backup drops messages posted since; senders got Ok for those. Prefer a recent backup.
 
-A portable alternative is `epicmail export --config epicmail.toml --out file`, and `import` into a stopped or empty store. Mail is short lived (7 days), so a nightly backup is usually enough.
+A portable alternative is `epicmail export --config epicmail.toml --out file`, and `import` into a stopped or empty store. Export carries waiting messages with their 3.1.0 transaction ids, and queued forwards; it does not carry cancel records, used `/v1` challenges or mux/1 tokens. Mail is short lived (7 days), so a nightly backup is usually enough.
 
 ## 6. Retention and sweep
 
@@ -143,3 +143,97 @@ Stay on SQLite until one of these holds:
 3. More than one relay process must share one store (active-active, or a standby that takes over without a copy). SQLite cannot be shared safely by processes on different hosts.
 
 Retention, mailbox caps and the 7 day limit keep the database small for most relays. A relay that meets none of the three gains nothing from Postgres. A backup and a cold standby restored from backup covers most availability needs.
+
+## 8. Logging
+
+The relay writes log lines to stderr and never to a file. Under systemd, journald keeps them
+(`journalctl -u epicmail`); in Docker, the container's log driver does.
+
+### Levels
+
+| Level | Used for |
+|---|---|
+| `error` | The relay cannot do its job: store reads or writes failing, a listener stopped, the store writer thread dying. Act on every one. |
+| `warn` | Something outside the relay misbehaves or a capacity is reached: a peer relay unreachable or refusing forwards, the store full (`store.max_bytes`). |
+| `info` | Lifecycle: the startup line with the identity, version and switches in force, drain and stop. Expiry sweeps that removed something. Each limit that refuses a request, with the limit name and the client's network prefix. |
+| `debug` | One line per socket opened and closed, Subscribe, post, mux/1 Attach or Resume, cancel and forward delivered. For tracing a problem, not for normal running. |
+
+`log.level = "info"` is the default and the right setting for a public relay. To trace a
+problem, set `level = "info,epicmail=debug"` (or the same in `RUST_LOG`) and restart. Do not
+use a bare `debug`: it also enables the libraries' own debug output (HTTP, websocket, TLS),
+which is not reviewed for what it holds.
+
+### What a line holds
+
+- Mailbox keys, sender and recipient keys and txids are shortened to their first and last six
+  characters: `from=9rGnvF…4fDoMd@relay.example:443`. That is enough to follow one mailbox
+  through the log and to match a user's report, and not enough to address mail to it.
+- Peer relays appear by `domain:port`. Clients appear only by network prefix (`net=203.0.113.0/24`,
+  the same grouping the limits use), and only on limit refusals and, at debug, on socket open.
+- Never logged: full keys or addresses, slates, signatures, challenges, message ids, resume
+  tokens, client IP addresses. Text received from peer relays is stripped of control
+  characters. `tests/log_privacy.rs` drives a relay at debug level and fails if a line holds
+  any of these.
+
+Common fields: `socket` (a number local to the process), `net`, `mailbox`, `from`, `to`,
+`txid`, `peer`, `limit`, `result`, `error`, `suppressed`.
+
+### Floods
+
+Lines that a client or a failing dependency can repeat (store errors, forward failures, peer
+refusals, limit refusals, a full store) are sampled: each call site writes at most 10 lines a
+minute, and each line carries `suppressed`, the number dropped since the previous one. A flood
+therefore costs at most a few hundred lines a minute. Exact counts are in the metrics
+(`epicbox_limit_refusals_total`, `epicbox_forwards_total`, `epicbox_store_commit_errors_total`).
+
+### Format
+
+`log.format = "text"` writes one human-readable line per event, without colour codes unless
+stderr is a terminal, and without a timestamp when stderr is connected to journald (journald
+stamps each line). `"json"` writes one JSON object per line with the fields at the top level,
+for a log shipper.
+
+### Rotation and retention
+
+- **journald.** journald rotates on its own; set the size and age it keeps in
+  `/etc/systemd/journald.conf.d/epicmail.conf`, for example:
+
+  ```
+  [Journal]
+  SystemMaxUse=500M
+  MaxRetentionSec=14day
+  ```
+
+  then `systemctl restart systemd-journald`. The unit file also sets a per-service rate limit
+  (`LogRateLimitIntervalSec`, `LogRateLimitBurst`) as a backstop to the relay's own sampling.
+- **Docker.** The default `json-file` driver does not rotate. Use the `local` driver, which
+  does, or set limits:
+  `docker run --log-driver local --log-opt max-size=20m --log-opt max-file=5 ...`.
+- **A file.** If you redirect stderr to a file yourself, rotate it with logrotate and
+  `copytruncate`, since the relay keeps stderr open.
+
+Fourteen days of relay logs is a reasonable default. The reverse proxy's access log holds full
+client IP addresses and is usually the more sensitive log: keep it short, or use a log format
+without `$remote_addr` (nginx) if you do not need it.
+
+## 9. Upgrade and roll back
+
+The database records its schema version. A binary opens only a database of its own schema
+version and refuses any other at start, so a mismatch stops the relay before it touches data.
+The schema has been version 1 since the first release.
+
+Upgrade:
+
+1. Back up the store (section 5).
+2. Run `epicmail check-config` with the new binary against the current file. Unknown or
+   removed keys are refused, so this shows any config change the new version needs.
+3. Replace the binary and restart. SIGTERM drains sockets with close code 1001; wallets
+   reconnect on their own. Messages in flight at the restart are offered again when their
+   lease ends (at most 60 s, or a mux/1 Hold's end). mux/1 resume tokens live in memory, so
+   mux/1 clients attach again with signatures.
+4. Check the startup line in the log and `/ready`.
+
+Roll back: stop the relay and put the old binary back. When the schema version did not change
+(the release notes say when it does), start it on the same database. When it did, restore the
+backup from step 1 (messages posted since are lost), or `export` with the new binary and
+`import` with the old one: import ignores fields it does not know.

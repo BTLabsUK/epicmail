@@ -24,6 +24,12 @@ TasksMax=4096
 KillSignal=SIGTERM
 TimeoutStopSec=30
 
+# Logs go to journald. The relay samples lines that repeat; this is a backstop. Rotation and
+# retention are journald's (docs/operating.md, section 8).
+SyslogIdentifier=epicmail
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=2000
+
 # Hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
