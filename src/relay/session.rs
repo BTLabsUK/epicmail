@@ -85,10 +85,8 @@ pub struct Session {
     prev_challenge: Option<String>,
     ver: Option<Ver>,
     key: Option<String>,
-    details_seen: bool,
     inflight: Option<Inflight>,
     attempts: u32,
-    rounds: u32,
     pending_challenge: bool,
     last_sub: Instant,
     misses: u32,
@@ -114,10 +112,8 @@ pub async fn run(relay: Arc<Relay>, ws: WebSocket, ip: IpAddr, permit: SocketPer
         prev_challenge: None,
         ver: None,
         key: None,
-        details_seen: false,
         inflight: None,
         attempts: 0,
-        rounds: 0,
         pending_challenge: false,
         last_sub: Instant::now(),
         misses: 0,
@@ -419,7 +415,6 @@ impl Session {
     }
 
     async fn client_details(&mut self, ws: &mut WebSocket, msg: &Value) {
-        self.details_seen = true;
         let wants_mux = msg
             .get("ext")
             .and_then(|e| e.as_array())
@@ -527,11 +522,10 @@ impl Session {
         self.pending_challenge = false;
         self.misses = 0;
 
-        // Redelivery after three Subscribes without Made, at most three rounds; then the message
-        // steps aside (the store orders it after the others) instead of being deleted.
+        // After three Subscribes without Made the message steps aside: its lease is released and
+        // the store orders it after the others. It is never deleted for this.
         if self.attempts >= 3 {
             self.attempts = 0;
-            self.rounds += 1;
             if let Some(i) = self.inflight.take() {
                 let _ = r.store.release(vec![i.id]).await;
             }
@@ -659,7 +653,6 @@ impl Session {
         self.send(ws, ok()).await;
         self.inflight = None;
         self.attempts = 0;
-        self.rounds = 0;
         self.new_challenge(ws).await;
     }
 
