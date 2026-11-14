@@ -42,17 +42,15 @@ Connecting and subscribing 20,000 listeners took 5.3 s. 10,000 took 1.4 to 2.3 s
 
 ### Memory per socket
 
-An idle subscribed socket costs about 15 KiB of relay RSS (20,000 sockets: 307 MiB; 5,000: 87 MiB; the process alone: 10 MiB). The first run measured 136 KiB per socket: the websocket library's default 128 KiB read and write buffers were allocated for each socket. The relay now sets an 8 KiB read buffer (it grows for a large frame) and writes each frame at once. At `max_sockets = 150000` that is about 2.3 GiB for idle sockets.
+An idle subscribed socket costs about 15 KiB of relay RSS (20,000 sockets: 307 MiB; 5,000: 87 MiB; the process alone: 10 MiB). The websocket library's default 128 KiB read and write buffers would cost about 136 KiB per socket, so the relay sets an 8 KiB read buffer (it grows for a large frame) and writes each frame at once. At `max_sockets = 150000` that is about 2.3 GiB for idle sockets.
 
 ### Throughput ceiling
 
 The ceiling is the single SQLite writer. Each message costs two commits' worth of work: the insert before Ok, and the delete when the listener answers Made. Group commit batches both. On this host the relay held 2,000 messages per second end to end (posted, stored, delivered, acknowledged and deleted) with p99 under 100 ms. At a 4,000/s target it accepted about 1,700 posts/s, and deliveries fell behind posts at about 1,000/s. Clients then waited longer for Ok (p50 2.3 s), which slowed the senders. Nothing was lost, refused or delivered twice, and the backlog drained after posting stopped. Overload shows up as latency, which `/metrics` reports as commit latency and write queue depth.
 
-Posts are far below the ceiling, so idle sockets, not posts, set the relay's size.
-
 ### Tail latency
 
-At 500 and 1,000 posts/s the p99 of post Ok (330 to 490 ms) is higher than at 2,000 posts/s (49 ms). The low-rate runs used 10,000 listeners instead of 5,000. The cause was not isolated. Candidates are WAL checkpoints done by the writer thread, the interval challenge reaching all listeners at once, and other jobs on the shared host competing for CPU and disk. If tail latency matters on the production host, a background checkpoint thread is the change to try.
+At 500 and 1,000 posts/s the p99 of post Ok (330 to 490 ms) is higher than at 2,000 posts/s (49 ms). The low-rate runs used 10,000 listeners instead of 5,000. The cause was not isolated. Candidates are WAL checkpoints done by the writer thread, the interval challenge reaching all listeners at once, and other jobs on the shared host competing for CPU and disk. If tail latency matters on your host, a background checkpoint thread is the change to try.
 
 ### Limits
 
@@ -64,4 +62,4 @@ With default limits, one /24 may post 240 times a minute (burst 480). The smoke 
 - Federation under load. Forwarding to a peer was tested for correctness (`tests/loopback.rs`, `tools/compat-classic.sh`), not for throughput.
 - mux/1 sockets carrying many mailboxes. Memory per mailbox on a mux/1 socket is a registry entry, smaller than a socket.
 - Long runs (hours) and a large store (millions of waiting messages).
-- A host other than this one. The production VPS has fewer cores and a slower disk, so measure it there before relying on the ceiling.
+- A host other than this one. A small VPS has fewer cores and a slower disk; measure your own host before relying on the ceiling.
