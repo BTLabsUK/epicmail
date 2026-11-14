@@ -340,6 +340,12 @@ impl Config {
         if self.store.retention_days < 7 {
             bail!("store.retention_days must be at least 7");
         }
+        if self.store.vacuum_hour_utc > 23 {
+            bail!("store.vacuum_hour_utc must be 0..23");
+        }
+        if self.store.readers == 0 || self.store.group_commit_max == 0 {
+            bail!("store.readers and store.group_commit_max must be at least 1");
+        }
         if self.protocol.challenge_interval_s < 5 {
             bail!("protocol.challenge_interval_s must be at least 5");
         }
@@ -381,5 +387,47 @@ impl Config {
                 a == d && port == self.server.port
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base() -> Config {
+        let mut c = Config::default();
+        c.server.domain = "relay.example.org".into();
+        c
+    }
+
+    #[test]
+    fn defaults_validate_and_bad_values_are_refused() {
+        base().validate().unwrap();
+        let cases: [fn(&mut Config); 6] = [
+            |c| c.server.domain.clear(),
+            |c| c.store.vacuum_hour_utc = 24,
+            |c| c.store.readers = 0,
+            |c| c.store.retention_days = 6,
+            |c| c.limits.http_per_min_per_ip = 10,
+            |c| {
+                c.federation.peers.insert("a.example:443".into(), "http://a.example".into());
+            },
+        ];
+        for (i, f) in cases.iter().enumerate() {
+            let mut c = base();
+            f(&mut c);
+            assert!(c.validate().is_err(), "case {i} passed validation");
+        }
+    }
+
+    #[test]
+    fn unknown_keys_are_refused() {
+        let err = toml::from_str::<Config>(
+            "[server]
+domain = \"a.example\"
+listen_typo = 1
+",
+        );
+        assert!(err.is_err());
     }
 }
