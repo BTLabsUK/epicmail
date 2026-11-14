@@ -71,7 +71,7 @@ measured. Measure your own host before relying on these figures.
 | Wallet changes needed? | None. Point the wallet's Epicbox domain and port at the relay. |
 | Protocol versions | 2.0.0, 3.0.0 and 3.1.0 (transaction cancel). Pre-2.0.0 wallets (no `ver` in Subscribe) are served too; their slates are deleted on delivery since they send no `Made`. `GetVersion` answers `protocol.getversion`, `3.1.0` by default. |
 | Wallets that sign a fixed first challenge | Versions before 3.5.2 sign the same constant on every new socket. epicmail never sends or accepts it, so these wallets can post through epicmail but cannot receive from it. See [Security model](#security-model). |
-| Other relays | Federates both ways with relays that speak the same protocol. It forwards as a wallet would (wait for `Challenge`, send `PostSlate`, read `Ok`), and accepts forwarded slates like any post. |
+| Other relays | Federates both ways with relays that speak the same protocol. It forwards as a wallet would (wait for `Challenge`, send `PostSlate`, read `Ok`), and accepts forwarded slates like any post. Cancels pass both ways with the reference 3.1.0 relay. |
 | Addresses | `[epicbox://]<base58check public key>[@domain[:port]]`, the original grammar. Port defaults to 443. |
 | Signatures | secp256k1 ECDSA over SHA-256 of the UTF-8 text, strict DER, low-S, hex as the original verifier decodes it. |
 | Migrating from a Postgres-backed relay | `tools/export-node-pg.py` exports its queue as JSON Lines; `epicmail import` loads it. |
@@ -194,18 +194,6 @@ Differences from the original relay that a wallet can observe, all within what w
 - Only the newest classic socket of a mailbox receives pushes; older ones stay open, up to
   `limits.sockets_per_address`, and collect on their next `Subscribe`.
 
-The cancel follows the reference 3.1.0 relay, so cancels pass between it and this relay in
-both directions: a `CancelTx` is accepted from a wallet's own socket or from another relay on a
-socket that never subscribed (with `address`), signed over the bare `epicboxtxid`; it is
-forwarded to every relay that holds the transaction, with a `cancelrequestid` that stops relay
-loops; a participant gets `TransactionCancelled`, anyone else and an unknown transaction get
-`Ok`. Note what the bare signature proves: it is the same signature a `PostSlate` carries as
-`epicboxtxidsig`, so anyone who saw the slate (its recipient, a relay on the path) can cancel the
-transaction. A protocol improvement would be for wallets to sign `epicbox-cancel/1:<epicboxtxid>`
-instead, which only the sender produces for a cancel; this relay already accepts that form
-(it reaches only relays that accept it too) and `protocol.forward_bare_cancel = false` forwards
-only that form.
-
 ### mux/1
 
 Opt-in: a client sends `ClientDetails` with `"ext":["mux/1"]` before its first `Subscribe`, then
@@ -248,10 +236,17 @@ A 3.1.0 `PostSlate` carries `epicboxtxid`, a 32-character transaction id, and
 participants (the sender's and the receiver's keys) and, when the sender is on another relay,
 to that relay.
 
-- **Who may cancel.** `CancelTx {address, epicboxtxid, signature}` from a participant. The
-  signature is over `epicbox-cancel/1:<txid>`, or, on a socket that has proven the key with
-  `Subscribe`, over the bare txid. A bare signature alone is not enough from an unproven socket:
-  the slate's `epicboxtxidsig` already is one, so anyone who saw the slate holds it.
+The cancel follows the reference 3.1.0 relay, so cancels pass between it and epicmail in both
+directions.
+
+- **Who may cancel.** `CancelTx {address, epicboxtxid, signature}` from a participant, on any
+  socket: a wallet's own, or another relay's that never subscribed. The signature is over the
+  bare txid, as wallets and the reference relay sign it, or over `epicbox-cancel/1:<txid>`.
+- **What the bare signature proves.** It is the same signature the `PostSlate` carried as
+  `epicboxtxidsig`, so anyone who saw the slate (its recipient, a relay on the path) can cancel
+  the transaction. A signature over `epicbox-cancel/1:<txid>` is produced only for a cancel;
+  epicmail accepts it, and wallets that want cancels only the sender can make should sign that
+  form. It reaches only relays that accept it too.
 - **What happens.** Every waiting state of the transaction is deleted, a cancel record is kept
   for the retention period, and the requester gets `TransactionCancelled`. The receiver's 3.1.0
   sockets get `TransactionCancelled` pushed; a receiver offline at the time gets it on its next
@@ -259,10 +254,12 @@ to that relay.
   with the same txid gets `TransactionCancelled` instead of `Ok`.
 - **Non-participants** get a plain `Ok` and change nothing, so the answer does not reveal
   whether the transaction exists.
-- **Across relays.** A cancel signed over `epicbox-cancel/1:<txid>` is forwarded to the other
-  relays that hold states of the transaction, under the same federation policy as slates. A
-  cancel signed over the bare txid is kept local unless `protocol.forward_bare_cancel` is set,
-  because it does not show that the sender asked to cancel.
+- **Across relays.** A cancel is forwarded to every other relay that holds states of the
+  transaction, under the same federation policy as slates, with a `cancelrequestid` (made when
+  the request has none). A request id seen in the last 10 minutes is confirmed with
+  `TransactionCancelled` and not processed or forwarded again, which ends relay loops.
+  `protocol.forward_bare_cancel = false` forwards only cancels signed over
+  `epicbox-cancel/1:<txid>`.
 - **`Made` on a 3.1.0 slate** also removes the other waiting states of that transaction in the
   same mailbox.
 
@@ -366,6 +363,9 @@ names only. The ones to watch first are listed in
   unless their source is listed in `limits.shared_sources`; one user with many prefixes gets
   many budgets. `store.max_bytes` bounds the total in any case.
 - **Metadata.** Addresses and timing are visible to the operator, as on any Epicbox relay.
+- **Cancel authority.** A cancel signed over the bare txid, the form wallets use today, can be
+  sent by anyone who saw the slate (see [Transaction cancel](#transaction-cancel-310)). This is
+  the protocol's, kept for interoperability.
 - **Export** carries waiting slates and forwards, not cancel records, so a cancel made before a
   migration is not known to the new store.
 - **Extensions are epicmail's own.** mux/1 and `/v1` are not served by other relays; clients that
