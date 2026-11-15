@@ -1,5 +1,5 @@
 # A production relay: behind nginx on the same host, serving an old relay name as well as its
-# own, forwarding to known public relays, and reachable through a Tor onion service
+# own, federating with public relays, and reachable through a Tor onion service
 # (nginx-onion.conf). Only what this setup sets is here; every other setting keeps the default
 # shown in ../epicmail.example.toml.
 
@@ -17,9 +17,9 @@ path = "/var/lib/epicmail/epicmail.db"
 
 [federation]
 enabled = true
-# Forward only to these relays; a post for any other domain is refused when it arrives, so the
-# relay never queues mail for a relay nobody checked.
-allow = ["epicbox.epiccash.com", "epicbox.stackwallet.com", "epicbox.epicnet.us"]
+# Optional: forward only to these relays, e.g. ["epicbox.epiccash.com", "epicbox.epicnet.us"].
+# A post for any other domain is then refused when it arrives. Empty = any public relay.
+allow = []
 
 [protocol]
 # The default, kept explicit: wallets sign cancels over the bare txid today, and forwarding
