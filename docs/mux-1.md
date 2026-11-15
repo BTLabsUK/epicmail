@@ -195,7 +195,7 @@ On SIGTERM the relay sends `Detached` with `reason: "shutdown"` for every attach
 
 ## 5. Limits
 
-The info document (`/.well-known/epicbox.json`, `features.mux/1`) publishes every limit below except the per-prefix Attach budget. The `Ok` carries four of them: `attach_per_frame`, `mailboxes_per_socket`, `inflight_per_socket` and `hold_max_s`.
+The info document (`/.well-known/epicbox.json`, `features.mux/1`) publishes the per-socket and per-frame limits below. The per-IP-prefix limits (Attach frames, failed signatures, mux/1 sockets) are enforced but not published. The `Ok` carries four of them: `attach_per_frame`, `mailboxes_per_socket`, `inflight_per_socket` and `hold_max_s`.
 
 | limit | default |
 |---|---|
