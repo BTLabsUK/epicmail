@@ -721,6 +721,18 @@ impl Store for SqliteStore {
         .await
     }
 
+    async fn pending_cancels(&self, receiver: &str) -> Result<Vec<String>> {
+        let receiver = receiver.to_string();
+        self.read(move |c| {
+            let mut st = c.prepare_cached(
+                "SELECT txid FROM cancels WHERE receiver=?1 AND acknowledged=0 ORDER BY created_at LIMIT 64",
+            )?;
+            let rows = st.query_map([receiver], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>();
+            rows
+        })
+        .await
+    }
+
     async fn ack_cancel(&self, receiver: &str, txid: &str) -> Result<()> {
         let (receiver, txid) = (receiver.to_string(), txid.to_string());
         self.write(move |c| {

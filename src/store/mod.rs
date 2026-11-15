@@ -225,6 +225,8 @@ pub trait Store: Send + Sync + 'static {
     ) -> Result<CancelWrite>;
     /// The oldest unacknowledged tombstone for a receiver.
     async fn pending_cancel(&self, receiver: &str) -> Result<Option<String>>;
+    /// Every unacknowledged tombstone for a receiver, oldest first.
+    async fn pending_cancels(&self, receiver: &str) -> Result<Vec<String>>;
     async fn ack_cancel(&self, receiver: &str, txid: &str) -> Result<()>;
 
     /// Record a /v1 challenge as used. False when it was used before (replay).

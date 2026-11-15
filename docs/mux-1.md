@@ -35,6 +35,8 @@ A client that does not ask for mux/1 sees plain 3.0.0. A relay that does not off
 | `unknown_id` | InvalidRequest | Hold names an id that is not in flight on this socket |
 | `rate_limited` | InvalidRequest | a limit was hit; `retry_after` (seconds) is set |
 | `post_refused` | InvalidRequest | PostSlate refused; `description` says why |
+| `bad_request` | InvalidRequest | `CancelTx` with a missing or invalid address, `epicboxtxid` or signature field (txcancel/1) |
+| `cancel_failed` | UnknownError | store error during `CancelTx`; nothing was recorded and it can be retried (txcancel/1) |
 | `internal` | UnknownError | store error; the frame had no effect and can be retried |
 
 A mux/1 frame type sent on a socket that did not negotiate mux/1 is ignored, as the classic protocol ignores unknown types. A frame larger than the frame limit closes the socket.
@@ -154,7 +156,7 @@ The 3.0.0 `PostSlate` frame, unchanged, with an optional `ref`:
 {"type":"PostSlate","ref":"6","from":"...","to":"...","str":"...","signature":"..."}
 ```
 
-The relay answers `{"type":"Ok","ref":"6"}` after the message is committed, or after it is committed to the forward queue for another domain. A refused post gets `Error` with `code: "post_refused"` or `rate_limited`. The 3.1.0 cancel fields are not part of mux/1.
+The relay answers `{"type":"Ok","ref":"6"}` after the message is committed, or after it is committed to the forward queue for another domain. A refused post gets `Error` with `code: "post_refused"` or `rate_limited`. The 3.1.0 cancel fields are not part of mux/1 itself; the optional extension `txcancel/1` (section 8) adds them.
 
 ### Not allowed on a mux/1 socket
 
@@ -238,3 +240,70 @@ C: {"type":"Resume","ref":"r1","token":"q9..."}
 R: {"type":"Attached","ref":"r1","mailboxes":[...],"token":"Hk...","token_expires":...}
 ```
 
+
+## 8. Extension txcancel/1: transaction cancel
+
+`txcancel/1` carries the 3.1.0 transaction cancel over mux/1. It is additive: a session that does not ask for it behaves exactly as described above, and mux/1 stays frozen.
+
+### Negotiation
+
+```json
+{"type":"ClientDetails","protocol_version":"3.1.0","ext":["mux/1","txcancel/1"]}
+{"type":"Ok","ext":["mux/1","txcancel/1"],"challenge":"...","limits":{...}}
+```
+
+The relay lists `txcancel/1` in `ext` only when the client asked for it, the socket became mux/1, and the relay runs the 3.1.0 cancel (`protocol.cancel`). Otherwise `ext` is `["mux/1"]` and none of the frames below apply. On a mux/1 session without `txcancel/1`:
+
+- `epicboxtxid` and `epicboxtxidsig` in `PostSlate` are ignored (unknown fields are ignored, as everywhere in mux/1), the `Ok` carries no txid and `Mail` carries none.
+- `CancelTx` and `CancelAck` get `Error` with `code: "unknown_type"`.
+- The relay sends no `Cancelled`.
+
+### PostSlate with a transaction id
+
+```json
+{"type":"PostSlate","ref":"6","from":"...","to":"...","str":"...","signature":"...","epicboxtxid":"<32 chars>","epicboxtxidsig":"<DER hex>"}
+{"type":"Ok","ref":"6","epicboxtxid":"<32 chars>"}
+```
+
+`epicboxtxid` (32 characters of `[A-Za-z0-9_-]`) and `epicboxtxidsig` come together or not at all. The signature is the `from` key's over the bare txid, the same check as a 3.1.0 classic `PostSlate`. One of the two alone, a bad signature, or a stranger posting under a txid that already has other participants gets `post_refused`. Posting to a cancelled transaction gets `post_refused` (a mux/1 post never answers `TransactionCancelled`). The relay stores the txid with the message exactly as the classic path does, so a transaction posted here can be cancelled from a classic socket and the other way round.
+
+`Mail` carries `"epicboxtxid":"..."` when the stored message has one.
+
+### CancelTx
+
+```json
+{"type":"CancelTx","ref":"7","address":"<key or address>","epicboxtxid":"<32 chars>","signature":"<DER hex over the txid>"}
+```
+
+The signature is by the key in `address` over the bare txid, or over `epicbox-cancel/1:<txid>`. A mux/1 socket has no Subscribe, so the signature itself proves the key, as for a classic socket that never subscribed (the relay forwards cancels the same way). The relay runs the classic cancel: it writes the tombstone for 7 days, deletes the waiting messages of the transaction and forwards the cancel to the other relays involved with the same `cancelrequestid` loop guard.
+
+| answer | when |
+|---|---|
+| `{"type":"TransactionCancelled","ref":"7","epicboxtxid":"..."}` | the requester is a participant, or the transaction is already cancelled and the requester was a participant |
+| `{"type":"Ok","ref":"7"}` | the transaction is unknown here or the requester is not a participant (the two are indistinguishable, as on classic sockets) |
+| `Error` `bad_signature` | the signature verifies for neither form |
+| `Error` `bad_request` | missing or invalid `address`, `epicboxtxid` or `signature` |
+| `Error` `rate_limited` | failed-signature or signature-check budget used; `retry_after` is set |
+| `Error` `cancel_failed` | store error; retry |
+
+### Cancelled
+
+```json
+{"type":"Cancelled","mailbox":"<key>","epicboxtxid":"<32 chars>"}
+```
+
+Pushed to the receiver's mailbox (the participant who did not ask) when it is attached on a `txcancel/1` session:
+
+- live, when the cancel is recorded, whatever socket it came from (mux, classic or another relay);
+- on Attach and Resume, for every tombstone the mailbox has not acknowledged, after `Attached` and before any `Mail`.
+
+The relay sends it once per mailbox and txid on a socket until the mailbox is detached. It repeats on the next Attach or Resume until acknowledged. A message of the cancelled transaction that was in flight can still be acknowledged with `Ack`; the cancel removes the waiting ones.
+
+### CancelAck
+
+```json
+{"type":"CancelAck","ref":"8","mailbox":"<key>","epicboxtxid":"<32 chars>"}
+{"type":"Ok","ref":"8"}
+```
+
+The client confirms it handled the cancel. The relay marks the tombstone acknowledged for that mailbox, which is what a classic 3.1.0 re-Subscribe does, so neither kind of socket hears about it again. It is idempotent. A mailbox not attached on this socket, or an unknown txid, is ignored and still answered `Ok`. A txid that is not 32 characters, or a missing mailbox, gets `bad_frame`.

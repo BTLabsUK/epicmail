@@ -8,6 +8,8 @@ use axum::extract::ws::WebSocket;
 use serde_json::{json, Value};
 
 use super::{ok, with_ref, Flow, Session};
+use crate::ids::is_txid;
+use crate::relay::CancelOutcome;
 use crate::address::parse_address;
 use crate::clock::now_ms;
 use crate::ids::{is_msgid, rand_b64url};
@@ -31,6 +33,10 @@ pub(super) const MUX_PUMP_TICK: Duration = Duration::from_secs(15);
 pub(super) struct Mux {
     /// Attach signs this.
     challenge: String,
+    /// The client negotiated txcancel/1.
+    txcancel: bool,
+    /// (mailbox, txid) of Cancelled frames sent on this socket and not reset by a Detach.
+    cancel_sent: HashSet<(String, String)>,
     pub(super) attached: HashSet<String>,
     /// msgid -> (row id, mailbox)
     pub(super) inflight: HashMap<String, (i64, String)>,
@@ -56,7 +62,7 @@ pub(super) fn mux_error(code: &str, description: &str, r#ref: &Option<String>, r
         "bad_signature" => "InvalidSignature",
         "too_many_mailboxes" => "TooManySubscriptions",
         "token_unknown" => "InvalidChallenge",
-        "internal" => "UnknownError",
+        "internal" | "cancel_failed" => "UnknownError",
         _ => "InvalidRequest",
     };
     let mut v = json!({"type":"Error","kind":kind,"code":code,"description":description});
@@ -77,7 +83,7 @@ pub(super) fn ref_of(msg: &Value) -> Option<String> {
 impl Session {
     /// Switch this socket to mux/1 and send the challenge and limits. False when the client's
     /// prefix is at its mux/1 socket cap; the socket then stays classic.
-    pub(super) async fn upgrade_to_mux(&mut self, ws: &mut WebSocket) -> bool {
+    pub(super) async fn upgrade_to_mux(&mut self, ws: &mut WebSocket, txcancel: bool) -> bool {
         let (_, mult) = self.relay.limiter.prefix(self.ip);
         if !self.permit.upgrade_mux(mult) {
             self.relay.limiter.refused("mux_sockets", self.ip);
@@ -85,8 +91,9 @@ impl Session {
         }
         let lim = &self.relay.cfg.limits;
         let challenge = rand_b64url(16);
+        let ext = if txcancel { json!(["mux/1", "txcancel/1"]) } else { json!(["mux/1"]) };
         let reply = json!({
-            "type":"Ok","ext":["mux/1"],"challenge":challenge,
+            "type":"Ok","ext":ext,"challenge":challenge,
             "limits":{
                 "attach_per_frame":lim.mux_attach_per_frame,
                 "mailboxes_per_socket":lim.mux_mailboxes_per_socket,
@@ -94,8 +101,11 @@ impl Session {
                 "hold_max_s":HOLD_MAX_S
             }
         });
+        self.handle.cancel = txcancel;
         self.mux = Some(Mux {
             challenge,
+            txcancel,
+            cancel_sent: HashSet::new(),
             attached: HashSet::new(),
             inflight: HashMap::new(),
             held: HashMap::new(),
@@ -122,9 +132,16 @@ impl Session {
             "waiting" => self.waiting(ws, &r#ref).await,
             "hold" => self.hold(ws, msg, &r#ref).await,
             "postslate" => {
-                let out = self.relay.post_slate(self.ip, PostReq::from_json(msg), false).await;
+                let txcancel = self.mux.as_ref().is_some_and(|m| m.txcancel);
+                let out = self.relay.post_slate(self.ip, PostReq::from_json(msg), txcancel).await;
                 let frame = match out {
-                    PostOutcome::Stored { .. } | PostOutcome::Forwarded { .. } => with_ref(ok(), &r#ref),
+                    PostOutcome::Stored { txid, .. } | PostOutcome::Forwarded { txid } => {
+                        let mut f = with_ref(ok(), &r#ref);
+                        if let (true, Some(t)) = (txcancel, txid) {
+                            f["epicboxtxid"] = json!(t);
+                        }
+                        f
+                    }
                     PostOutcome::Cancelled { .. } => {
                         mux_error("post_refused", "Transaction was cancelled.", &r#ref, None)
                     }
@@ -140,6 +157,8 @@ impl Session {
                 };
                 self.send(ws, frame).await;
             }
+            "canceltx" if self.mux.as_ref().is_some_and(|m| m.txcancel) => self.cancel_tx(ws, msg, &r#ref).await,
+            "cancelack" if self.mux.as_ref().is_some_and(|m| m.txcancel) => self.cancel_ack(ws, msg, &r#ref).await,
             "getversion" => {
                 let v = json!({"type":"GetVersion","str":self.relay.cfg.protocol.getversion});
                 self.send(ws, v).await;
@@ -300,8 +319,94 @@ impl Session {
             reply["token"] = json!(token);
             reply["token_expires"] = json!(expires);
         }
+        let mailboxes: Vec<String> = reply["mailboxes"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|e| e["ok"] == true)
+                    .filter_map(|e| e["mailbox"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
         self.send(ws, reply).await;
+        // Cancels the receiver has not acknowledged come before any Mail.
+        for k in mailboxes {
+            self.send_pending_cancels(ws, &k).await;
+        }
         self.pump(ws).await;
+    }
+
+    /// txcancel/1: send `Cancelled` for every tombstone of `key` not yet acknowledged.
+    async fn send_pending_cancels(&mut self, ws: &mut WebSocket, key: &str) {
+        if !self.mux.as_ref().is_some_and(|m| m.txcancel) {
+            return;
+        }
+        let pending = match self.relay.store.pending_cancels(key).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(error = %e, "pending cancels failed");
+                return;
+            }
+        };
+        for txid in pending {
+            self.mux_send_cancelled(ws, key, &txid).await;
+        }
+    }
+
+    /// Send `Cancelled` once per mailbox and txid until the mailbox is detached.
+    async fn mux_send_cancelled(&mut self, ws: &mut WebSocket, key: &str, txid: &str) {
+        let Some(m) = self.mux.as_mut() else { return };
+        if !m.attached.contains(key) || !m.cancel_sent.insert((key.to_string(), txid.to_string())) {
+            return;
+        }
+        self.send(ws, json!({"type":"Cancelled","mailbox":key,"epicboxtxid":txid})).await;
+    }
+
+    /// A transaction `mailbox` takes part in was cancelled while it is attached here.
+    pub(super) async fn mux_cancelled(&mut self, ws: &mut WebSocket, mailbox: &str, txid: &str) {
+        self.mux_send_cancelled(ws, mailbox, txid).await;
+    }
+
+    /// CancelTx over mux: the signature proves the key, as for a classic socket that never
+    /// subscribed. The classic cancel logic does the rest.
+    async fn cancel_tx(&mut self, ws: &mut WebSocket, msg: &Value, r#ref: &Option<String>) {
+        let frame = match self.relay.cancel_tx(self.ip, None, msg).await {
+            CancelOutcome::Cancelled(t) => with_ref(json!({"type":"TransactionCancelled","epicboxtxid":t}), r#ref),
+            CancelOutcome::Ok => with_ref(ok(), r#ref),
+            CancelOutcome::Refused(Refusal::RateLimited(s)) => {
+                mux_error("rate_limited", "Rate limit exceeded.", r#ref, Some(s))
+            }
+            CancelOutcome::Refused(Refusal::Internal) => {
+                mux_error("cancel_failed", "Could not record the cancel; try again.", r#ref, None)
+            }
+            CancelOutcome::Refused(Refusal::Invalid("InvalidSignature", d)) => {
+                mux_error("bad_signature", &d, r#ref, None)
+            }
+            CancelOutcome::Refused(Refusal::Invalid(_, d) | Refusal::Full(d)) => {
+                mux_error("bad_request", &d, r#ref, None)
+            }
+        };
+        self.send(ws, frame).await;
+    }
+
+    /// CancelAck: the receiver has seen the cancel. Same effect as a classic re-Subscribe.
+    async fn cancel_ack(&mut self, ws: &mut WebSocket, msg: &Value, r#ref: &Option<String>) {
+        let key =
+            msg.get("mailbox").and_then(|a| a.as_str()).and_then(|a| parse_address(a).ok()).map(|a| a.public_key);
+        let txid = msg.get("epicboxtxid").and_then(|t| t.as_str()).filter(|t| is_txid(t));
+        let (Some(key), Some(txid)) = (key, txid) else {
+            let e = mux_error("bad_frame", "CancelAck needs mailbox and epicboxtxid.", r#ref, None);
+            self.send(ws, e).await;
+            return;
+        };
+        // Only a mailbox this socket holds can be acknowledged; others are ignored, as in Ack.
+        if self.held_mailboxes(ws).await.contains(&key) {
+            if self.relay.store.ack_cancel(&key, txid).await.is_err() {
+                self.send(ws, mux_error("internal", "Internal error; try again.", r#ref, None)).await;
+                return;
+            }
+        }
+        self.send(ws, with_ref(ok(), r#ref)).await;
     }
 
     /// Keep the mailbox set of the live token equal to the attached set.
@@ -344,6 +449,9 @@ impl Session {
         for k in keys {
             let had = self.mux.as_mut().map(|m| m.attached.remove(&k)).unwrap_or(false);
             if had {
+                if let Some(m) = self.mux.as_mut() {
+                    m.cancel_sent.retain(|(mb, _)| *mb != k);
+                }
                 self.relay.registry.detach_mux(&k, self.id);
                 self.drop_inflight(&k).await;
                 self.relay.registry.wake(&k);
@@ -358,6 +466,9 @@ impl Session {
         let had = self.mux.as_mut().map(|m| m.attached.remove(key)).unwrap_or(false);
         if !had {
             return;
+        }
+        if let Some(m) = self.mux.as_mut() {
+            m.cancel_sent.retain(|(mb, _)| mb != key);
         }
         self.drop_inflight(key).await;
         self.sync_token();
@@ -511,6 +622,7 @@ impl Session {
         }
         m.dirty.remove(key);
         m.inflight.retain(|_, (_, k)| k != key);
+        m.cancel_sent.retain(|(mb, _)| mb != key);
         self.sync_token();
         self.send(ws, json!({"type":"Detached","mailbox":key,"reason":"replaced"})).await;
     }
@@ -547,10 +659,13 @@ impl Session {
                 };
             let full = got.len() == free;
             for msg in got {
-                let frame = json!({
+                let mut frame = json!({
                     "type":"Mail","mailbox":key,"id":msg.msgid,"from":msg.sender,
                     "str":msg.body,"signature":msg.signature,"created":msg.created_at / 1000
                 });
+                if let (true, Some(t)) = (self.mux.as_ref().is_some_and(|m| m.txcancel), &msg.txid) {
+                    frame["epicboxtxid"] = json!(t);
+                }
                 if let Some(m) = self.mux.as_mut() {
                     m.inflight.insert(msg.msgid.clone(), (msg.id, key.clone()));
                 }

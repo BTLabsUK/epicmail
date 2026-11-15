@@ -1482,3 +1482,255 @@ async fn a_store_failure_mid_cancel_leaves_nothing_half_done() {
     assert_eq!(recv(&mut a).await, json!({"type":"TransactionCancelled","epicboxtxid":txid}));
     assert_eq!((cancel_rows("ok.test:443").await, cancel_rows("fail.test:443").await), (1, 1));
 }
+
+// ---- txcancel/1 ----
+
+const TXID: &str = "0123456789abcdef0123456789abcdef";
+
+/// Open a socket, negotiate mux/1 (and txcancel/1 when asked), attach `keys`.
+async fn txmux(n: &Node, txcancel: bool, keys: &[&Key]) -> Ws {
+    let mut m = connect(n).await;
+    recv_type(&mut m, "Challenge").await;
+    let ext = if txcancel { json!(["mux/1", "txcancel/1"]) } else { json!(["mux/1"]) };
+    send(&mut m, json!({"type":"ClientDetails","wallet_version":"t","wallet_mode":"listener","protocol_version":"3.1.0","ext":ext})).await;
+    let ok = recv(&mut m).await;
+    assert_eq!(ok["ext"], ext, "{ok}");
+    let ch = ok["challenge"].as_str().unwrap().to_string();
+    if !keys.is_empty() {
+        let list: Vec<Value> = keys.iter().map(|k| json!({"address":k.pk,"signature":k.sign(&ch)})).collect();
+        send(&mut m, json!({"type":"Attach","ref":"at","mailboxes":list})).await;
+        let at = recv(&mut m).await;
+        assert_eq!(at["type"], "Attached", "{at}");
+    }
+    m
+}
+
+fn cancel_frame(r: &str, k: &Key, txid: &str) -> Value {
+    json!({"type":"CancelTx","ref":r,"address":k.pk,"epicboxtxid":txid,"signature":k.sign(txid)})
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn txcancel_is_negotiated_only_when_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    // mux/1 alone: txid fields are ignored, CancelTx is an unknown type, Mail has no txid.
+    let mut a = txmux(&n, false, &[&alice]).await;
+    let mut b = txmux(&n, false, &[&bob]).await;
+    let mut p = post_tx_frame(&alice, "relay.test", &bob, "relay.test", TXID);
+    p["ref"] = json!("p1");
+    send(&mut a, p).await;
+    assert_eq!(recv(&mut a).await, json!({"type":"Ok","ref":"p1"}));
+    let mail = recv(&mut b).await;
+    assert_eq!(mail["type"], "Mail");
+    assert!(mail.get("epicboxtxid").is_none(), "{mail}");
+    send(&mut a, cancel_frame("c1", &alice, TXID)).await;
+    let e = recv(&mut a).await;
+    assert_eq!(e["code"], "unknown_type", "{e}");
+    send(&mut a, json!({"type":"CancelAck","ref":"x","mailbox":alice.pk,"epicboxtxid":TXID})).await;
+    assert_eq!(recv(&mut a).await["code"], "unknown_type");
+    // The ignored fields did not register a transaction.
+    let mut c = connect(&n).await;
+    recv_type(&mut c, "Challenge").await;
+    send(&mut c, cancel_frame("c", &alice, TXID)).await;
+    assert_eq!(recv(&mut c).await, json!({"type":"Ok"}));
+
+    // With cancel off the relay does not offer it.
+    let dir2 = tempfile::tempdir().unwrap();
+    let n2 = start(dir2.path(), "relay.test", |c| c.protocol.cancel = false).await;
+    let mut m = connect(&n2).await;
+    recv_type(&mut m, "Challenge").await;
+    send(&mut m, json!({"type":"ClientDetails","ext":["mux/1","txcancel/1"]})).await;
+    assert_eq!(recv(&mut m).await["ext"], json!(["mux/1"]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn txcancel_post_echoes_txid_and_mail_carries_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut a = txmux(&n, true, &[&alice]).await;
+    let mut b = txmux(&n, true, &[&bob]).await;
+    let mut p = post_tx_frame(&alice, "relay.test", &bob, "relay.test", TXID);
+    p["ref"] = json!("p1");
+    send(&mut a, p).await;
+    assert_eq!(recv(&mut a).await, json!({"type":"Ok","ref":"p1","epicboxtxid":TXID}));
+    let mail = recv(&mut b).await;
+    assert_eq!(mail["type"], "Mail", "{mail}");
+    assert_eq!(mail["epicboxtxid"], TXID);
+    // A post without the fields still works and carries no txid.
+    let mut p = post_frame(&alice, "relay.test", &bob, "relay.test", 2);
+    p["ref"] = json!("p2");
+    send(&mut a, p).await;
+    assert_eq!(recv(&mut a).await, json!({"type":"Ok","ref":"p2"}));
+    assert!(recv(&mut b).await.get("epicboxtxid").is_none());
+    // Half the fields, or a signature by someone else, is refused.
+    let mut p = post_frame(&alice, "relay.test", &bob, "relay.test", 3);
+    p["epicboxtxid"] = json!("ffffffffffffffffffffffffffffffff");
+    send(&mut a, p.clone()).await;
+    assert_eq!(recv(&mut a).await["code"], "post_refused");
+    p["epicboxtxidsig"] = json!(bob.sign("ffffffffffffffffffffffffffffffff"));
+    send(&mut a, p).await;
+    assert_eq!(recv(&mut a).await["code"], "post_refused");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn txcancel_cancel_confirmed_ambiguous_and_bad_signature() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob, mallory) = (Key::new(), Key::new(), Key::new());
+    let mut a = txmux(&n, true, &[&alice]).await;
+    send(&mut a, post_tx_frame(&alice, "relay.test", &bob, "relay.test", TXID)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    assert_eq!(waiting(&n).await, 1);
+
+    // Someone else's signature over the txid.
+    let mut bad = cancel_frame("c2", &alice, TXID);
+    bad["signature"] = json!(mallory.sign(TXID));
+    send(&mut a, bad).await;
+    let e = recv(&mut a).await;
+    assert_eq!((e["code"].as_str(), e["kind"].as_str(), e["ref"].as_str()), (Some("bad_signature"), Some("InvalidSignature"), Some("c2")));
+    // Missing txid.
+    send(&mut a, json!({"type":"CancelTx","ref":"c3","address":alice.pk,"signature":"00"})).await;
+    assert_eq!(recv(&mut a).await["code"], "bad_request");
+    // A stranger, and an unknown transaction, get a plain Ok.
+    send(&mut a, cancel_frame("c4", &mallory, TXID)).await;
+    assert_eq!(recv(&mut a).await, json!({"type":"Ok","ref":"c4"}));
+    let other = "ffffffffffffffffffffffffffffffff";
+    send(&mut a, cancel_frame("c5", &alice, other)).await;
+    assert_eq!(recv(&mut a).await, json!({"type":"Ok","ref":"c5"}));
+    assert_eq!(waiting(&n).await, 1);
+
+    // A participant cancels; asking again is answered from the tombstone.
+    send(&mut a, cancel_frame("c6", &alice, TXID)).await;
+    assert_eq!(recv(&mut a).await, json!({"type":"TransactionCancelled","ref":"c6","epicboxtxid":TXID}));
+    assert_eq!(waiting(&n).await, 0);
+    send(&mut a, cancel_frame("c7", &alice, TXID)).await;
+    assert_eq!(recv(&mut a).await["type"], "TransactionCancelled");
+    // Posting the cancelled transaction again is refused.
+    send(&mut a, post_tx_frame(&alice, "relay.test", &bob, "relay.test", TXID)).await;
+    assert_eq!(recv(&mut a).await["code"], "post_refused");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn txcancel_cancelled_push_live_and_on_attach_then_ack_stops_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut a = txmux(&n, true, &[&alice]).await;
+    let mut b = txmux(&n, true, &[&bob]).await;
+    send(&mut a, post_tx_frame(&alice, "relay.test", &bob, "relay.test", TXID)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    assert_eq!(recv(&mut b).await["type"], "Mail");
+
+    // Live: Bob is attached when Alice cancels.
+    send(&mut a, cancel_frame("c1", &alice, TXID)).await;
+    assert_eq!(recv(&mut a).await["type"], "TransactionCancelled");
+    let c = recv(&mut b).await;
+    assert_eq!(c, json!({"type":"Cancelled","mailbox":bob.pk,"epicboxtxid":TXID}));
+    // A mux session without txcancel/1 gets nothing and the tombstone stays pending.
+    // Reattaching on a new txcancel/1 socket (Attach) delivers it again, before any Mail.
+    let (alice2, other) = (Key::new(), "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+    send(&mut a, post_tx_frame(&alice2, "relay.test", &bob, "relay.test", other)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    let mut b2 = connect(&n).await;
+    recv_type(&mut b2, "Challenge").await;
+    send(&mut b2, json!({"type":"ClientDetails","ext":["mux/1","txcancel/1"]})).await;
+    let ok = recv(&mut b2).await;
+    let ch = ok["challenge"].as_str().unwrap().to_string();
+    send(&mut b2, json!({"type":"Attach","ref":"a","mailboxes":[{"address":bob.pk,"signature":bob.sign(&ch)}]})).await;
+    assert_eq!(recv(&mut b2).await["type"], "Attached");
+    assert_eq!(recv(&mut b2).await, json!({"type":"Cancelled","mailbox":bob.pk,"epicboxtxid":TXID}));
+    let mail = recv(&mut b2).await;
+    assert_eq!(mail["type"], "Mail");
+    assert_eq!(mail["epicboxtxid"], other);
+
+    // Ack: Ok, idempotent, stops redelivery on the next Attach and Resume.
+    let ack = json!({"type":"CancelAck","ref":"k","mailbox":bob.pk,"epicboxtxid":TXID});
+    send(&mut b2, ack.clone()).await;
+    assert_eq!(recv(&mut b2).await, json!({"type":"Ok","ref":"k"}));
+    send(&mut b2, ack).await;
+    assert_eq!(recv(&mut b2).await, json!({"type":"Ok","ref":"k"}));
+    assert!(n.relay.store.pending_cancels(&bob.pk).await.unwrap().is_empty());
+    send(&mut b2, json!({"type":"Ack","ids":[mail["id"]]})).await;
+    assert_eq!(recv(&mut b2).await["type"], "Ok");
+    drop(b2);
+    let mut b3 = txmux(&n, true, &[&bob]).await;
+    send(&mut b3, json!({"type":"Waiting","ref":"w"})).await;
+    assert_eq!(recv(&mut b3).await["ref"], "w", "no Cancelled after the ack");
+    // Bad ack frames and unattached mailboxes.
+    send(&mut b3, json!({"type":"CancelAck","ref":"k2","mailbox":bob.pk,"epicboxtxid":"short"})).await;
+    assert_eq!(recv(&mut b3).await["code"], "bad_frame");
+    send(&mut b3, json!({"type":"CancelAck","ref":"k3","mailbox":alice.pk,"epicboxtxid":TXID})).await;
+    assert_eq!(recv(&mut b3).await, json!({"type":"Ok","ref":"k3"}));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn txcancel_resume_delivers_pending_cancel() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut a = txmux(&n, true, &[&alice]).await;
+    send(&mut a, post_tx_frame(&alice, "relay.test", &bob, "relay.test", TXID)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    let mut b = connect(&n).await;
+    recv_type(&mut b, "Challenge").await;
+    send(&mut b, json!({"type":"ClientDetails","ext":["mux/1","txcancel/1"]})).await;
+    let ch = recv(&mut b).await["challenge"].as_str().unwrap().to_string();
+    send(&mut b, json!({"type":"Attach","mailboxes":[{"address":bob.pk,"signature":bob.sign(&ch)}]})).await;
+    let token = recv(&mut b).await["token"].as_str().unwrap().to_string();
+    assert_eq!(recv(&mut b).await["type"], "Mail");
+    drop(b);
+    // Cancelled while Bob is offline.
+    send(&mut a, cancel_frame("c", &alice, TXID)).await;
+    assert_eq!(recv(&mut a).await["type"], "TransactionCancelled");
+    let mut b2 = connect(&n).await;
+    recv_type(&mut b2, "Challenge").await;
+    send(&mut b2, json!({"type":"ClientDetails","ext":["mux/1","txcancel/1"]})).await;
+    recv(&mut b2).await;
+    send(&mut b2, json!({"type":"Resume","token":token})).await;
+    assert_eq!(recv(&mut b2).await["type"], "Attached");
+    assert_eq!(recv(&mut b2).await, json!({"type":"Cancelled","mailbox":bob.pk,"epicboxtxid":TXID}));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn txcancel_interoperates_with_classic_3_1_0_sockets() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob) = (Key::new(), Key::new());
+
+    // Posted on a classic socket, cancelled over mux; the classic receiver is told.
+    let mut c = connect(&n).await;
+    recv_type(&mut c, "Challenge").await;
+    send(&mut c, post_tx_frame(&alice, "relay.test", &bob, "relay.test", TXID)).await;
+    assert_eq!(recv(&mut c).await["epicboxtxid"], TXID);
+    let mut cb = connect(&n).await;
+    subscribe(&mut cb, &bob, "3.1.0").await;
+    assert_eq!(recv_type(&mut cb, "Slate").await["epicboxtxid"], TXID);
+    let mut a = txmux(&n, true, &[&alice]).await;
+    send(&mut a, cancel_frame("c1", &alice, TXID)).await;
+    assert_eq!(recv(&mut a).await["type"], "TransactionCancelled");
+    assert_eq!(recv_type(&mut cb, "TransactionCancelled").await["epicboxtxid"], TXID);
+
+    // Posted over mux, cancelled on a classic socket; the mux receiver gets Cancelled.
+    let txid2 = "11111111111111111111111111111111";
+    let mut b = txmux(&n, true, &[&bob]).await;
+    send(&mut a, post_tx_frame(&alice, "relay.test", &bob, "relay.test", txid2)).await;
+    assert_eq!(recv(&mut a).await["epicboxtxid"], txid2);
+    let mail = recv(&mut b).await;
+    assert_eq!(mail["type"], "Cancelled", "the first tombstone is still pending: {mail}");
+    assert_eq!(mail["epicboxtxid"], TXID);
+    assert_eq!(recv(&mut b).await["type"], "Mail");
+    send(&mut c, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":txid2,"signature":alice.sign(txid2)})).await;
+    assert_eq!(recv(&mut c).await["type"], "TransactionCancelled");
+    assert_eq!(recv(&mut b).await, json!({"type":"Cancelled","mailbox":bob.pk,"epicboxtxid":txid2}));
+
+    // A mux CancelAck is what a classic re-Subscribe does: the classic socket stops hearing it.
+    send(&mut b, json!({"type":"CancelAck","mailbox":bob.pk,"epicboxtxid":TXID})).await;
+    assert_eq!(recv(&mut b).await["type"], "Ok");
+    send(&mut b, json!({"type":"CancelAck","mailbox":bob.pk,"epicboxtxid":txid2})).await;
+    assert_eq!(recv(&mut b).await["type"], "Ok");
+    let mut cb2 = connect(&n).await;
+    subscribe(&mut cb2, &bob, "3.1.0").await;
+    assert_eq!(recv(&mut cb2).await["type"], "Ok");
+}

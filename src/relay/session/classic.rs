@@ -89,7 +89,17 @@ impl Session {
             .and_then(|e| e.as_array())
             .map(|a| a.iter().any(|x| x.as_str() == Some("mux/1")))
             .unwrap_or(false);
-        if wants_mux && self.relay.cfg.protocol.mux && self.key.is_none() && self.upgrade_to_mux(ws).await {
+        let wants_txcancel = self.relay.cfg.protocol.cancel
+            && msg
+                .get("ext")
+                .and_then(|e| e.as_array())
+                .map(|a| a.iter().any(|x| x.as_str() == Some("txcancel/1")))
+                .unwrap_or(false);
+        if wants_mux
+            && self.relay.cfg.protocol.mux
+            && self.key.is_none()
+            && self.upgrade_to_mux(ws, wants_txcancel).await
+        {
             return;
         }
         self.send(ws, ok()).await;

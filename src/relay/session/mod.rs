@@ -389,6 +389,7 @@ impl Session {
                 }
             }
             Cmd::Detached { mailbox, reason } => self.mux_lost(ws, &mailbox, reason).await,
+            Cmd::MuxCancelled { mailbox, txid } => self.mux_cancelled(ws, &mailbox, &txid).await,
             Cmd::Cancelled { txid } => {
                 if self.ver == Some(Ver::V31) && self.key.is_some() {
                     self.send_cancelled(ws, txid).await;
