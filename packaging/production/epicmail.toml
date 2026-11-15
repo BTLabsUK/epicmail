@@ -26,8 +26,7 @@ allow = []
 # those lets a cancel reach the relay that holds a forwarded slate.
 forward_bare_cancel = true
 
-# The log file is on by default: /var/log/epicmail/epicmail.log at info (no client IPs or addresses;
-# debug and trace add them, set level in [log.file] to opt in), rotated daily, 14 kept.
+# The log file is on by default: /var/log/epicmail/epicmail.log at trace, rotated daily, 14 kept.
 
 [limits]
 # Wallets that come through the onion service appear with Tor's per-circuit addresses

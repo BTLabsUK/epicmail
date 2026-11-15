@@ -221,17 +221,9 @@ fn report(relay: &Relay, reporter: &mut Reporter, interval_s: u64) {
     }
     let threshold = relay.cfg.log.warn_bad_requests;
     for (net, b) in relay.traffic.take_over(if threshold == 0 { u64::MAX } else { threshold }) {
-        // The network prefix is a client address in all but name: it goes to debug, and the
-        // warning (info and up) carries counts only.
-        tracing::debug!(
-            net = %net,
-            bad_signatures = b.bad_signatures,
-            invalid_posts = b.invalid_posts,
-            interval_s,
-            "bad requests by network"
-        );
         crate::sampled!(
             warn,
+            net = %net,
             bad_signatures = b.bad_signatures,
             invalid_posts = b.invalid_posts,
             interval_s,
