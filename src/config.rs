@@ -44,6 +44,8 @@ pub struct Server {
     pub drain_seconds: u64,
     /// Name shown in the info document and status JSON.
     pub name: String,
+    /// Answer a browser's `GET /` with the landing page: what the relay is, with live checks.
+    pub landing_page: bool,
 }
 
 /// `[store]`: the SQLite database.
@@ -276,6 +278,7 @@ impl Default for Server {
             trusted_proxies: vec![],
             drain_seconds: 10,
             name: "epicmail".into(),
+            landing_page: true,
         }
     }
 }

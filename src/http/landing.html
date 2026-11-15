@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta name="description" content="An Epicbox relay for Epic Cash wallets, running epicmail. Live health checks for this relay.">
+<title>Epicbox relay</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231B1813'/%3E%3Cg transform='translate(4 4)' fill='none' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath stroke='%23F5F1E8' d='M21 8.5V7.5A3.5 3.5 0 0 0 17.5 4h-11A3.5 3.5 0 0 0 3 7.5v9A3.5 3.5 0 0 0 6.5 20h11a3.5 3.5 0 0 0 3.5-3.5'/%3E%3Cpath stroke='%237FA8FF' d='M3 8.5L12 14L21 8.5'/%3E%3C/g%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#F5F1E8; --fg:#1D1A14; --mute:#655F52; --hair:rgba(29,26,20,.14); --card:#FCFAF5; --well:#ECE7DA;
+  --acc:#2B55C7; --ok:#1C7A4B; --warn:#96600A; --bad:#B3261E; --idle:#B3AC9C;
+  --mono:"Red Hat Mono",ui-monospace,"SF Mono","Cascadia Mono",Consolas,"Liberation Mono",monospace;
+  --text:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#1B1813; --fg:#F5F1E8; --mute:#A69F8F; --hair:rgba(245,241,232,.13); --card:#231F19; --well:#14120E;
+    --acc:#7FA8FF; --ok:#6FD09A; --warn:#F0BE5A; --bad:#FF8F85; --idle:#6B6558;
+  }
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:400 16px/1.55 var(--text);-webkit-font-smoothing:antialiased}
+h1,h2,h3,p,dl,dd,ul{margin:0;padding:0}
+ul{list-style:none}
+a{color:inherit}
+::selection{background:var(--acc);color:var(--bg)}
+.page{max-width:940px;margin:0 auto;padding:28px 20px 56px;display:flex;flex-direction:column;gap:56px}
+.eyebrow,.lab{font:500 11px/1.4 var(--mono);letter-spacing:.09em;text-transform:uppercase;color:var(--mute)}
+
+/* Top bar */
+.top{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.lockup{height:30px;width:auto;display:block}
+.lockup .flap{stroke:var(--acc)}
+.top .where{font:500 13px/1.3 var(--mono);color:var(--mute);text-align:right;overflow-wrap:anywhere}
+
+/* Status */
+.status{display:flex;flex-direction:column;gap:28px}
+.hero{--state:var(--idle);padding-top:20px}
+.hero[data-state=ok]{--state:var(--ok)}
+.hero[data-state=warn]{--state:var(--warn)}
+.hero[data-state=bad]{--state:var(--bad)}
+.lamp{flex:none;position:relative;width:12px;height:12px;border-radius:50%;background:var(--state);transition:background .3s}
+.lamp::after{content:"";position:absolute;inset:-6px;border-radius:50%;border:2px solid var(--state);opacity:0;animation:ring 2.6s ease-out infinite}
+@keyframes ring{0%{transform:scale(.55);opacity:.55}100%{transform:scale(1.55);opacity:0}}
+.hero .eyebrow{display:flex;align-items:center;gap:12px;margin-bottom:14px;padding-left:5px}
+h1{font:650 clamp(34px,6.4vw,62px)/1.04 var(--text);letter-spacing:-.035em;text-wrap:balance}
+.sub{margin-top:14px;color:var(--mute);font-size:17px;max-width:56ch;text-wrap:pretty}
+
+.checks{background:var(--card);border:1px solid var(--hair);border-radius:14px;overflow:hidden}
+.check{--state:var(--idle);display:grid;grid-template-columns:12px minmax(0,1fr) auto 104px;gap:4px 20px;align-items:center;padding:19px 22px;border-top:1px solid var(--hair)}
+.check:first-child{border-top:0}
+.check[data-state=ok]{--state:var(--ok)}
+.check[data-state=warn]{--state:var(--warn)}
+.check[data-state=bad]{--state:var(--bad)}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--state);transition:background .3s}
+.check h3{font:600 16px/1.3 var(--text)}
+.check p{color:var(--mute);font-size:14px;line-height:1.45}
+.ticks{display:flex;gap:3px;align-items:center}
+.ticks i{width:4px;height:20px;border-radius:2px;background:var(--hair)}
+.ticks i.ok{background:var(--ok)}
+.ticks i.warn{background:var(--warn)}
+.ticks i.bad{background:var(--bad)}
+.res{text-align:right;font:500 13px/1.35 var(--mono);white-space:nowrap}
+.res b{display:block;font-weight:700;color:var(--state)}
+.check[data-state=idle] .res b{color:var(--mute);font-weight:500}
+.res span{color:var(--mute)}
+.foot{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;justify-content:space-between;padding:13px 22px;border-top:1px solid var(--hair);background:var(--well);font:500 12px/1.4 var(--mono);color:var(--mute)}
+button{font:500 12px/1 var(--mono);letter-spacing:.04em;color:var(--fg);background:transparent;border:1px solid var(--hair);border-radius:999px;padding:8px 14px;cursor:pointer}
+button:hover{border-color:var(--fg)}
+button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset:3px}
+button:disabled{opacity:.5;cursor:default}
+
+/* Sections */
+section{display:flex;flex-direction:column;gap:20px}
+h2{font:650 26px/1.15 var(--text);letter-spacing:-.02em}
+.lead{max-width:62ch;font-size:17px;text-wrap:pretty}
+.lead + .lead{margin-top:-6px}
+.facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border:1px solid var(--hair);border-radius:14px;overflow:hidden;background:var(--card)}
+.facts div{padding:17px 22px;border-top:1px solid var(--hair);min-width:0}
+.facts div:nth-child(-n+2){border-top:0}
+.facts div:nth-child(odd){border-right:1px solid var(--hair)}
+.facts dt{margin-bottom:6px}
+.facts dd{font:500 17px/1.35 var(--mono);overflow-wrap:anywhere}
+.facts dd.plain{font:400 15px/1.45 var(--text)}
+.points{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:28px}
+.points li{border-top:2px solid var(--fg);padding-top:14px}
+.points h3{font:600 17px/1.3 var(--text);margin:6px 0 6px}
+.points p{color:var(--mute);font-size:15px;text-wrap:pretty}
+.links{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.links a{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 16px;align-items:center;padding:18px 22px;border:1px solid var(--hair);border-radius:14px;background:var(--card);text-decoration:none;transition:border-color .15s}
+.links a:hover{border-color:var(--fg)}
+.links b{font:600 17px/1.3 var(--text)}
+.links span{grid-column:1;font:500 13px/1.4 var(--mono);color:var(--mute);overflow-wrap:anywhere}
+.links svg{grid-column:2;grid-row:1/3;width:20px;height:20px;color:var(--acc)}
+footer{border-top:1px solid var(--hair);padding-top:18px;display:flex;flex-wrap:wrap;gap:6px 24px;justify-content:space-between;font-size:13px;color:var(--mute)}
+
+@media (max-width:700px){
+  .page{gap:44px;padding-top:20px}
+  .check{grid-template-columns:12px minmax(0,1fr) auto;padding:17px 16px}
+  .ticks{grid-column:2/4;grid-row:2;margin-top:8px;overflow:hidden}
+  .res{grid-column:3;grid-row:1}
+  .foot{padding:12px 16px}
+  .facts,.points,.links{grid-template-columns:minmax(0,1fr)}
+  .facts div{border-right:0!important;padding:15px 16px}
+  .facts div:nth-child(2){border-top:1px solid var(--hair)}
+  .points{gap:22px}
+}
+@media (prefers-reduced-motion:reduce){
+  .lamp::after{animation:none}
+  *{transition:none!important}
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+<header class="top">
+<svg class="lockup" viewBox="-8 19 573 110" role="img" aria-label="epicmail"><g transform="translate(-7.3 19.7) scale(3.65)" fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path stroke="currentColor" d="M21 8.5V7.5A3.5 3.5 0 0 0 17.5 4h-11A3.5 3.5 0 0 0 3 7.5v9A3.5 3.5 0 0 0 6.5 20h11a3.5 3.5 0 0 0 3.5-3.5"/><path class="flap" d="M3 8.5L12 14L21 8.5"/></g><path fill="currentColor" d="M126.5 101Q118.7 101 112.5 97.5Q106.2 93.9 102.5 87.8Q98.8 81.8 98.8 74.3Q98.8 66.7 102.3 60.7Q105.8 54.7 111.8 51.1Q117.8 47.6 125.3 47.6Q133.1 47.6 139.1 51.1Q145 54.6 148.3 60.8Q151.7 66.9 151.7 74.9V78.4H114.7Q115.5 81.3 117.3 83.5Q119.1 85.7 121.7 86.9Q124.3 88.1 127.3 88.1Q130.8 88.1 133.7 86.8Q136.5 85.5 138.4 83.1L148.8 92.4Q143.9 97.1 138.6 99Q133.2 101 126.5 101ZM114.8 69.2H136.7Q136 66.3 134.5 64.3Q133 62.3 130.8 61.2Q128.6 60.2 125.8 60.2Q123.1 60.2 120.8 61.2Q118.6 62.3 117.1 64.3Q115.6 66.3 114.8 69.2ZM158.9 120.9V48.4H174.5V53.4Q177 50.6 180.2 49.1Q183.3 47.6 187 47.6Q193.3 47.6 198.5 51.1Q203.7 54.6 206.8 60.6Q209.9 66.6 209.9 74.2Q209.9 81.7 206.8 87.8Q203.7 93.8 198.5 97.3Q193.3 100.8 187 100.8Q183.6 100.8 180.6 99.4Q177.5 98.1 175.1 95.7V120.9ZM183.2 88Q186.6 88 189 86.3Q191.4 84.6 192.7 81.4Q194 78.3 194 74.2Q194 70 192.7 66.9Q191.4 63.8 189 62.1Q186.6 60.4 183.2 60.4Q180.9 60.4 178.9 61.2Q176.8 62.1 175.1 63.6V84.8Q176.8 86.3 178.9 87.2Q180.9 88 183.2 88ZM241.1 40.6Q236.9 40.6 233.9 37.6Q230.9 34.6 230.9 30.4Q230.9 26.2 233.9 23.2Q236.9 20.2 241.1 20.2Q245.3 20.2 248.3 23.2Q251.3 26.2 251.3 30.4Q251.3 34.6 248.3 37.6Q245.3 40.6 241.1 40.6ZM254.7 101Q244 101 238.5 95.9Q233 90.8 233 80.8V60.9H215.2V48.4H249.2V79.1Q249.2 83.4 251.3 85.4Q253.4 87.4 258 87.4Q260.2 87.4 262.2 87Q264.3 86.6 266.8 85.6V98.7Q265.2 99.5 261.6 100.2Q258 101 254.7 101ZM300.9 101Q292.9 101 286.5 97.5Q280.1 93.9 276.4 87.8Q272.7 81.8 272.7 74.3Q272.7 66.7 276.4 60.7Q280.1 54.7 286.5 51.1Q292.9 47.6 300.9 47.6Q309 47.6 315.5 51Q322 54.4 325.6 60L313.4 68.9Q311.7 65.4 308.4 63.4Q305.1 61.4 301 61.4Q297.5 61.4 294.7 63.1Q292 64.8 290.4 67.7Q288.8 70.6 288.8 74.3Q288.8 78 290.4 80.9Q292 83.8 294.7 85.5Q297.5 87.2 301 87.2Q305.1 87.2 308.4 85.2Q311.7 83.1 313.4 79.7L325.6 88.6Q322 94.2 315.5 97.6Q309 101 300.9 101ZM330.2 100V48.4H343.4V52.7Q345.2 50.2 347.4 48.9Q349.5 47.6 352.1 47.6Q355.3 47.6 357.9 49.2Q360.4 50.8 361.8 53.7Q363.8 50.7 366.5 49.1Q369.1 47.6 372.4 47.6Q377.4 47.6 380.6 51.2Q383.8 54.9 383.8 60.7V100H370.6V65Q370.6 62.4 369.5 60.8Q368.4 59.3 366.4 59.3Q365.6 59.3 364.9 59.5Q364.2 59.8 363.6 60.3Q363.6 60.6 363.6 61Q363.6 61.3 363.6 61.7V100H350.4V65Q350.4 62.4 349.3 60.8Q348.2 59.3 346.2 59.3Q345.5 59.3 344.8 59.5Q344.1 59.7 343.4 60.2V100ZM407.5 100.8Q402.3 100.8 398.2 98.8Q394.2 96.8 391.9 93.3Q389.7 89.8 389.7 85.2Q389.7 80.4 392.1 77.1Q394.5 73.7 399 72Q403.5 70.2 409.8 70.2Q412.6 70.2 415.5 70.8Q418.4 71.4 421.8 72.8V68.4Q421.8 64.6 419.3 62.8Q416.8 60.9 411.6 60.9Q408.7 60.9 405.1 61.8Q401.6 62.8 397.1 64.7L391.3 53.2Q397.8 50.3 403.6 48.9Q409.5 47.6 415.2 47.6Q425.9 47.6 431.9 52.7Q437.8 57.8 437.8 67V100H421.8V95.1Q418.4 98.1 415 99.4Q411.6 100.8 407.5 100.8ZM404.6 84.9Q404.6 87.4 406.7 88.8Q408.8 90.1 412.5 90.1Q415.1 90.1 417.5 89.3Q419.8 88.6 421.8 87.2V81.1Q419.6 80.5 417.4 80.2Q415.1 79.8 412.9 79.8Q409 79.8 406.8 81.1Q404.6 82.4 404.6 84.9ZM473.1 40.6Q468.9 40.6 465.9 37.6Q462.9 34.6 462.9 30.4Q462.9 26.2 465.9 23.2Q468.9 20.2 473.1 20.2Q477.3 20.2 480.3 23.2Q483.3 26.2 483.3 30.4Q483.3 34.6 480.3 37.6Q477.3 40.6 473.1 40.6ZM486.7 101Q476 101 470.5 95.9Q465 90.8 465 80.8V60.9H447.2V48.4H481.2V79.1Q481.2 83.4 483.3 85.4Q485.4 87.4 490 87.4Q492.2 87.4 494.2 87Q496.3 86.6 498.8 85.6V98.7Q497.2 99.5 493.6 100.2Q490 101 486.7 101ZM543.2 101Q532.5 101 527 95.9Q521.5 90.8 521.5 80.8V39.8H503.7V27.3H537.7V79.1Q537.7 83.4 539.8 85.4Q541.9 87.4 546.5 87.4Q548.7 87.4 550.8 87Q552.8 86.6 555.3 85.6V98.7Q553.7 99.5 550.1 100.2Q546.5 101 543.2 101Z"/></svg>
+<p class="where" id="where"></p>
+</header>
+
+<main class="status">
+  <div class="hero" id="hero" data-state="idle">
+    <p class="eyebrow"><span class="lamp" aria-hidden="true"></span>Epicbox relay</p>
+    <h1 id="headline" aria-live="polite">Checking this relay</h1>
+    <p class="sub" id="sub">Three checks run from this browser.</p>
+  </div>
+
+  <div class="checks">
+    <div class="check" id="c-health" data-state="idle">
+      <span class="dot" aria-hidden="true"></span>
+      <div><h3>Relay answers</h3><p>The service is running and answers requests.</p></div>
+      <div class="ticks" aria-hidden="true"></div>
+      <div class="res"><b>Waiting</b><span></span></div>
+    </div>
+    <div class="check" id="c-ready" data-state="idle">
+      <span class="dot" aria-hidden="true"></span>
+      <div><h3>Storage ready</h3><p>New payments can be saved until they are collected.</p></div>
+      <div class="ticks" aria-hidden="true"></div>
+      <div class="res"><b>Waiting</b><span></span></div>
+    </div>
+    <div class="check" id="c-socket" data-state="idle">
+      <span class="dot" aria-hidden="true"></span>
+      <div><h3>Wallet connection</h3><p>A wallet can open a live connection to this relay.</p></div>
+      <div class="ticks" aria-hidden="true"></div>
+      <div class="res"><b>Waiting</b><span></span></div>
+    </div>
+    <div class="foot">
+      <span id="when">Each bar is one check since this page was opened.</span>
+      <button type="button" id="again">Check now</button>
+    </div>
+  </div>
+  <noscript><p class="sub">The live checks need JavaScript. Without it, open /health and /ready on this address.</p></noscript>
+</main>
+
+<section>
+  <h2>Use this relay in a wallet</h2>
+  <p class="lead">Enter these two values in the Epicbox settings of an Epic Cash wallet.</p>
+  <dl class="facts">
+    <div><dt class="lab">Epicbox domain</dt><dd id="domain">&hellip;</dd></div>
+    <div><dt class="lab">Port</dt><dd id="port">&hellip;</dd></div>
+    <div><dt class="lab">Epicbox versions</dt><dd id="versions">&hellip;</dd></div>
+    <div><dt class="lab">Other relays</dt><dd class="plain" id="fed">&hellip;</dd></div>
+  </dl>
+</section>
+
+<section>
+  <h2>What this is</h2>
+  <p class="lead">Two Epic Cash wallets build a payment together. When they are not online at the same time, an Epicbox relay holds the payment, encrypted, until the receiving wallet collects it. This server is one of those relays.</p>
+  <p class="lead">It runs epicmail, an Epicbox relay written in Rust. The relay stores and passes on encrypted messages only. It never holds funds.</p>
+  <ul class="points">
+    <li><span class="lab">01</span><h3>Known issues fixed</h3><p>Problems found in earlier Epicbox relays are fixed. Wallets in use today connect without changes.</p></li>
+    <li><span class="lab">02</span><h3>Hardened</h3><p>Stronger security and network handling. Every input has a limit, and logs never hold keys or payments.</p></li>
+    <li><span class="lab">03</span><h3>Ready for lepic</h3><p>Built to support the features of the lepic engine.</p></li>
+  </ul>
+</section>
+
+<section>
+  <h2>More</h2>
+  <div class="links">
+    <a href="https://github.com/BTLabsUK/epicmail" rel="noopener noreferrer">
+      <b>Source code</b><span>github.com/BTLabsUK/epicmail</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M9 7h8v8"/></svg>
+    </a>
+    <a href="https://status.btlabs.uk" rel="noopener noreferrer">
+      <b>Network status</b><span>status.btlabs.uk</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M9 7h8v8"/></svg>
+    </a>
+  </div>
+</section>
+
+<footer>
+  <span>epicmail &middot; open source under Apache-2.0</span>
+  <span>This page comes from the relay itself and loads nothing from other sites.</span>
+</footer>
+
+</div>
+<script>
+(() => {
+  'use strict';
+  const TIMEOUT_MS = 8000, EVERY_S = 30, SLOTS = 24;
+  const $ = id => document.getElementById(id);
+  const NAMES = { health: 'Relay answers', ready: 'Storage ready', socket: 'Wallet connection' };
+  const history = { health: [], ready: [], socket: [] };
+  let busy = false, left = EVERY_S, lastAt = null;
+
+  // A failed check carries the words to show.
+  const fail = label => ({ label });
+
+  async function get(path) {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), TIMEOUT_MS);
+    try {
+      return await fetch(path, { cache: 'no-store', credentials: 'omit', signal: c.signal });
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  const CHECKS = {
+    async health() {
+      const r = await get('/health');
+      if (!r.ok || (await r.text()).trim() !== 'ok') throw fail('No answer');
+      return ['ok', 'Answering'];
+    },
+    async ready() {
+      const r = await get('/ready');
+      let j = {};
+      try { j = await r.json(); } catch (_) { /* not JSON: not ready */ }
+      if (r.ok && j.ready === true) return ['ok', 'Ready'];
+      if (j.reason === 'draining') return ['warn', 'Restarting'];
+      throw fail(j.reason === 'store' ? 'Storage problem' : 'Not ready');
+    },
+    socket() {
+      return new Promise((resolve, reject) => {
+        let ws, done = false;
+        const end = (f, v) => {
+          if (done) return;
+          done = true;
+          clearTimeout(t);
+          try { ws.close(); } catch (_) { /* never opened */ }
+          f(v);
+        };
+        const t = setTimeout(() => end(reject, fail('No answer')), TIMEOUT_MS);
+        try {
+          ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/');
+        } catch (_) {
+          return end(reject, fail('No connection'));
+        }
+        // The relay greets every new socket with a Challenge.
+        ws.onmessage = e => {
+          let m = null;
+          try { m = JSON.parse(e.data); } catch (_) { /* not a relay frame */ }
+          if (m && m.type === 'Challenge') end(resolve, ['ok', 'Connected']);
+          else end(reject, fail('Unexpected answer'));
+        };
+        ws.onerror = () => end(reject, fail('No connection'));
+        ws.onclose = () => end(reject, fail('No connection'));
+      });
+    },
+  };
+
+  function paint(r) {
+    const row = $('c-' + r.id);
+    row.dataset.state = r.state;
+    const res = row.querySelector('.res');
+    res.firstElementChild.textContent = r.label;
+    res.lastElementChild.textContent = r.ms == null ? '' : Math.max(1, Math.round(r.ms)) + ' ms';
+    const h = history[r.id];
+    h.push(r.state);
+    if (h.length > SLOTS) h.shift();
+    const ticks = row.querySelector('.ticks');
+    for (let i = 0; i < SLOTS; i++) ticks.children[i].className = h[i - (SLOTS - h.length)] || '';
+  }
+
+  function clock(d) {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  function summary(results) {
+    const bad = results.filter(r => r.state === 'bad');
+    const warn = results.some(r => r.state === 'warn');
+    const at = clock(lastAt);
+    let state, head, sub;
+    if (bad.length === results.length) {
+      state = 'bad';
+      head = 'This relay is not answering';
+      sub = 'None of the ' + results.length + ' checks got an answer at ' + at + '.';
+    } else if (bad.length) {
+      state = 'bad';
+      head = 'This relay has a problem';
+      sub = 'Failed at ' + at + ': ' + bad.map(r => NAMES[r.id]).join(', ') + '.';
+    } else if (warn) {
+      state = 'warn';
+      head = 'This relay is restarting';
+      sub = 'It should be back within a minute. Wallets reconnect on their own.';
+    } else {
+      state = 'ok';
+      head = 'This relay is working';
+      sub = 'All ' + results.length + ' checks passed at ' + at + '.';
+    }
+    $('hero').dataset.state = state;
+    $('headline').textContent = head;
+    $('sub').textContent = sub;
+  }
+
+  function when() {
+    if (!lastAt) return;
+    $('when').textContent = busy ? 'Checking…' : 'Last check ' + clock(lastAt) + ' · next in ' + left + ' s';
+  }
+
+  async function round() {
+    if (busy) return;
+    busy = true;
+    $('again').disabled = true;
+    when();
+    const results = await Promise.all(Object.keys(CHECKS).map(async id => {
+      const t0 = performance.now();
+      try {
+        const [state, label] = await CHECKS[id]();
+        return { id, state, label, ms: performance.now() - t0 };
+      } catch (e) {
+        return { id, state: 'bad', label: (e && e.label) || 'No answer', ms: null };
+      }
+    }));
+    lastAt = new Date();
+    results.forEach(paint);
+    summary(results);
+    busy = false;
+    left = EVERY_S;
+    $('again').disabled = false;
+    when();
+  }
+
+  // What the relay publishes about itself: the address wallets use, versions, federation.
+  async function info() {
+    let j;
+    try {
+      const r = await get('/.well-known/epicbox.json');
+      if (!r.ok) return;
+      j = await r.json();
+    } catch (_) {
+      return;
+    }
+    const id = String(j.identity || '');
+    const cut = id.lastIndexOf(':');
+    const domain = cut > 0 ? id.slice(0, cut) : id;
+    if (domain) {
+      $('domain').textContent = domain;
+      $('port').textContent = cut > 0 ? id.slice(cut + 1) : '443';
+      $('where').textContent = j.name && j.name !== 'epicmail' && j.name !== domain ? j.name + ' · ' + domain : domain;
+      document.title = domain + ' · Epicbox relay';
+    }
+    if (Array.isArray(j.protocol_versions)) $('versions').textContent = j.protocol_versions.join(' · ');
+    $('fed').textContent = j.federation
+      ? 'Connected. Payments reach wallets on other Epicbox relays.'
+      : 'Not connected. This relay serves its own wallets only.';
+  }
+
+  for (const id of Object.keys(history)) {
+    const ticks = $('c-' + id).querySelector('.ticks');
+    for (let i = 0; i < SLOTS; i++) ticks.appendChild(document.createElement('i'));
+  }
+  $('where').textContent = location.hostname;
+  $('again').addEventListener('click', round);
+  setInterval(() => {
+    if (document.hidden || busy || !lastAt) return;
+    left -= 1;
+    if (left <= 0) round();
+    else when();
+  }, 1000);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && lastAt && Date.now() - lastAt.getTime() > EVERY_S * 1000) round();
+  });
+  info();
+  round();
+})();
+</script>
+</body>
+</html>

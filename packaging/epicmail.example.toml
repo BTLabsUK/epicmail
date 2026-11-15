@@ -10,6 +10,7 @@ aliases = []                     # other "domain" or "domain:port" names that me
 trusted_proxies = ["127.0.0.1/32"]  # default []; peers whose X-Forwarded-For is trusted (your reverse proxy)
 drain_seconds = 10               # seconds a SIGTERM drain waits for sockets to close
 name = "epicmail"                # name shown in the info document and status.json
+landing_page = true              # answer a browser's GET / with a page: what the relay is, with live checks
 
 [store]
 path = "epicmail.db"             # SQLite file; /var/lib/epicmail/... under systemd, /data/... in Docker

@@ -225,6 +225,7 @@ For clients that cannot hold a websocket. The client makes its own challenge,
 | `/metrics` | Prometheus, names start with `epicbox_`; loopback or `server.metrics_listen` only |
 | `/status.json` | Public totals, no per-address data |
 | `/.well-known/epicbox.json` | Software, identity, protocols, features and client limits (no version, no per-IP limits) |
+| `/` in a browser | A page for people: what the relay is, live checks, the domain and port for a wallet (`server.landing_page`) |
 
 ## Transaction cancel (3.1.0)
 
