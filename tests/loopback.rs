@@ -425,9 +425,36 @@ async fn https_post_pull_made() {
     assert!(wk["protocol_versions"].as_array().unwrap().iter().any(|v| v == "3.1.0"), "{wk}");
     assert_discovery_shape(&wk);
 
+    let (st, info) = http(&n, "GET", "/v1/info", None).await;
+    assert_eq!(st, 200);
+    assert_info_shape(&info);
+
     let (st, status) = http(&n, "GET", "/status.json", None).await;
     assert_eq!(st, 200);
     assert!(status.get("version").is_none(), "{status}");
+}
+
+/// `/v1/info` lists what clients need and omits the per-IP abuse thresholds.
+fn assert_info_shape(info: &Value) {
+    let mut keys: Vec<&str> = info.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "challenge",
+            "challenge_single_use",
+            "epicbox_protocol",
+            "federation",
+            "identity",
+            "max_mailboxes_per_pull",
+            "max_messages_per_mailbox",
+            "max_wait_seconds",
+            "max_waiting_pulls_per_ip",
+            "protocol",
+            "redeliver_after_seconds"
+        ],
+        "{info}"
+    );
 }
 
 /// The discovery document keeps what clients read and omits the exact version and the per-IP

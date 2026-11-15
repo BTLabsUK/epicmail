@@ -52,7 +52,6 @@ pub(super) async fn info(State(st): State<AppState>) -> Response {
             "max_messages_per_mailbox": h.max_per_mailbox,
             "max_wait_seconds": h.max_wait_s,
             "redeliver_after_seconds": h.lease_s,
-            "mailboxes_and_acks_per_min_per_ip": cfg.limits.http_per_min_per_ip,
             "max_waiting_pulls_per_ip": h.max_waiting_per_ip,
         }),
     )
