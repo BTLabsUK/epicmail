@@ -1,7 +1,8 @@
 //! HTTP: the websocket upgrade (any path, as the stock relay), health and readiness, metrics,
-//! a status document, the info document, the HTTPS mailbox API (`v1.rs`) and the test stall
-//! knob.
+//! a status document, the info document, the page a browser gets at `/` (`landing.rs`), the
+//! HTTPS mailbox API (`v1.rs`) and the test stall knob.
 
+mod landing;
 mod v1;
 
 use std::net::{IpAddr, SocketAddr};
@@ -13,7 +14,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -120,6 +121,7 @@ async fn fallback(
     State(st): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     method: Method,
+    uri: Uri,
     headers: HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
@@ -127,6 +129,10 @@ async fn fallback(
     let ws = match ws {
         Ok(ws) => ws,
         Err(_) if method == Method::GET => {
+            if relay.cfg.server.landing_page && uri.path() == "/" && landing::wanted(&headers) {
+                count("landing", StatusCode::OK);
+                return landing::page();
+            }
             return (StatusCode::OK, "Epicbox relay. Connect with a websocket.\n").into_response();
         }
         Err(_) => return StatusCode::NOT_FOUND.into_response(),

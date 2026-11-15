@@ -1766,3 +1766,41 @@ async fn txcancel_interoperates_with_classic_3_1_0_sockets() {
     subscribe(&mut cb2, &bob, "3.1.0").await;
     assert_eq!(recv(&mut cb2).await["type"], "Ok");
 }
+
+/// A raw GET with an Accept header; returns the head and the body.
+async fn get_as(n: &Node, path: &str, accept: &str) -> (String, String) {
+    let mut s = TcpStream::connect(n.addr).await.unwrap();
+    let req = format!("GET {path} HTTP/1.1\r\nHost: test\r\nAccept: {accept}\r\nConnection: close\r\n\r\n");
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut out = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), s.read_to_end(&mut out)).await.unwrap().unwrap();
+    let text = String::from_utf8_lossy(&out);
+    let (head, body) = text.split_once("\r\n\r\n").unwrap();
+    (head.to_ascii_lowercase(), body.to_string())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_browser_gets_the_landing_page_and_nothing_else_changes() {
+    const PLAIN: &str = "Epicbox relay. Connect with a websocket.\n";
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (head, body) = get_as(&n, "/", "text/html,application/xhtml+xml,*/*;q=0.8").await;
+    assert!(head.starts_with("http/1.1 200"), "{head}");
+    assert!(head.contains("content-type: text/html; charset=utf-8"), "{head}");
+    assert!(head.contains("content-security-policy: default-src 'none'; script-src 'sha256-"), "{head}");
+    assert!(body.contains("<title>Epicbox relay</title>") && body.contains("/.well-known/epicbox.json"));
+    // Anything that is not a browser asking for `/` gets the one line it always got.
+    for (path, accept) in [("/", "*/*"), ("/other", "text/html"), ("/favicon.ico", "text/html")] {
+        let (head, body) = get_as(&n, path, accept).await;
+        assert!(head.starts_with("http/1.1 200") && head.contains("content-type: text/plain"), "{path}: {head}");
+        assert_eq!(body, PLAIN, "{path}");
+    }
+    // A websocket on `/` still opens with the first Challenge, which is what the page checks.
+    let mut ws = connect(&n).await;
+    assert_eq!(recv(&mut ws).await["type"], "Challenge");
+
+    let off = start(dir.path(), "off.test", |c| c.server.landing_page = false).await;
+    let (head, body) = get_as(&off, "/", "text/html").await;
+    assert!(head.contains("content-type: text/plain"), "{head}");
+    assert_eq!(body, PLAIN);
+}
