@@ -423,4 +423,4 @@ tools/ship --publish X.Y.Z       # sign and create the GitHub release
 
 `--release` also copies `tools/install.sh` and the two packaging files `get.sh` uses into the staged files and lists them in `SHA256SUMS`, so `get.sh` can check them.
 
-`--publish` signs `SHA256SUMS` with the minisign key in `SHIP_MINISIGN_KEY`, checks the signature against the public key pinned in `tools/get.sh`, checks every hash and runs `gh release create`. Nothing is published by `--release`.
+`--publish` signs `SHA256SUMS` with the BT Labs key (`~/.config/btlabs/signing/btlabs-2026-a.key`, or `SHIP_SIGN_KEY`) through `tools/ship-sign.py`, checks the signature against the public key pinned in `tools/get.sh`, checks every hash and runs `gh release create`. Nothing is published by `--release`.
