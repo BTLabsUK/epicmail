@@ -113,7 +113,9 @@ when to retry: in the error text on websockets, in `Retry-After` on `/v1`.
 
 ## Background tasks
 
-`main.rs` starts the forward manager and one housekeeping loop:
+`main.rs` starts the forward manager, the traffic report (`traffic.rs`: a log summary every
+`log.summary_interval_s` when something changed, and a warning for a network prefix with many bad
+requests) and one housekeeping loop:
 
 - every 15 s: the gauges (waiting messages and mailboxes, oldest message and forward, listening
   mailboxes, mux/1 holders and tokens, database size, store health);
@@ -137,7 +139,8 @@ for which metrics to watch first.
 `logging.rs` sets up `tracing` and holds the helpers every log line uses: `short` and
 `short_addr` cut keys and addresses to their first and last six characters, `clean` strips
 control characters from text that came from outside, and the `sampled!` macro limits a call
-site to 10 lines a minute with a `suppressed` count. The policy (levels, fields, what is never
+site to 10 lines a minute with a `suppressed` count (`KeyedGate` does the same per key, such as
+a peer relay). `traffic.rs` keeps the counts behind the traffic summary. The policy (levels, fields, what is never
 logged, rotation) is in `docs/operating.md`, section 8.
 
 ## Ideas not built

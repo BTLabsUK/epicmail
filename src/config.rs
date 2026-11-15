@@ -210,6 +210,12 @@ pub struct Log {
     pub format: String,
     /// tracing filter, e.g. "info" or "epicmail=debug".
     pub level: String,
+    /// Seconds between traffic summaries at info. A summary is written only when something
+    /// changed since the last one.
+    pub summary_interval_s: u64,
+    /// Bad signatures, or invalid posts, from one network prefix in one summary interval above
+    /// which a warning names the prefix. 0: never.
+    pub warn_bad_requests: u64,
 }
 
 /// `[test]`: switches for test rigs.
@@ -329,7 +335,7 @@ impl Default for HttpApi {
 
 impl Default for Log {
     fn default() -> Self {
-        Self { format: "text".into(), level: "info".into() }
+        Self { format: "text".into(), level: "info".into(), summary_interval_s: 300, warn_bad_requests: 30 }
     }
 }
 
@@ -377,6 +383,9 @@ impl Config {
         }
         if let Err(e) = tracing_subscriber::EnvFilter::try_new(&self.log.level) {
             bail!("log.level is not a valid filter: {e}");
+        }
+        if !(1..=86_400).contains(&self.log.summary_interval_s) {
+            bail!("log.summary_interval_s must be 1 to 86400");
         }
         for (k, v) in &self.federation.peers {
             if !(v.starts_with("ws://") || v.starts_with("wss://")) {
@@ -459,7 +468,7 @@ mod tests {
     #[test]
     fn defaults_validate_and_bad_values_are_refused() {
         base().validate().unwrap();
-        let cases: [fn(&mut Config); 10] = [
+        let cases: [fn(&mut Config); 11] = [
             |c| c.server.domain.clear(),
             |c| c.store.vacuum_hour_utc = 24,
             |c| c.store.readers = 0,
@@ -467,6 +476,7 @@ mod tests {
             |c| c.limits.http_per_min_per_ip = 10,
             |c| c.log.format = "jsn".into(),
             |c| c.log.level = "epicmail=loud".into(),
+            |c| c.log.summary_interval_s = 0,
             |c| {
                 c.federation.peers.insert("a.example:443".into(), "http://a.example".into());
             },

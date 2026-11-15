@@ -247,6 +247,7 @@ pub(super) async fn pull(
         }
     }
     let keys: HashSet<String> = proven.iter().filter_map(|p| p.key.clone().ok()).collect();
+    relay.traffic.add(crate::traffic::Count::LoginsOk, keys.len() as u64);
     let lease_ms = (h.lease_s.max(1) * 1000) as i64;
 
     // A long poll registers before the first claim, so a message stored in between still
@@ -348,6 +349,7 @@ async fn claim_round(
         found += msgs.len();
         if !msgs.is_empty() {
             metrics::counter!("epicbox_deliveries_total", "mode" => "https").increment(msgs.len() as u64);
+            relay.traffic.add(crate::traffic::Count::Delivered, msgs.len() as u64);
         }
         let msgs: Vec<Value> = msgs.into_iter().map(message_json).collect();
         results.push(json!({"address": p.address, "messages": msgs}));
@@ -423,6 +425,7 @@ pub(super) async fn made(
     };
     if removed > 0 {
         metrics::counter!("epicbox_made_total", "mode" => "https").increment(removed);
+        relay.traffic.add(crate::traffic::Count::Acked, removed);
         relay.registry.wake(&key);
     }
     reply(R, StatusCode::OK, json!({"removed": removed, "refused": refused}))

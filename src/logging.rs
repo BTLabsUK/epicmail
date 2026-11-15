@@ -3,9 +3,13 @@
 //! The policy (also in docs/operating.md, "Logging"):
 //!
 //! - `error`: the relay cannot do its job (store writes failing, a listener stopped).
-//! - `warn`: something outside the relay misbehaves (a peer relay unreachable or refusing).
-//! - `info`: lifecycle (start, drain, stop), expiry sweeps that removed something, and limits
-//!   that refused a request, with the client's network prefix so an operator can act on abuse.
+//! - `warn`: something outside the relay misbehaves (a peer relay unreachable or refusing), or
+//!   one network prefix sent more bad signatures or invalid posts in a summary interval than
+//!   `log.warn_bad_requests`.
+//! - `info`: lifecycle (start, drain, stop); a traffic summary every `log.summary_interval_s`
+//!   when something changed ([`crate::traffic`]); expiry sweeps that removed messages, forwards
+//!   or cancel records; forwards delivered, per peer relay; and limits that refused a request,
+//!   with the client's network prefix so an operator can act on abuse.
 //! - `debug`: one line per post, subscribe, cancel, attach and socket, for tracing a problem.
 //!
 //! Lines that can repeat under load or attack go through [`sampled!`](crate::sampled): at most
@@ -16,6 +20,7 @@
 //! names, network prefixes (never a full client IP) and counts. Never: full addresses or keys,
 //! slates, signatures, challenges, resume tokens, message ids or client IPs.
 
+use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::sync::Mutex;
 
@@ -89,23 +94,61 @@ struct GateState {
 
 impl Gate {
     pub const fn new() -> Self {
-        Self { state: Mutex::new(GateState { window_start_ms: i64::MIN, used: 0, suppressed: 0 }) }
+        Self { state: Mutex::new(GateState::new()) }
     }
 
     /// Some(events dropped since the last one admitted) when this one may be written.
     pub fn admit(&self, now_ms: i64) -> Option<u64> {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if now_ms.saturating_sub(s.window_start_ms) >= 60_000 {
-            s.window_start_ms = now_ms;
-            s.used = 0;
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).admit(now_ms)
+    }
+}
+
+impl GateState {
+    const fn new() -> Self {
+        Self { window_start_ms: i64::MIN, used: 0, suppressed: 0 }
+    }
+
+    fn admit(&mut self, now_ms: i64) -> Option<u64> {
+        if now_ms.saturating_sub(self.window_start_ms) >= 60_000 {
+            self.window_start_ms = now_ms;
+            self.used = 0;
         }
-        if s.used < SAMPLE_PER_MIN {
-            s.used += 1;
-            Some(std::mem::take(&mut s.suppressed))
+        if self.used < SAMPLE_PER_MIN {
+            self.used += 1;
+            Some(std::mem::take(&mut self.suppressed))
         } else {
-            s.suppressed += 1;
+            self.suppressed += 1;
             None
         }
+    }
+}
+
+/// A [`Gate`] per key, such as a peer relay's name: each key gets its own budget a minute.
+pub struct KeyedGate {
+    keys: Mutex<BTreeMap<String, GateState>>,
+}
+
+/// Keys a [`KeyedGate`] keeps; past it, keys idle for a minute are dropped.
+const KEYED_GATE_KEYS: usize = 1024;
+
+impl KeyedGate {
+    pub const fn new() -> Self {
+        Self { keys: Mutex::new(BTreeMap::new()) }
+    }
+
+    /// Some(events of `key` dropped since its last one admitted) when this one may be written.
+    pub fn admit(&self, key: &str, now_ms: i64) -> Option<u64> {
+        let mut m = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+        if !m.contains_key(key) && m.len() >= KEYED_GATE_KEYS {
+            m.retain(|_, s| now_ms.saturating_sub(s.window_start_ms) < 60_000 || s.suppressed > 0);
+        }
+        m.entry(key.to_string()).or_insert(GateState::new()).admit(now_ms)
+    }
+}
+
+impl Default for KeyedGate {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -146,6 +189,17 @@ mod tests {
     fn clean_drops_control_characters() {
         assert_eq!(clean("bad\nline\r\x1b[31mred"), "badline[31mred");
         assert_eq!(clean(&"x".repeat(500)).len(), 200);
+    }
+
+    #[test]
+    fn a_keyed_gate_gives_each_key_its_own_budget() {
+        let g = KeyedGate::new();
+        for _ in 0..SAMPLE_PER_MIN {
+            assert_eq!(g.admit("a.example:443", 1_000), Some(0));
+        }
+        assert_eq!(g.admit("a.example:443", 1_001), None);
+        assert_eq!(g.admit("b.example:443", 1_002), Some(0));
+        assert_eq!(g.admit("a.example:443", 61_001), Some(1));
     }
 
     #[test]

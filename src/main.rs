@@ -119,6 +119,7 @@ async fn serve(cfg: Config) -> Result<()> {
     }
     tokio::spawn(forward::run(relay.clone()));
     tokio::spawn(housekeeping(relay.clone()));
+    tokio::spawn(epicmail::traffic::run(relay.clone()));
 
     // If the listener ever stops, exit with an error so the supervisor restarts the relay
     // instead of leaving a process that serves nothing.
@@ -211,15 +212,25 @@ async fn housekeeping(relay: Arc<Relay>) {
             match relay.store.sweep(now, relay.retention_ms()).await {
                 Ok(s) => {
                     relay.store_ok.store(true, Ordering::Relaxed);
-                    let removed = s.messages_expired
-                        + s.forwards_expired
-                        + s.tombstones_expired
-                        + s.challenges_expired
-                        + s.txlinks_expired;
-                    if removed > 0 {
-                        tracing::info!(?s, "expiry sweep");
+                    // Worth a line at info only when mail, forwards or cancel records went;
+                    // used /v1 challenges and transaction links expire all the time.
+                    let notable = s.messages_expired + s.forwards_expired + s.tombstones_expired > 0;
+                    macro_rules! sweep_line {
+                        ($level:ident) => {
+                            tracing::$level!(
+                                messages = s.messages_expired,
+                                forwards = s.forwards_expired,
+                                cancel_records = s.tombstones_expired,
+                                tx_links = s.txlinks_expired,
+                                challenges = s.challenges_expired,
+                                "expiry sweep"
+                            )
+                        };
+                    }
+                    if notable {
+                        sweep_line!(info);
                     } else {
-                        tracing::debug!("expiry sweep: nothing expired");
+                        sweep_line!(debug);
                     }
                 }
                 Err(e) => {

@@ -189,9 +189,43 @@ The relay writes log lines to stderr and never to a file. Under systemd, journal
 | Level | Used for |
 |---|---|
 | `error` | The relay cannot do its job: store reads or writes failing, a listener stopped, the store writer thread dying. Act on every one. |
-| `warn` | Something outside the relay misbehaves or a capacity is reached: a peer relay unreachable or refusing forwards, the store full (`store.max_bytes`). |
-| `info` | Lifecycle: the startup line with the identity, version and switches in force, drain and stop. Expiry sweeps that removed something. Each limit that refuses a request, with the limit name and the client's network prefix. |
-| `debug` | One line per socket opened and closed, Subscribe, post, mux/1 Attach or Resume, cancel and forward delivered. For tracing a problem, not for normal running. |
+| `warn` | Something outside the relay misbehaves or a capacity is reached: a peer relay unreachable or refusing forwards, the store full (`store.max_bytes`), one network prefix sending more bad signatures or invalid posts in a summary interval than `log.warn_bad_requests`. |
+| `info` | Lifecycle: the startup line with the identity, version and switches in force, drain and stop. The traffic summary (below). Expiry sweeps that removed messages, forwards or cancel records. Forwards delivered to another relay, by peer. Each limit that refuses a request, with the limit name and the client's network prefix. |
+| `debug` | One line per socket opened and closed, Subscribe, post, mux/1 Attach or Resume and cancel. Expiry sweeps that removed only used `/v1` challenges or transaction links. For tracing a problem, not for normal running. |
+
+### Traffic summary
+
+Every `log.summary_interval_s` (300 by default) the relay writes one `info` line with what
+happened in that interval, but only when something changed since the previous line, so an idle
+relay stays quiet:
+
+```
+INFO epicmail::traffic: traffic interval_s=300 posts_stored=152 posts_forwarded=2 posts_refused=30
+  delivered=150 acked=148 cancels=0 logins_ok=412 bad_signatures=60 forwards_sent=2 forwards_failed=0
+  limit_refusals=0 sockets=37 mailboxes_waiting=109 messages_waiting=159 forwards_waiting=0
+  posts_stored_total=… posts_forwarded_total=… posts_refused_total=… delivered_total=… acked_total=…
+  bad_signatures_total=…
+```
+
+(one line in the log). The counts are for the interval; `*_total` counts are since the start;
+`sockets` and the `*_waiting` values are as they are now. `posts_refused` covers invalid posts,
+limits, a full store and posts for a cancelled transaction; `logins_ok` counts mailboxes proven
+by Subscribe, mux/1 Attach or `/v1/pull`; `bad_signatures` counts every signature that did not
+verify. `delivered` counts a redelivery again.
+
+At the same time, each network prefix (/24, /48) that sent more than `log.warn_bad_requests`
+(30 by default; 0 turns it off) bad signatures, or more than that many invalid posts, in the
+interval gets a `warn` line, sampled like the others:
+
+```
+WARN epicmail::traffic: many bad requests from one network suppressed=0 net=203.0.113.0/24
+  bad_signatures=412 invalid_posts=0 interval_s=300
+```
+
+A wallet that signs the fixed first challenge (before 3.5.2) fails its Subscribe on every
+connection, so a prefix with many such wallets can show up here too.
+
+### Level setting
 
 `log.level = "info"` is the default and the right setting for a public relay. To trace a
 problem, set `level = "info,epicmail=debug"` (or the same in `RUST_LOG`) and restart. Do not
@@ -204,11 +238,12 @@ which is not reviewed for what it holds.
   characters: `from=9rGnvF…4fDoMd@relay.example:443`. That is enough to follow one mailbox
   through the log and to match a user's report, and not enough to address mail to it.
 - Peer relays appear by `domain:port`. Clients appear only by network prefix (`net=203.0.113.0/24`,
-  the same grouping the limits use), and only on limit refusals and, at debug, on socket open.
+  the same grouping the limits use), and only on limit refusals, bad-request warnings and, at
+  debug, on socket open. The traffic summary holds counts only.
 - Never logged: full keys or addresses, slates, signatures, challenges, message ids, resume
   tokens, client IP addresses. Text received from peer relays is stripped of control
-  characters. `tests/log_privacy.rs` drives a relay at debug level and fails if a line holds
-  any of these.
+  characters. `tests/log_privacy.rs` drives two relays at debug level, through a forward, bad
+  requests, the summary and the warning, and fails if a line holds any of these.
 
 Common fields: `socket` (a number local to the process), `net`, `mailbox`, `from`, `to`,
 `txid`, `peer`, `limit`, `result`, `error`, `suppressed`.
@@ -216,9 +251,10 @@ Common fields: `socket` (a number local to the process), `net`, `mailbox`, `from
 ### Floods
 
 Lines that a client or a failing dependency can repeat (store errors, forward failures, peer
-refusals, limit refusals, a full store) are sampled: each call site writes at most 10 lines a
-minute, and each line carries `suppressed`, the number dropped since the previous one. A flood
-therefore costs at most a few hundred lines a minute. Exact counts are in the metrics
+refusals, limit refusals, bad-request warnings, a full store) are sampled: each call site writes
+at most 10 lines a minute, and each line carries `suppressed`, the number dropped since the
+previous one. Forwards delivered are sampled per peer relay: at most 10 lines a minute for each. A flood
+therefore costs at most a few hundred lines a minute. Exact counts are in the traffic summary and the metrics
 (`epicbox_limit_refusals_total`, `epicbox_forwards_total`, `epicbox_store_commit_errors_total`).
 
 ### Format

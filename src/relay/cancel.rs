@@ -117,6 +117,7 @@ impl Relay {
         }
         let queues = written.queues;
         metrics::counter!("epicbox_cancels_total").increment(1);
+        self.traffic.add(crate::traffic::Count::Cancels, 1);
         if let Some(r) = &receiver {
             for h in self.registry.classic_sockets(r) {
                 if h.cancel {

@@ -48,6 +48,8 @@ pub struct Relay {
     /// `/v1/pull` long polls waiting for mail, by mailbox.
     pub pull_waiters: waiters::PullWaiters,
     pub limiter: Arc<Limiter>,
+    /// Counts for the log summary (`traffic::run`); the limiter's.
+    pub traffic: Arc<crate::traffic::Traffic>,
     /// mux/1 resume tokens by SHA-256 hash. Memory only.
     tokens: Mutex<tokens::Tokens>,
     /// Wakes the forward manager after a forward is committed.
@@ -167,8 +169,10 @@ impl Relay {
     pub fn new(cfg: Arc<Config>, store: Arc<dyn Store>) -> Arc<Self> {
         let (shutdown, _) = watch::channel(false);
         let tokens = tokens::Tokens::new(cfg.limits.mux_token_mailboxes as usize);
+        let limiter = Arc::new(Limiter::new(&cfg.limits));
         Arc::new(Self {
-            limiter: Arc::new(Limiter::new(&cfg.limits)),
+            traffic: limiter.traffic.clone(),
+            limiter,
             cfg,
             store,
             registry: Registry::new(),

@@ -10,6 +10,7 @@ use parking_lot::Mutex;
 
 use crate::clock::now_ms;
 use crate::config::Limits;
+use crate::traffic::{Count, Traffic};
 
 /// The key used to group clients for per-IP limits: the network prefix. IPv4-mapped IPv6
 /// addresses count as IPv4.
@@ -110,6 +111,8 @@ pub struct Limiter {
     pub http_ip: Buckets,
     sockets: Mutex<HashMap<String, (u32, u32)>>,
     total: AtomicU32,
+    /// Counts for the log summary; the relay shares it.
+    pub traffic: Arc<Traffic>,
 }
 
 /// Why a socket was refused.
@@ -149,6 +152,7 @@ impl Limiter {
             http_ip: Buckets::per_minute(cfg.http_per_min_per_ip as f64, cfg.http_per_min_per_ip as f64),
             sockets: Mutex::new(HashMap::new()),
             total: AtomicU32::new(0),
+            traffic: Arc::new(Traffic::new()),
             cfg: cfg.clone(),
         }
     }
@@ -209,14 +213,21 @@ impl Limiter {
     /// on abuse. The full client address is never logged.
     pub fn refused(&self, limit: &'static str, ip: IpAddr) {
         metrics::counter!("epicbox_limit_refusals_total", "limit" => limit).increment(1);
+        self.traffic.add(Count::LimitRefusals, 1);
         let (net, _) = self.prefix(ip);
         crate::sampled!(info, limit, net = %net, "limit refused a request");
     }
 
-    /// Count a failed signature against the prefix.
+    /// Count a failed signature against the prefix, and for the log summary.
     pub fn sig_failed(&self, ip: IpAddr) {
         let (p, m) = self.prefix(ip);
         let _ = self.failed_sig_ip.take(&p, 1.0, m);
+        self.traffic.bad_signature(&p);
+    }
+
+    /// Count a post refused as invalid, for the log summary's per-network warning.
+    pub fn invalid_post(&self, ip: IpAddr) {
+        self.traffic.invalid_post(&self.prefix(ip).0);
     }
 
     /// Reserve a socket slot for `ip`, held until the permit drops.

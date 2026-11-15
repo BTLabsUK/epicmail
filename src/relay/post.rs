@@ -13,6 +13,7 @@ use crate::ids::{is_txid, rand_id};
 use crate::logging::short_addr;
 use crate::sig;
 use crate::store::{ForwardKind, NewForward, NewMessage, PutOutcome};
+use crate::traffic::Count;
 
 /// The refusal text for a PostSlate with missing fields or half the 3.1.0 fields, worded as the
 /// stock relay words it.
@@ -51,6 +52,17 @@ impl Relay {
             PostOutcome::Refused(Refusal::Invalid(..)) => "invalid",
         };
         metrics::counter!("epicbox_posts_total", "result" => label).increment(1);
+        self.traffic.add(
+            match &out {
+                PostOutcome::Stored { .. } => Count::PostsStored,
+                PostOutcome::Forwarded { .. } => Count::PostsForwarded,
+                _ => Count::PostsRefused,
+            },
+            1,
+        );
+        if let PostOutcome::Refused(Refusal::Invalid(..)) = out {
+            self.limiter.invalid_post(ip);
+        }
         if let PostOutcome::Refused(Refusal::RateLimited(_)) = out {
             self.limiter.refused("posts", ip);
         }

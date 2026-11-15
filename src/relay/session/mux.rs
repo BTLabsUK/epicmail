@@ -254,6 +254,7 @@ impl Session {
             match self.take_mailbox(&key).await {
                 Ok(waiting) => {
                     any = true;
+                    r.traffic.add(crate::traffic::Count::LoginsOk, 1);
                     proven.push(key.clone());
                     out.push(json!({"mailbox":key,"ok":true,"waiting":waiting}));
                 }
@@ -493,7 +494,10 @@ impl Session {
         let attached = self.held_mailboxes(ws).await;
         if !ids.is_empty() && !attached.is_empty() {
             match self.relay.store.made_in(attached, ids.clone()).await {
-                Ok(n) => metrics::counter!("epicbox_made_total", "mode" => "mux").increment(n),
+                Ok(n) => {
+                    metrics::counter!("epicbox_made_total", "mode" => "mux").increment(n);
+                    self.relay.traffic.add(crate::traffic::Count::Acked, n);
+                }
                 Err(e) => {
                     crate::sampled!(error, error = %e, "ack failed");
                     self.send(ws, mux_error("internal", "Internal error; try again.", r#ref, None)).await;
@@ -670,6 +674,7 @@ impl Session {
                     m.inflight.insert(msg.msgid.clone(), (msg.id, key.clone()));
                 }
                 metrics::counter!("epicbox_deliveries_total", "mode" => "mux").increment(1);
+                r.traffic.add(crate::traffic::Count::Delivered, 1);
                 if !self.send(ws, frame).await {
                     return;
                 }
