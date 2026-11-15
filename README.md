@@ -67,9 +67,22 @@ curl -fsS http://127.0.0.1:3423/ready
 It listens on `127.0.0.1:3423` and keeps its data in `epicmail.db`. To try it with a wallet, set
 the wallet's Epicbox domain to `localhost`, port `3423`, with TLS off.
 
-In production it runs behind a reverse proxy that ends TLS, under systemd or Docker.
-[docs/operating.md](docs/operating.md) covers install, the systemd unit, nginx and Caddy, limits,
-health checks, backup, logging and upgrades.
+### On a Linux server
+
+From a checkout, `tools/install.sh` builds the relay, writes `/etc/epicmail/epicmail.toml`,
+installs the hardened systemd unit and starts it:
+
+```sh
+tools/install.sh --domain relay.example.org
+```
+
+Run it again after `git pull` to upgrade: it backs up the store, checks the config with the new
+binary, swaps the binary and restarts. `--uninstall` removes the service and keeps config and
+data; `--help` lists the options. Then put nginx or Caddy in front for TLS
+(`packaging/nginx.example.conf`, `packaging/Caddyfile.example`).
+
+[docs/operating.md](docs/operating.md) covers the rest: Docker, limits, health checks, backup,
+logging and upgrades.
 
 ## Build from source
 
@@ -285,7 +298,7 @@ issue.
 | `tests/` | Loopback relays, log privacy, signature differential |
 | `examples/` | Traffic generators and checks for a running relay |
 | `packaging/` | systemd unit, nginx and Caddy examples, example config |
-| `tools/` | Static build, classic wallet run, export from Postgres-backed relays |
+| `tools/` | Install script, static build, classic wallet run, export from Postgres-backed relays |
 
 ## Documentation
 
