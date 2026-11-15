@@ -25,7 +25,7 @@ Epicbox relay holds the encrypted slate until the receiver collects it.
 
 epicmail is that relay. It speaks the same websocket protocol as the existing Epicbox relays,
 federates with them, and serves today's wallets unchanged. A sender gets `Ok` only after its
-slate is on disk, every input has a limit, and logs never hold addresses, slates or client IPs.
+slate is on disk, every input has a limit, and logs never hold full keys, slates or signatures.
 
 Status: early release (0.1.2). The Epicbox protocol support is complete and mux/1 is frozen;
 the `/v1` HTTPS API may change before 1.0.
@@ -153,7 +153,8 @@ cargo deny check
 ```
 
 `cargo test` runs the unit tests, relays on loopback ports driven over websocket and HTTP (with
-federation between two relays), a log privacy check at debug level, and a signature differential
+federation between two relays), a log privacy check of both log outputs at trace level, and a
+signature differential
 test against cases recorded from the original verifier ([tools/sigdiff](tools/sigdiff/README.md)).
 `tools/compat-classic.sh` runs the real wallet CLI against two local relays; its header lists what
 it needs.
@@ -264,7 +265,7 @@ default; `src/config.rs` is the reference.
 | `[limits]` | Sizes, rates per network prefix and per sender, socket and mailbox caps |
 | `[federation]` | Forwarding on or off, allow and deny lists, peer URLs, timeouts |
 | `[http_api]` | The `/v1` API: on or off, batch sizes, long polls, challenge window, lease |
-| `[log]` | `text` or `json`, and the filter (`RUST_LOG` overrides it) |
+| `[log]` | Level and format of stderr (`RUST_LOG` overrides the level), the traffic summary, and `[log.file]`: a second output with its own level, rotated, compressed and pruned by the relay |
 
 Per-IP limits apply per network prefix (`/24` for IPv4, `/48` for IPv6). `server.trusted_proxies`
 must list the reverse proxy, or every client counts as the proxy. Sources many users share, such
@@ -283,9 +284,15 @@ The store holds what delivery needs: ciphertext slates, addresses, signatures, t
 delivery counts. It holds no client IPs. Deleted slates are overwritten where that costs no extra
 I/O, and `store.max_bytes` caps the live data.
 
-Logs show keys only shortened, clients only by network prefix, and never slates, signatures,
-tokens or IPs; lines a client can repeat are sampled. A traffic summary every five minutes
-(when anything changed) shows what the relay did in counts only. Metric labels carry outcomes and limit
+**Logs.** At `info`, the default, the log names no client: it holds the startup line, a
+traffic summary every five minutes in counts only (when anything changed), expiry sweeps,
+forwards per peer relay and problems. At `debug` and `trace`, and in the optional log file
+(`[log.file]`, rotated, compressed and pruned by the relay), lines hold **client IP addresses
+and shortened addresses** (the first and last six characters of the key, plus the domain),
+message ids and timing: personal data, to be kept short and private. Keep `log.level` at `info`
+and the file off to log no IPs; set journald's `MaxRetentionSec` or `log.file.keep` to limit how
+long logs are kept ([docs/operating.md](docs/operating.md#8-logging)). No level ever logs full
+keys, slates, signatures, challenges or resume tokens. Metric labels carry outcomes and limit
 names only.
 
 ## Security

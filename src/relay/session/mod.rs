@@ -80,6 +80,9 @@ pub struct Session {
     early_ping: Option<Instant>,
     /// A Subscribe has succeeded on this socket.
     subscribed_once: bool,
+    /// Frames received and sent, for the disconnect line.
+    frames_in: u64,
+    frames_out: u64,
 }
 
 /// Delay of the ping sent once after a socket's first successful Subscribe. epic-wallet (3.6 to
@@ -117,15 +120,26 @@ pub async fn run(relay: Arc<Relay>, ws: WebSocket, ip: IpAddr, permit: SocketPer
         dead: false,
         early_ping: None,
         subscribed_once: false,
+        frames_in: 0,
+        frames_out: 0,
     };
     metrics::gauge!("epicbox_sockets").increment(1.0);
     let opened = Instant::now();
-    tracing::debug!(socket = id, net = %s.relay.limiter.prefix(ip).0, "socket opened");
+    tracing::debug!(socket = id, ip = %ip, "connected");
     s.serve(ws, rx).await;
-    let mux = s.mux.is_some();
+    let transport = if s.mux.is_some() { "mux/1" } else { "classic" };
+    let (frames_in, frames_out) = (s.frames_in, s.frames_out);
     s.cleanup().await;
     metrics::gauge!("epicbox_sockets").decrement(1.0);
-    tracing::debug!(socket = id, mux, seconds = opened.elapsed().as_secs(), "socket closed");
+    tracing::debug!(
+        socket = id,
+        ip = %ip,
+        transport,
+        duration_ms = opened.elapsed().as_millis() as u64,
+        frames_in,
+        frames_out,
+        "disconnected"
+    );
 }
 
 /// Serialize a frame.
@@ -150,6 +164,7 @@ impl Session {
     /// Send one frame. False when the socket is gone.
     async fn send(&mut self, ws: &mut WebSocket, v: Value) -> bool {
         metrics::counter!("epicbox_frames_out_total").increment(1);
+        self.frames_out += 1;
         self.send_raw(ws, text(&v)).await
     }
 
@@ -319,6 +334,7 @@ impl Session {
     /// Dispatch one text frame.
     async fn on_text(&mut self, ws: &mut WebSocket, t: &str) -> Flow {
         metrics::counter!("epicbox_frames_in_total").increment(1);
+        self.frames_in += 1;
         if !self.frame_budget() {
             return Flow::Close(1008, "Too many frames.");
         }
@@ -326,6 +342,7 @@ impl Session {
             return self.bad_json(ws).await;
         };
         let ty = msg.get("type").and_then(|t| t.as_str()).map(|t| t.to_ascii_lowercase());
+        tracing::trace!(socket = self.id, frame = ty.as_deref().unwrap_or("-"), bytes = t.len(), "frame");
         // Every frame pays its size into the prefix's byte budget. A PostSlate pays for its
         // `str` in `post_slate` and for the rest of the frame here, so neither a large frame of
         // another kind nor a PostSlate padded outside `str` goes unmetered.

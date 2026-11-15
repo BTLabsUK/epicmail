@@ -79,11 +79,23 @@ max_waiting = 10000              # long polls waiting at once in total
 
 [log]
 format = "text"                  # "text" or "json"
-level = "info"                   # tracing filter; to trace a problem "info,epicmail=debug"
-                                 # (docs/operating.md, section 8; RUST_LOG overrides it)
+level = "info"                   # console (journald) level: error, warn, info, debug, trace, or a
+                                 # tracing filter; debug and trace hold client IPs and shortened
+                                 # addresses (docs/operating.md, section 8; RUST_LOG overrides it)
 summary_interval_s = 300         # seconds between traffic summaries at info; only when something changed
 warn_bad_requests = 30           # bad signatures or invalid posts from one /24 or /48 in one summary
                                  # interval above which a warning names the network; 0 = never
+
+[log.file]                       # a second output, rotated by the relay itself
+enabled = false
+path = "/var/log/epicmail/epicmail.log"  # the systemd unit creates /var/log/epicmail (LogsDirectory)
+level = "trace"                  # may be more verbose than the console; trace and debug hold client
+                                 # IPs and shortened addresses, so keep and share the file with care
+format = "json"                  # "json" or "text"
+rotate = "daily"                 # "hourly", "daily" or "size"
+max_size_mb = 100                # rotate before a file grows past this; with "size" the only trigger
+keep = 14                        # rotated files kept; older ones are deleted
+compress = true                  # gzip rotated files
 
 [test]
 stall_endpoint = false           # POST /test/stall on loopback; never enable on a public relay

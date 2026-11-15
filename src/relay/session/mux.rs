@@ -12,6 +12,7 @@ use crate::address::parse_address;
 use crate::clock::now_ms;
 use crate::ids::is_txid;
 use crate::ids::{is_msgid, rand_b64url};
+use crate::logging::short;
 use crate::relay::tokens::TOKEN_TTL_MS;
 use crate::relay::CancelOutcome;
 use crate::relay::{Cmd, PostOutcome, PostReq, Refusal, OFFER_LEASE_MS};
@@ -243,11 +244,13 @@ impl Session {
             let address = e.get("address").and_then(|a| a.as_str()).unwrap_or("");
             let signature = e.get("signature").and_then(|a| a.as_str()).unwrap_or("");
             let Some(key) = parse_address(address).ok().filter(|a| a.public_key_valid()).map(|a| a.public_key) else {
+                tracing::trace!(socket = self.id, ip = %self.ip, reason = "bad_address", "attach refused");
                 out.push(json!({"mailbox":address,"ok":false,"code":"bad_address"}));
                 continue;
             };
             if sig::verify(&key, &challenge, signature).is_err() {
                 r.limiter.sig_failed(self.ip);
+                tracing::trace!(socket = self.id, ip = %self.ip, mailbox = %short(&key), reason = "bad_signature", "attach refused");
                 out.push(json!({"mailbox":key,"ok":false,"code":"bad_signature"}));
                 continue;
             }
@@ -255,10 +258,14 @@ impl Session {
                 Ok(waiting) => {
                     any = true;
                     r.traffic.add(crate::traffic::Count::LoginsOk, 1);
+                    tracing::trace!(socket = self.id, mailbox = %short(&key), waiting, "attached");
                     proven.push(key.clone());
                     out.push(json!({"mailbox":key,"ok":true,"waiting":waiting}));
                 }
-                Err(code) => out.push(json!({"mailbox":key,"ok":false,"code":code})),
+                Err(code) => {
+                    tracing::trace!(socket = self.id, mailbox = %short(&key), reason = code, "attach refused");
+                    out.push(json!({"mailbox":key,"ok":false,"code":code}));
+                }
             }
         }
         if let Some(m) = self.mux.as_mut() {
@@ -284,9 +291,11 @@ impl Session {
             return;
         }
         let Some((set, expires_at)) = self.relay.take_token(token) else {
+            tracing::trace!(socket = self.id, ip = %self.ip, reason = "token_unknown", "resume refused");
             self.send(ws, mux_error("token_unknown", "Token unknown, used or expired.", r#ref, None)).await;
             return;
         };
+        tracing::trace!(socket = self.id, mailboxes = set.len(), "resumed");
         if let Some(m) = self.mux.as_mut() {
             m.token_expires = expires_at;
         }
@@ -307,7 +316,7 @@ impl Session {
     /// Answer Attach or Resume, with a new token when `issue` is set, then deliver.
     async fn attached_reply(&mut self, ws: &mut WebSocket, out: Vec<Value>, issue: bool, r#ref: &Option<String>) {
         let taken = out.iter().filter(|v| v["ok"] == true).count();
-        tracing::debug!(socket = self.id, taken, refused = out.len() - taken, "attached");
+        tracing::trace!(socket = self.id, taken, refused = out.len() - taken, "attach answered");
         let mut reply = json!({"type":"Attached","mailboxes":out});
         if let Some(r) = r#ref {
             reply["ref"] = json!(r);
@@ -357,6 +366,7 @@ impl Session {
         if !m.attached.contains(key) || !m.cancel_sent.insert((key.to_string(), txid.to_string())) {
             return;
         }
+        tracing::trace!(socket = self.id, mailbox = %short(key), txid = %short(txid), "cancel pushed");
         self.send(ws, json!({"type":"Cancelled","mailbox":key,"epicboxtxid":txid})).await;
     }
 
@@ -453,6 +463,7 @@ impl Session {
             }
         }
         self.sync_token();
+        tracing::trace!(socket = self.id, mailboxes = list.len(), "detached");
         self.send(ws, with_ref(ok(), r#ref)).await;
     }
 
@@ -467,6 +478,7 @@ impl Session {
         }
         self.drop_inflight(key).await;
         self.sync_token();
+        tracing::trace!(socket = self.id, mailbox = %short(key), reason, "mailbox lost");
         self.send(ws, json!({"type":"Detached","mailbox":key,"reason":reason})).await;
         // The new holder may have found these leased.
         self.relay.registry.wake(key);
@@ -491,6 +503,7 @@ impl Session {
                 Ok(n) => {
                     metrics::counter!("epicbox_made_total", "mode" => "mux").increment(n);
                     self.relay.traffic.add(crate::traffic::Count::Acked, n);
+                    tracing::debug!(socket = self.id, ids = %ids.join(","), removed = n, transport = "mux/1", "acked");
                 }
                 Err(e) => {
                     crate::sampled!(error, error = %e, "ack failed");
@@ -526,6 +539,7 @@ impl Session {
         let until = now_ms() + secs as i64 * 1000;
         match self.relay.store.hold(&key, id, until).await {
             Ok(_) => {
+                tracing::trace!(socket = self.id, mailbox = %short(&key), id, seconds = secs, "held");
                 if let Some(m) = self.mux.as_mut() {
                     m.inflight.remove(id);
                     m.held.insert(id.to_string(), (key.clone(), until));
@@ -669,6 +683,7 @@ impl Session {
                 }
                 metrics::counter!("epicbox_deliveries_total", "mode" => "mux").increment(1);
                 r.traffic.add(crate::traffic::Count::Delivered, 1);
+                tracing::debug!(socket = self.id, mailbox = %short(&key), id = %msg.msgid, transport = "mux/1", "delivered");
                 if !self.send(ws, frame).await {
                     return;
                 }

@@ -129,6 +129,7 @@ impl Relay {
             }
         }
         tracing::debug!(
+            ip = %ip,
             txid = %short(&txid),
             by = %short(&requester),
             mailboxes = queues.len(),

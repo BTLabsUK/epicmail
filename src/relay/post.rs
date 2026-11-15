@@ -39,9 +39,9 @@ impl Relay {
     pub async fn post_slate(&self, ip: IpAddr, req: PostReq, allow_cancel: bool) -> PostOutcome {
         let who = tracing::enabled!(tracing::Level::DEBUG).then(|| {
             let addr = |a: &Option<String>| a.as_deref().map(short_addr).unwrap_or_default();
-            (addr(&req.from), addr(&req.to))
+            (addr(&req.from), addr(&req.to), req.str_.as_ref().map_or(0, String::len))
         });
-        let out = self.post_slate_inner(ip, req, allow_cancel).await;
+        let (out, peer) = self.post_slate_inner(ip, req, allow_cancel).await;
         let label = match &out {
             PostOutcome::Stored { .. } => "stored",
             PostOutcome::Forwarded { .. } => "forwarded",
@@ -66,26 +66,41 @@ impl Relay {
         if let PostOutcome::Refused(Refusal::RateLimited(_)) = out {
             self.limiter.refused("posts", ip);
         }
-        if let Some((from, to)) = who {
-            tracing::debug!(from = %from, to = %to, result = label, "post");
+        if let Some((from, to, size)) = who {
+            match &out {
+                PostOutcome::Stored { msgid, .. } => {
+                    tracing::debug!(ip = %ip, from = %from, to = %to, size, id = %msgid, result = label, "post")
+                }
+                PostOutcome::Forwarded { .. } => tracing::debug!(
+                    ip = %ip, from = %from, to = %to, size, peer = peer.as_deref().unwrap_or(""), result = label, "post"
+                ),
+                PostOutcome::Refused(Refusal::Invalid(kind, _)) => {
+                    tracing::debug!(ip = %ip, from = %from, to = %to, size, result = "refused", reason = kind, "post")
+                }
+                _ => {
+                    tracing::debug!(ip = %ip, from = %from, to = %to, size, result = "refused", reason = label, "post")
+                }
+            }
         }
         out
     }
 
-    async fn post_slate_inner(&self, ip: IpAddr, req: PostReq, allow_cancel: bool) -> PostOutcome {
+    /// The outcome, and for a forward the peer relay it is queued for.
+    async fn post_slate_inner(&self, ip: IpAddr, req: PostReq, allow_cancel: bool) -> (PostOutcome, Option<String>) {
         let slate = match self.check_post(ip, req, allow_cancel) {
             Ok(s) => s,
-            Err(r) => return PostOutcome::Refused(r),
+            Err(r) => return (PostOutcome::Refused(r), None),
         };
         if let Some(r) = self.store_full() {
-            return PostOutcome::Refused(r);
+            return (PostOutcome::Refused(r), None);
         }
         let now = now_ms();
         let expires_at = now + self.retention_ms();
         if self.cfg.is_local(&slate.dest_domain, slate.dest_port) {
-            self.store_local(slate, now, expires_at).await
+            (self.store_local(slate, now, expires_at).await, None)
         } else {
-            self.store_forward(slate, now, expires_at).await
+            let peer = format!("{}:{}", slate.dest_domain, slate.dest_port);
+            (self.store_forward(slate, now, expires_at).await, Some(peer))
         }
     }
 

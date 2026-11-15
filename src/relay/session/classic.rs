@@ -143,7 +143,7 @@ impl Session {
         let Some(key) = key.filter(|_| verified) else {
             r.limiter.sig_failed(self.ip);
             metrics::counter!("epicbox_subscribe_total", "result" => "bad_signature").increment(1);
-            tracing::debug!(socket = self.id, "subscribe refused: signature");
+            tracing::trace!(socket = self.id, ip = %self.ip, reason = "bad_signature", "subscribe refused");
             if let Some(k) = self.key.take() {
                 r.registry.unsubscribe_classic(&k, self.id);
                 // The message in flight was that key's: hand it back, or it blocks the next
@@ -162,7 +162,7 @@ impl Session {
         if ver.is_some() {
             self.ver = ver;
         }
-        tracing::debug!(socket = self.id, mailbox = %short(&key), ver = self.ver.map_or("none", Ver::as_str), "subscribed");
+        tracing::trace!(socket = self.id, mailbox = %short(&key), ver = self.ver.map_or("none", Ver::as_str), "subscribed");
         self.prev_challenge = None;
 
         // 3.1.0: a successful Subscribe acknowledges the TransactionCancelled sent before it.
@@ -257,6 +257,7 @@ impl Session {
                 }
                 metrics::counter!("epicbox_deliveries_total", "mode" => "classic").increment(1);
                 r.traffic.add(crate::traffic::Count::Delivered, 1);
+                tracing::debug!(socket = self.id, mailbox = %short(&key), id = %m.msgid, transport = "classic", "delivered");
                 self.send(ws, frame).await;
             }
             Ok(_) => {
@@ -283,6 +284,7 @@ impl Session {
             }
         }
         self.attempts = 0;
+        tracing::trace!(socket = self.id, txid = %short(&txid), "cancel pushed");
         self.send(ws, json!({"type":"TransactionCancelled","epicboxtxid":txid})).await;
         self.pending_cancel_ack = Some(txid);
     }
@@ -336,6 +338,7 @@ impl Session {
                 && self.prev_challenge.as_ref().is_some_and(|p| sig::verify(&key, p, signature).is_ok()));
         if !ok_sig {
             r.limiter.sig_failed(self.ip);
+            tracing::trace!(socket = self.id, ip = %self.ip, reason = "bad_signature", "made refused");
             self.send(ws, json!({"type":"Error","kind":"InvalidSignature","description":"Invalid signature."})).await;
             return;
         }
@@ -351,6 +354,7 @@ impl Session {
         }
         metrics::counter!("epicbox_made_total", "mode" => "classic").increment(1);
         r.traffic.add(crate::traffic::Count::Acked, 1);
+        tracing::debug!(socket = self.id, mailbox = %short(&key), id = %msgid, transport = "classic", "acked");
         self.send(ws, ok()).await;
         self.inflight = None;
         self.attempts = 0;

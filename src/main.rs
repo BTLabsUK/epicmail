@@ -49,7 +49,8 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg = Config::load(&cli.config)?;
-    logging::init(&cfg.log);
+    // Only the relay itself writes the log file; the other commands log to stderr.
+    let _log = logging::init(&cfg.log, matches!(cli.cmd, Command::Serve))?;
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     match cli.cmd {
         Command::Serve => rt.block_on(serve(cfg)),
@@ -175,6 +176,7 @@ async fn housekeeping(relay: Arc<Relay>) {
     let mut shutdown = relay.shutdown.subscribe();
     let mut n: u64 = 0;
     let mut vacuumed_day: i64 = -1;
+    let mut file_dropped = 0;
     loop {
         tokio::select! {
             _ = tick.tick() => {}
@@ -204,6 +206,14 @@ async fn housekeeping(relay: Arc<Relay>) {
         metrics::gauge!("epicbox_http_waiting_pulls").set(f64::from(relay.pull_waiters.waiting()));
         metrics::gauge!("epicbox_store_ok").set(if relay.store_ok.load(Ordering::Relaxed) { 1.0 } else { 0.0 });
 
+        let dropped = logging::file_dropped();
+        if dropped > file_dropped {
+            tracing::warn!(
+                dropped = dropped - file_dropped,
+                "log file fell behind or could not be written; lines dropped"
+            );
+            file_dropped = dropped;
+        }
         if n.is_multiple_of(4) {
             relay.limiter.prune();
             relay.prune_tokens();

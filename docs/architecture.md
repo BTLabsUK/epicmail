@@ -24,7 +24,8 @@ All of it shares one `Relay` value (`src/relay/mod.rs`).
 | `limits.rs` | Rate limits and socket counts per IP prefix |
 | `address.rs`, `sig.rs` | Address grammar and signature checks, both matching the stock relay |
 | `metrics.rs` | Prometheus exporter and metric descriptions |
-| `logging.rs` | Log setup, shortened identifiers for log lines, sampling of lines that repeat |
+| `logging.rs` | Log setup (stderr and the log file, each with its own level), shortened identifiers for log lines, sampling of lines that repeat |
+| `logfile.rs` | The log file: a bounded queue to a writer thread, rotation by time and size, gzip, pruning |
 | `migrate.rs` | JSON Lines import and export |
 | `clock.rs`, `ids.rs` | Wall-clock milliseconds, random ids and id checks |
 
@@ -140,8 +141,11 @@ for which metrics to watch first.
 `short_addr` cut keys and addresses to their first and last six characters, `clean` strips
 control characters from text that came from outside, and the `sampled!` macro limits a call
 site to 10 lines a minute with a `suppressed` count (`KeyedGate` does the same per key, such as
-a peer relay). `traffic.rs` keeps the counts behind the traffic summary. The policy (levels, fields, what is never
-logged, rotation) is in `docs/operating.md`, section 8.
+a peer relay). `traffic.rs` keeps the counts behind the traffic summary. `init` installs two
+outputs with their own filters: stderr, and with `[log.file]` the file from `logfile.rs`, whose
+writer thread rotates, gzips and prunes, and which drops lines (and counts them) rather than
+slow the relay when the disk falls behind. The policy (levels, what each holds, privacy,
+rotation) is in `docs/operating.md`, section 8.
 
 ## Ideas not built
 
