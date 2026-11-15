@@ -5,12 +5,12 @@
 //! - `error`: the relay cannot do its job (store writes failing, a listener stopped, a panic).
 //! - `warn`: something bad outside the relay (a peer relay unreachable or refusing, the store
 //!   full), a network prefix sending more bad signatures or invalid posts in a summary interval
-//!   than `log.warn_bad_requests` (counts only: the prefix is at `debug`), the log file falling behind.
+//!   than `log.warn_bad_requests`, the log file falling behind.
 //! - `info`: lifecycle (start, drain, stop); a traffic summary every `log.summary_interval_s`
 //!   when something changed ([`crate::traffic`]); expiry sweeps that removed messages, forwards
 //!   or cancel records; forwards delivered, sampled per peer relay. Nothing per client.
 //! - `debug`: the life of each message (post, delivery, ack, cancel, forward, each with its id
-//!   and result) and each connection opened and closed, with the client IP, and the network prefixes behind a bad-request warning.
+//!   and result) and each connection opened and closed, with the client IP.
 //! - `trace`: every frame, Subscribe, Attach, Resume, Hold, Detach and limit refusal, with the
 //!   reason when refused and the client IP.
 //!

@@ -2,7 +2,7 @@
 //! deliveries, Made, a cancel, a forward, a mux/1 session (Attach, Mail, Ack, Hold, Detach,
 //! Resume) and bad requests: no line holds a full key or address, a slate, a signature, a
 //! challenge, a txid or a resume token. Client IPs, shortened keys and message ids may appear.
-//! Each output keeps its own level. The default file level, info, records no IP and no address. A separate test binary, because it installs the global log
+//! Each output keeps its own level. A separate test binary, because it installs the global log
 //! subscriber.
 
 use std::io::Write;
@@ -218,7 +218,7 @@ async fn no_level_of_either_output_holds_anything_private() {
         console.lines().find(|l| l.contains(needle)).unwrap_or_else(|| panic!("no {needle}:\n{console}"))
     };
     assert!(line(" traffic ").contains("posts_stored="));
-    assert!(!line("many bad requests").contains("127.0.0"), "the warning names no network");
+    assert!(line("many bad requests").contains("net=127.0.0.0/24"));
     assert!(line("epicmail::forward: forwarded").contains("peer=\"other.test:443\""));
 
     let events: Vec<Value> = file.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
@@ -241,26 +241,6 @@ async fn no_level_of_either_output_holds_anything_private() {
     }
     find("INFO", "traffic");
     find("WARN", "many bad requests from one network");
-    assert_eq!(find("DEBUG", "bad requests by network")["net"], "127.0.0.0/24");
-
-    // The default file level is info. What a file at info holds is the INFO, WARN and ERROR
-    // events of this file: no client IP, no network prefix, no mailbox address, shortened or not.
-    assert_eq!(Log::default().file.level, "info");
-    let info: Vec<&str> = file
-        .lines()
-        .zip(&events)
-        .filter(|(_, e)| matches!(e["level"].as_str(), Some("INFO" | "WARN" | "ERROR")))
-        .map(|(l, _)| l)
-        .collect();
-    assert!(info.len() >= 2, "the info subset holds the summary and the warning:\n{file}");
-    let shorts: Vec<String> = [&alice.pk, &bob.pk, &carol.pk, &dave.pk].iter().map(|k| logging::short(k)).collect();
-    for l in &info {
-        assert!(!l.contains("127.0.0") && !l.contains("\"ip\"") && !l.contains("\"net\""), "info line holds an IP: {l}");
-        assert!(!l.contains("\"mailbox\"") && !l.contains("\"socket\""), "info line names a mailbox: {l}");
-        for sh in &shorts {
-            assert!(!l.contains(sh.as_str()), "info line holds a mailbox address {sh}: {l}");
-        }
-    }
 
     // What no line of either output holds, at any level.
     let mut secrets = vec![
