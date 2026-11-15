@@ -1,6 +1,6 @@
 [package]
 name = "epicmail"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.100"
 license = "Apache-2.0"
@@ -34,7 +34,7 @@ regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.18", default-features = false }
+metrics-exporter-prometheus = { version = "0.17", default-features = false }
 async-trait = "0.1"
 parking_lot = "0.13"
 clap = { version = "4", features = ["derive"] }
