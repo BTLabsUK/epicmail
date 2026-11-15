@@ -29,8 +29,10 @@ curl -fsSL https://raw.githubusercontent.com/BTLabsUK/epicmail/main/tools/get.sh
 `tools/get.sh` downloads a release's static binary and its `SHA256SUMS`, and refuses them unless
 the binary matches the checksum and the signature on `SHA256SUMS` verifies against the release
 key pinned in the script. `minisign` must be installed; the check cannot be skipped. It then
-fetches the source of the same tag and runs that tag's install script (below) with the binary and
-the packaging files. Unless `--no-tls`,
+fetches `install.sh`, `epicmail.service` and `epicmail.example.toml` from the same release,
+checks each against the signed `SHA256SUMS`, and only then runs that install script (below) with the
+binary and the packaging files. A release whose `SHA256SUMS` lists none of them (before 0.1.7)
+is refused; install it from a checkout instead. Unless `--no-tls`,
 it then installs Caddy from Caddy's own apt or dnf repository and writes `/etc/caddy/Caddyfile`
 with a site for the domain that proxies to the relay (websocket upgrade, one-hour timeouts,
 `/metrics` answered with 404). It never changes a web server it did not install: with nginx,
@@ -249,7 +251,7 @@ INFO epicmail::traffic: traffic interval_s=300 posts_stored=152 posts_forwarded=
 `sockets` and the `*_waiting` values are as they are now. `posts_refused` covers invalid posts,
 limits, a full store and posts for a cancelled transaction; `logins_ok` counts mailboxes proven
 by Subscribe, mux/1 Attach or `/v1/pull`; `bad_signatures` counts every signature that did not
-verify. `delivered` counts a redelivery again. The summary holds counts only.
+verify. A `/v1/pull` proof is a signature over `<challenge>@<domain>:<port>` of this relay, so a proof made for another relay counts here. `delivered` counts a redelivery again. The summary holds counts only.
 
 At the same time, when a network prefix (/24, /48) sent more than `log.warn_bad_requests`
 (30 by default; 0 turns it off) bad signatures, or more than that many invalid posts, in the
@@ -418,5 +420,7 @@ tools/ship --publish X.Y.Z       # sign and create the GitHub release
 ```
 
 `--release` needs a clean tree, `Cargo.toml` at X.Y.Z and tag `vX.Y.Z` at HEAD. It builds in a separate dir on the relay host (`~/epicmail-build/src`, niced), runs the full test suite, builds the three binaries (linux x86_64, linux aarch64, windows x86_64) and writes `SHA256SUMS`, all under `~/.cache/epicmail-ship/release-X.Y.Z/`. Follow `job.log` there. `--dry-run` stops before staging.
+
+`--release` also copies `tools/install.sh` and the two packaging files `get.sh` uses into the staged files and lists them in `SHA256SUMS`, so `get.sh` can check them.
 
 `--publish` signs `SHA256SUMS` with the minisign key in `SHIP_MINISIGN_KEY`, checks the signature against the public key pinned in `tools/get.sh`, checks every hash and runs `gh release create`. Nothing is published by `--release`.

@@ -22,6 +22,11 @@ use epicmail::sig;
 use epicmail::store::sqlite::SqliteStore;
 use epicmail::store::Store;
 
+/// What a client signs for `/v1/pull` at `domain` (port 443 in the test config).
+fn proof(ch: &str, domain: &str) -> String {
+    format!("{ch}@{domain}:443")
+}
+
 /// The original relay's fixed first challenge, which wallets older than 3.5.2 always sign.
 const STATIC: &str = "7WUDtkSaKyGRUnQ22rE3QUXChV8DmA6NnunDYP4vheTpc";
 
@@ -386,7 +391,7 @@ async fn https_post_pull_made() {
     let id = v["id"].as_str().unwrap().to_string();
 
     let ch = format!("ebh-{}-{:016x}", now_ms() / 1000, rand::random::<u64>());
-    let pull = json!({"mailboxes":[{"address":bob.pk,"challenge":ch,"signature":bob.sign(&ch)}],"wait":0});
+    let pull = json!({"mailboxes":[{"address":bob.pk,"challenge":ch,"signature":bob.sign(&proof(&ch, "relay.test"))}],"wait":0});
     let (st, v) = http(&n, "POST", "/v1/pull", Some(pull.clone())).await;
     assert_eq!(st, 200, "{v}");
     let msgs = &v["mailboxes"][0]["messages"];
@@ -397,6 +402,19 @@ async fn https_post_pull_made() {
     let (_, v) = http(&n, "POST", "/v1/pull", Some(pull)).await;
     assert_eq!(v["mailboxes"][0]["error"], "challenge was already used", "{v}");
 
+    // A proof made for another relay is refused, and is not burnt: the right one still works.
+    let ch2 = format!("ebh-{}-{:016x}", now_ms() / 1000, rand::random::<u64>());
+    let entry = |sig: String| json!({"mailboxes":[{"address":bob.pk,"challenge":ch2,"signature":sig}],"wait":0});
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(entry(bob.sign(&proof(&ch2, "other.test"))))).await;
+    assert_eq!(v["mailboxes"][0]["error"], "signature does not verify", "{v}");
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(entry(bob.sign(&ch2)))).await;
+    assert_eq!(v["mailboxes"][0]["error"], "signature does not verify", "unbound proof: {v}");
+    let (st, v) = http(&n, "POST", "/v1/pull", Some(entry(bob.sign(&proof(&ch2, "relay.test"))))).await;
+    assert_eq!(st, 200, "{v}");
+    assert!(v["mailboxes"][0].get("error").is_none(), "{v}");
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(entry(bob.sign(&proof(&ch2, "relay.test"))))).await;
+    assert_eq!(v["mailboxes"][0]["error"], "challenge was already used", "{v}");
+
     let made = json!({"address":bob.pk,"acks":[{"id":id,"signature":bob.sign(&id)}]});
     let (st, v) = http(&n, "POST", "/v1/made", Some(made)).await;
     assert_eq!(st, 200, "{v}");
@@ -405,7 +423,7 @@ async fn https_post_pull_made() {
 
     // Long poll wakes when mail arrives.
     let ch = format!("ebh-{}-{:016x}", now_ms() / 1000, rand::random::<u64>());
-    let pull = json!({"mailboxes":[{"address":bob.pk,"challenge":ch,"signature":bob.sign(&ch)}],"wait":20});
+    let pull = json!({"mailboxes":[{"address":bob.pk,"challenge":ch,"signature":bob.sign(&proof(&ch, "relay.test"))}],"wait":20});
     let n2 = Node { addr: n.addr, relay: n.relay.clone() };
     let t0 = std::time::Instant::now();
     let poll = tokio::spawn(async move { http(&n2, "POST", "/v1/pull", Some(pull)).await });
@@ -718,7 +736,7 @@ async fn https_pull_has_a_budget_per_prefix() {
     let pull = || {
         let entry = |k: &Key| {
             let ch = format!("ebh-{}-{:016x}", now_ms() / 1000, rand::random::<u64>());
-            json!({"address":k.pk,"challenge":ch,"signature":k.sign(&ch)})
+            json!({"address":k.pk,"challenge":ch,"signature":k.sign(&proof(&ch, "relay.test"))})
         };
         json!({"mailboxes":[entry(&bob), entry(&carol)],"wait":0,"limit":1})
     };
@@ -871,7 +889,7 @@ async fn https_long_polls_are_capped_per_prefix() {
     let (alice, bob) = (Key::new(), Key::new());
     let pull = |k: &Key, wait: u64| {
         let ch = format!("ebh-{}-{:016x}", now_ms() / 1000, rand::random::<u64>());
-        json!({"mailboxes":[{"address":k.pk,"challenge":ch,"signature":k.sign(&ch)}],"wait":wait})
+        json!({"mailboxes":[{"address":k.pk,"challenge":ch,"signature":k.sign(&proof(&ch, "relay.test"))}],"wait":wait})
     };
     let n2 = Node { addr: n.addr, relay: n.relay.clone() };
     let first = pull(&bob, 20);
@@ -1101,7 +1119,7 @@ async fn a_pull_reply_has_a_byte_budget_and_says_when_there_is_more() {
     let pull = |n: &Node| {
         let ch = format!("ebh-{}-{:016x}", now_ms() / 1000, rand::random::<u64>());
         let body =
-            json!({"mailboxes":[{"address":bob.pk,"challenge":ch,"signature":bob.sign(&ch)}],"limit":20,"wait":0});
+            json!({"mailboxes":[{"address":bob.pk,"challenge":ch,"signature":bob.sign(&proof(&ch, "relay.test"))}],"limit":20,"wait":0});
         let addr = n.addr;
         let relay = n.relay.clone();
         async move { http(&Node { addr, relay }, "POST", "/v1/pull", Some(body)).await }
@@ -1222,7 +1240,7 @@ async fn pulls_stop_a_quarter_above_the_store_cap() {
     let n = start(dir.path(), "relay.test", |c| c.store.max_bytes = 1).await;
     let bob = Key::new();
     let ch = format!("ebh-{}-{:016x}", now_ms() / 1000, rand::random::<u64>());
-    let body = json!({"mailboxes":[{"address":bob.pk,"challenge":ch,"signature":bob.sign(&ch)}],"wait":0});
+    let body = json!({"mailboxes":[{"address":bob.pk,"challenge":ch,"signature":bob.sign(&proof(&ch, "relay.test"))}],"wait":0});
     let (st, v) = http(&n, "POST", "/v1/pull", Some(body)).await;
     assert_eq!(st, 503, "{v}");
 }

@@ -1,8 +1,9 @@
 //! The HTTPS mailbox API under /v1 (`epicbox-https/0.1`): info, post, pull and made.
 //!
 //! /v1 authenticates like Subscribe without the handshake: the client makes its own challenge,
-//! `ebh-<unix seconds>-<random hex>`, and signs it. Each challenge is accepted once per key and
-//! only inside the window. Acknowledgements are signed over the message id, as `Made` is.
+//! `ebh-<unix seconds>-<random hex>`, and signs `<challenge>@<identity>` (identity is
+//! `domain:port`, as `/v1/info` shows it), so a proof made for one relay is refused by another.
+//! Each challenge is accepted once per key and only inside the window. Acknowledgements are signed over the message id, as `Made` is.
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
@@ -44,8 +45,8 @@ pub(super) async fn info(State(st): State<AppState>) -> Response {
             "identity": format!("{}:{}", cfg.server.domain, cfg.server.port),
             "federation": cfg.federation.enabled,
             "challenge": format!(
-                "{CHALLENGE_PREFIX}<unix seconds>-<random hex>, signed like Subscribe, accepted for {} s, \
-                 single use per address",
+                "{CHALLENGE_PREFIX}<unix seconds>-<random hex>; sign <challenge>@<identity> like Subscribe \
+                 (identity as in this reply); accepted for {} s, single use per address",
                 h.challenge_window_s
             ),
             "challenge_single_use": true,
@@ -114,6 +115,12 @@ pub(super) async fn post(
     }
 }
 
+/// What a client signs for `/v1/pull`: the challenge bound to the relay's identity
+/// (`domain:port`, lower case), so the proof is useless at any other relay.
+fn signed_challenge(challenge: &str, domain: &str, port: u16) -> String {
+    format!("{challenge}@{}:{port}", domain.to_ascii_lowercase())
+}
+
 /// `ebh-<digits>-<lowercase hex>`, at most 64 characters, issued no later than a minute from now
 /// and inside the window. Returns the issue time in seconds.
 fn challenge_issued(challenge: &str, now_s: i64, window_s: i64) -> Option<i64> {
@@ -165,7 +172,8 @@ async fn prove(st: &AppState, ip: IpAddr, mb: &Value) -> Result<Proven, ProveErr
     let Some(issued) = challenge_issued(challenge, now_s, window) else {
         return Ok(Proven { address, key: Err("challenge is stale or malformed") });
     };
-    if sig::verify(&key, challenge, signature).is_err() {
+    let signed = signed_challenge(challenge, &relay.cfg.server.domain, relay.cfg.server.port);
+    if sig::verify(&key, &signed, signature).is_err() {
         relay.limiter.sig_failed(ip);
         return Ok(Proven { address, key: Err("signature does not verify") });
     }
