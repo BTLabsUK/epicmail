@@ -11,7 +11,7 @@ All of it shares one `Relay` value (`src/relay/mod.rs`).
 | `main.rs` | CLI (`serve`, `check-config`, `import`, `export`, `selftest`), startup, housekeeping, SIGTERM drain |
 | `config.rs` | The TOML file, its defaults and its checks |
 | `http/mod.rs` | The axum router: websocket upgrade, `/health`, `/ready`, `/metrics`, `/status.json`, `/.well-known/epicbox.json` |
-| `http/v1.rs` | The `/v1` HTTPS API and its challenge auth |
+| `http/v1.rs` | The `/v1` HTTPS API and its challenge auth. A pull proof is a signature over `<challenge>@<domain>:<port>`, so it is bound to this relay |
 | `http/landing.rs`, `landing.html` | The page a browser gets at `/`, compiled in, with its Content-Security-Policy |
 | `relay/mod.rs` | Shared state and the types every entry point uses |
 | `relay/post.rs` | `post_slate`: the rules for posting a slate, from any entry point |

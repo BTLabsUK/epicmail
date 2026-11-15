@@ -71,6 +71,8 @@ pub fn parse_public_key(b58: &str) -> Result<PublicKey, SigReject> {
     PublicKey::from_slice(&key).map_err(|_| SigReject::BadKey)
 }
 
+/// The permissive decoding (`0x`, trim, `+`) is deliberate: compatibility with the old relay.
+///
 /// Port of the stock `from_hex`: length parity is checked on the raw string,
 /// then an optional `0x` is dropped, the rest trimmed and split into byte
 /// pairs parsed with `u8::from_str_radix` (which accepts a leading `+`).

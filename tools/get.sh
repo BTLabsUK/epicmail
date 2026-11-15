@@ -5,8 +5,9 @@
 #
 # It downloads the release's static binary for this machine and its SHA256SUMS, checks the
 # signature on SHA256SUMS (minisign is required; the key is pinned in this script) and the
-# binary's checksum, and refuses on any mismatch. Then it fetches the source of the same tag
-# and installs the relay with that tag's tools/install.sh and packaging files. Unless --no-tls, it installs Caddy and serves the relay as
+# binary's checksum, and refuses on any mismatch. Then it fetches install.sh and the packaging
+# files from the same release, checks each against SHA256SUMS before running anything, and
+# installs the relay with them. Unless --no-tls, it installs Caddy and serves the relay as
 # wss://DOMAIN. Run it again to upgrade; a run with nothing new changes nothing.
 #
 # Options:
@@ -22,7 +23,7 @@
 # For mirrors, forks and tests: EPICMAIL_REPO=owner/name takes releases and files from another
 # repository; EPICMAIL_DOWNLOAD=URL takes the release files from URL/<file> (file:///dir works);
 # EPICMAIL_SOURCE=URL takes install.sh and the packaging files from URL/tools/... and
-# URL/packaging/...; EPICMAIL_MINISIGN_KEY=KEY checks signatures against another public key;
+# URL/packaging/... (still checked against the signed SHA256SUMS); EPICMAIL_MINISIGN_KEY=KEY checks signatures against another public key;
 # EPICMAIL_CADDY_TLS=internal makes Caddy use its own test certificate authority.
 set -eu
 
@@ -123,18 +124,20 @@ fetch "$BASE/$BIN" "$BIN"
 say "checksum checked"
 chmod 0755 "$TMP/$BIN"
 
-# install.sh and the files it installs, from the source of the same tag, in a checkout's layout.
+# install.sh and the files it installs, in a checkout's layout. Each is listed in the signed
+# SHA256SUMS and checked before anything runs. (GitHub's source tarball is not byte-stable, so
+# it is not used.) A release from before 0.1.7 lists none of them and is refused.
 mkdir "$TMP/tools" "$TMP/packaging"
-if [ -n "${EPICMAIL_SOURCE:-}" ]; then
-  fetch "$SRC/tools/install.sh" tools/install.sh
-  fetch "$SRC/packaging/epicmail.service" packaging/epicmail.service
-  fetch "$SRC/packaging/epicmail.example.toml" packaging/epicmail.example.toml
-else
-  command -v tar >/dev/null 2>&1 || die "tar is needed"
-  fetch "https://github.com/$REPO/archive/refs/tags/v$VERSION.tar.gz" source.tar.gz
-  (cd "$TMP" && tar -xzf source.tar.gz --strip-components=1 --wildcards '*/tools/install.sh' '*/packaging') ||
-    die "cannot unpack the source of v$VERSION"
-fi
+for f in install.sh epicmail.service epicmail.example.toml; do
+  case $f in install.sh) dest=tools/$f ;; *) dest=packaging/$f ;; esac
+  if [ -n "${EPICMAIL_SOURCE:-}" ]; then fetch "$SRC/$dest" "$dest"; else fetch "$BASE/$f" "$dest"; fi
+  want=$(awk -v b="$f" '{ n = $2; sub(/^\*/, "", n) } n == b { print $1 }' "$TMP/SHA256SUMS")
+  [ -n "$want" ] && [ "$(printf '%s\n' "$want" | wc -l)" -eq 1 ] ||
+    die "SHA256SUMS of $VERSION does not list $f, so it cannot be checked. Nothing was installed. Releases before 0.1.7 are not installable with this script."
+  have=$(sha256sum "$TMP/$dest" | awk '{ print $1 }')
+  [ "$have" = "$want" ] || die "checksum mismatch: $f does not match SHA256SUMS of $VERSION. Nothing was installed."
+done
+say "install files checked"
 
 # 4. Install, upgrade or remove the relay.
 EPICMAIL_GET=1 sh "$TMP/tools/install.sh" --bin "$TMP/$BIN" "$@"

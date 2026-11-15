@@ -71,9 +71,10 @@ checks the config with the new binary and restarts only when something changed.
   the machine is never changed; the script prints the site to add instead.
 - `--uninstall` removes the service and binary and keeps config and data.
 
-Releases are signed with [minisign](https://jedisct1.github.io/minisign/). With `minisign`
-installed the script checks the signature and refuses a release that fails it; without it, it
-says so and checks the SHA-256 only. To check a download by hand:
+Releases are signed with [minisign](https://jedisct1.github.io/minisign/). The script
+needs `minisign`: without it, it stops and says so, and there is no way to skip the check. It
+checks the signature, then the binary, `tools/install.sh` and the packaging files it installs
+against the signed `SHA256SUMS`, and refuses anything that fails. To check a download by hand:
 
 ```sh
 minisign -Vm SHA256SUMS -P RWQ+swweZiIFJfbre/aOhYqQ1+82BHFnw8gF6ETbhCp5b7RB6RuMEVtP
@@ -209,7 +210,9 @@ each proven once with `Attach`. It gets several messages in flight, signature-fr
 ### HTTPS pull API (`/v1`)
 
 For clients that cannot hold a websocket. The client makes its own challenge,
-`ebh-<unix seconds>-<random hex>`, signs it with the mailbox key, and uses it once.
+`ebh-<unix seconds>-<random hex>`, and uses it once. It signs `<challenge>@<identity>` with the mailbox
+key, where identity is the relay's `domain:port` as `GET /v1/info` shows it, so a proof made for one
+relay is refused by any other. Plain `<challenge>` is not accepted.
 
 | Endpoint | Does |
 |---|---|

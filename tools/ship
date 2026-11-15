@@ -230,7 +230,9 @@ release_run() {
     RSYNC -q "$HOST:$RELDIR/$bin" "$out/epicmail-$VER-$label" || die "fetch failed for $triple"
     step_done "build $triple" "$t0"
   done
-  ( cd "$out" && sha256sum epicmail-"$VER"-* > SHA256SUMS ) || die "checksums failed"
+  # get.sh checks these against the signed SHA256SUMS before it runs install.sh as root.
+  cp "$SRC/tools/install.sh" "$SRC/packaging/epicmail.service" "$SRC/packaging/epicmail.example.toml" "$out/" || die "cannot copy install files"
+  ( cd "$out" && sha256sum epicmail-"$VER"-* install.sh epicmail.service epicmail.example.toml > SHA256SUMS ) || die "checksums failed"
   cat "$out/SHA256SUMS"
   summary
   if [ $DRYRUN = 1 ]; then echo "DRY RUN: stopped before staging for publish"; exit 0; fi
