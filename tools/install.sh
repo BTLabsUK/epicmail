@@ -150,8 +150,10 @@ if [ $NEWCONF = 0 ] && [ $BACKUP = 1 ] && [ -n "$STORE" ] && $SUDO test -f "$STO
   OUT=/var/backups/$NAME/epicmail-$(date -u +%Y%m%dT%H%M%SZ).db
   say "backing up the store to $OUT"
   $SUDO install -d -m 0700 "/var/backups/$NAME"
-  if command -v sqlite3 >/dev/null 2>&1; then
-    $SUDO sqlite3 "$STORE" ".backup '$OUT'"
+  # sudo's PATH differs from the user's: look it up as root, and run it by its full path.
+  SQLITE3=$($SUDO sh -c 'command -v sqlite3' 2>/dev/null || true)
+  if [ -n "$SQLITE3" ]; then
+    $SUDO "$SQLITE3" "$STORE" ".backup '$OUT'"
     $SUDO chmod 0600 "$OUT"
   else
     if [ $ACTIVE = 1 ]; then

@@ -247,7 +247,7 @@ impl Default for LogFile {
         Self {
             enabled: true,
             path: "/var/log/epicmail/epicmail.log".into(),
-            level: "trace".into(),
+            level: "info".into(),
             format: "json".into(),
             rotate: "daily".into(),
             max_size_mb: 100,

@@ -194,13 +194,15 @@ The relay logs to two outputs, each with its own level and format:
 
 - **stderr**, always: `log.level` and `log.format`. Under systemd journald keeps it
   (`journalctl -u epicmail`); in Docker, the container's log driver does.
-- **a file**, on by default: `/var/log/epicmail/epicmail.log` at `trace` in JSON, rotated daily,
+- **a file**, on by default: `/var/log/epicmail/epicmail.log` at `info` in JSON, rotated daily,
   compressed and pruned by the relay itself (below), so it needs no logrotate. When the relay
   cannot create or write it (run by hand without access to `/var/log`, say), it logs one
   warning on stderr and runs without the file; it never refuses to start because of it.
 
-So by default the journal holds `info` and the file holds everything down to `trace`, for
-looking back at what happened to one wallet or one message.
+So by default both outputs hold `info`: counts, summaries and errors, no client IP and no
+mailbox address. For looking back at what happened to one wallet or one message, an operator
+opts in by setting `[log.file] level = "debug"` or `"trace"` (or `log.level` for the journal);
+those levels record client IPs and shortened addresses (see Privacy).
 
 ### Levels
 
@@ -249,13 +251,15 @@ limits, a full store and posts for a cancelled transaction; `logins_ok` counts m
 by Subscribe, mux/1 Attach or `/v1/pull`; `bad_signatures` counts every signature that did not
 verify. `delivered` counts a redelivery again. The summary holds counts only.
 
-At the same time, each network prefix (/24, /48) that sent more than `log.warn_bad_requests`
+At the same time, when a network prefix (/24, /48) sent more than `log.warn_bad_requests`
 (30 by default; 0 turns it off) bad signatures, or more than that many invalid posts, in the
-interval gets a `warn` line, sampled like the others:
+interval, a `warn` line says so, sampled like the others. It carries counts only; the prefix
+itself is in a `debug` line, "bad requests by network":
 
 ```
-WARN epicmail::traffic: many bad requests from one network suppressed=0 net=203.0.113.0/24
+WARN epicmail::traffic: many bad requests from one network suppressed=0
   bad_signatures=412 invalid_posts=0 interval_s=300
+DEBUG epicmail::traffic: bad requests by network net=203.0.113.0/24 bad_signatures=412 invalid_posts=0 interval_s=300
 ```
 
 A wallet that signs the fixed first challenge (before 3.5.2) fails its Subscribe on every
@@ -263,8 +267,9 @@ connection, so a prefix with many such wallets can show up here too.
 
 ### Privacy
 
-- **At `info`, `warn` and `error`** no line names a client: no IP, no address. Clients appear
-  only as network prefixes in the bad-request warning; peer relays by `domain:port`.
+- **At `info`, `warn` and `error`** no line names a client: no IP, no network prefix, no
+  address. Peer relays appear by `domain:port`. This is the default for both outputs, and
+  `tests/log_privacy.rs` checks it.
 - **At `debug` and `trace`** lines hold client IP addresses, shortened mailbox keys
   (`esYjKK…JDJd9y`: the first and last six characters, enough to follow one mailbox and to match
   a user's report, not enough to address mail), the domains in addresses, message ids, sizes and
@@ -276,12 +281,13 @@ connection, so a prefix with many such wallets can show up here too.
   `tests/log_privacy.rs` runs two relays through posts, deliveries, a cancel, a forward, a mux/1
   session and bad requests with both outputs at `trace`, and fails if a line holds any of these.
 
-The log file is on by default, so a default install does log client IPs, to
-`/var/log/epicmail/` for 14 days. To log no client IPs at all, keep `log.level` at `info` and set
-`[log.file] enabled = false`, or its `level` to `info`; to keep them for less time, lower
-`log.file.keep` (or use `rotate = "hourly"`).
+The log file is on by default at `info`, so a default install logs no client IPs. An operator
+who sets `[log.file] level` to `debug` or `trace` opts in to them; to keep them for less time,
+lower `log.file.keep` (or use `rotate = "hourly"`). **Upgrading:** a config that sets
+`[log.file] level = "trace"` explicitly keeps it; set `level = "info"` by hand (or remove the
+line) to stop logging IPs. Configs from before 0.1.6 that did not set it follow the new default.
 
-Common fields: `socket` (a number local to the process), `ip`, `net`, `mailbox`, `from`, `to`,
+Common fields: `socket` (a number local to the process), `ip`, `net` (debug and up), `mailbox`, `from`, `to`,
 `id`, `size`, `txid` (shortened), `peer`, `transport`, `limit`, `result`, `reason`, `error`,
 `suppressed`.
 
@@ -313,7 +319,7 @@ line). `"json"` writes one JSON object per line with the fields at the top level
 [log.file]
 enabled = true
 path = "/var/log/epicmail/epicmail.log"
-level = "trace"
+level = "info"                     # "debug" and "trace" record client IPs and shortened addresses
 format = "json"
 rotate = "daily"        # "hourly", "daily" or "size"
 max_size_mb = 100       # with "size" the only trigger; otherwise also a cap per file
@@ -382,3 +388,35 @@ Roll back: stop the relay and put the old binary back. When the schema version d
 (the release notes say when it does), start it on the same database. When it did, restore the
 backup from step 1 (messages posted since are lost), or `export` with the new binary and
 `import` with the old one: import ignores fields it does not know.
+
+## 10. Shipping a change (maintainers)
+
+`tools/ship` takes the working tree to the live relay on epicbox.btlabs.uk and checks the result.
+
+```
+tools/ship                       # ship this checkout
+tools/ship --src DIR             # ship another checkout
+tools/ship --rollback            # swap back to epicmail.prev
+```
+
+Steps, with timings printed at the end:
+
+1. Lane A: rsync the tree to hostinger-2, build x86_64 musl with `cargo zigbuild --release` into a persistent target dir (`~/epicmail-fast/src/target`), check that the binary is static.
+2. Lane B, in parallel: `cargo test --locked` on this machine, under `hagen-heavy`.
+3. Deploy: `tools/ship-deploy.sh` on the relay installs the binary as `/usr/local/bin/epicmail.new`, runs `--version` and `check-config` against the live config, keeps the old binary as `epicmail.prev` (a hard link), renames the new one over `epicmail` and restarts the unit.
+4. Verify: `tools/ship-probe.py` checks `/health`, `/ready`, `/status.json`, the landing page and a websocket Challenge and GetVersion, on the host and again through the public URL. The host check also needs no self-restarts, the running binary's hash (read from `/proc/PID/exe`) to equal the new one, and no journal errors or panics after the restart.
+
+Any failed check puts `epicmail.prev` back, restarts, checks again and says so (exit status 3). A warm run takes about one minute; the first run into an empty target dir takes about two.
+
+What ships is the working tree, uncommitted changes included. The first line of the output names the commit and whether the tree is dirty. Ship from the tree that matches the live line.
+
+### Release (slow path)
+
+```
+tools/ship --release X.Y.Z       # background; the fast path stays usable
+tools/ship --publish X.Y.Z       # sign and create the GitHub release
+```
+
+`--release` needs a clean tree, `Cargo.toml` at X.Y.Z and tag `vX.Y.Z` at HEAD. It builds in a separate dir on the relay host (`~/epicmail-build/src`, niced), runs the full test suite, builds the three binaries (linux x86_64, linux aarch64, windows x86_64) and writes `SHA256SUMS`, all under `~/.cache/epicmail-ship/release-X.Y.Z/`. Follow `job.log` there. `--dry-run` stops before staging.
+
+`--publish` signs `SHA256SUMS` with the minisign key in `SHIP_MINISIGN_KEY`, checks the signature against the public key pinned in `tools/get.sh`, checks every hash and runs `gh release create`. Nothing is published by `--release`.
