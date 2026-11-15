@@ -18,8 +18,9 @@
 #   --uninstall     stop and remove the service and its binary; config and data stay
 #
 # Run it as your own user: it builds with cargo and uses sudo only to install. An existing config
-# is never changed. Needs Linux with systemd, rustup (unless --bin), sudo and curl; sqlite3 for
-# the upgrade backup.
+# is never changed, and a run with nothing new to install changes nothing. Needs Linux with
+# systemd, rustup (unless --bin), sudo and curl. With sqlite3 the upgrade backup is taken while
+# the relay runs; without it the relay is stopped for the copy.
 set -eu
 
 die() { echo "install.sh: $*" >&2; exit 1; }
@@ -127,19 +128,39 @@ val() { sed -n "s/^$1 = \"\([^\"]*\)\".*/\1/p" "$TMP/epicmail.toml" | head -n 1;
 LISTEN_AT=$(val listen)
 STORE=$(val path)
 
-# 3. A backup of the store before an upgrade replaces the binary.
+sed -e "s|^ExecStart=.*|ExecStart=$DEST serve --config $CONF|" \
+  -e "s|/var/lib/epicmail/|/var/lib/$NAME/|" \
+  -e "s|^StateDirectory=.*|StateDirectory=$NAME|" \
+  -e "s|^ConfigurationDirectory=.*|ConfigurationDirectory=$NAME|" \
+  -e "s|^SyslogIdentifier=.*|SyslogIdentifier=$NAME|" \
+  packaging/epicmail.service >"$TMP/unit"
+
 ACTIVE=0
 $SUDO systemctl is-active --quiet "$NAME" 2>/dev/null && ACTIVE=1
+if [ $NEWCONF = 0 ] && [ $ACTIVE = 1 ] && $SUDO cmp -s "$BIN" "$DEST" && $SUDO cmp -s "$TMP/unit" "$UNIT"; then
+  say "$NAME is up to date ($VERSION); nothing to do"
+  exit 0
+fi
+
+# 3. A backup of the store before an upgrade replaces the binary: online with sqlite3, or else
+# a copy of the stopped store (the restart below follows anyway).
 if [ $NEWCONF = 0 ] && [ $BACKUP = 1 ] && [ -n "$STORE" ] && $SUDO test -f "$STORE"; then
+  OUT=/var/backups/$NAME/epicmail-$(date -u +%Y%m%dT%H%M%SZ).db
+  say "backing up the store to $OUT"
+  $SUDO install -d -m 0700 "/var/backups/$NAME"
   if command -v sqlite3 >/dev/null 2>&1; then
-    OUT=/var/backups/$NAME/epicmail-$(date -u +%Y%m%dT%H%M%SZ).db
-    say "backing up the store to $OUT"
-    $SUDO install -d -m 0700 "/var/backups/$NAME"
     $SUDO sqlite3 "$STORE" ".backup '$OUT'"
-    $SUDO chmod 0600 "$OUT"
   else
-    die "sqlite3 is needed to back up $STORE before the upgrade (or pass --no-backup)"
+    if [ $ACTIVE = 1 ]; then
+      say "no sqlite3: stopping $NAME for the copy"
+      $SUDO systemctl stop "$NAME"
+      START=1
+    fi
+    for s in "" -wal; do
+      if $SUDO test -f "$STORE$s"; then $SUDO cp "$STORE$s" "$OUT$s"; fi
+    done
   fi
+  $SUDO chmod 0600 "$OUT"*
 fi
 
 # 4. Files in place. The binary is swapped by rename, so a running relay is not disturbed.
@@ -148,12 +169,6 @@ $SUDO install -d -m 0755 "$PREFIX/bin" "$ETC"
 $SUDO install -m 0755 "$BIN" "$DEST.new"
 $SUDO mv -f "$DEST.new" "$DEST"
 
-sed -e "s|^ExecStart=.*|ExecStart=$DEST serve --config $CONF|" \
-  -e "s|/var/lib/epicmail/|/var/lib/$NAME/|" \
-  -e "s|^StateDirectory=.*|StateDirectory=$NAME|" \
-  -e "s|^ConfigurationDirectory=.*|ConfigurationDirectory=$NAME|" \
-  -e "s|^SyslogIdentifier=.*|SyslogIdentifier=$NAME|" \
-  packaging/epicmail.service >"$TMP/unit"
 if $SUDO test -f "$UNIT" && ! $SUDO cmp -s "$TMP/unit" "$UNIT"; then
   say "replacing $UNIT (the old one is $UNIT.bak; put local changes in a drop-in instead)"
   $SUDO cp "$UNIT" "$UNIT.bak"
@@ -190,7 +205,8 @@ else
   say "curl not found; check it with: systemctl status $NAME"
 fi
 
-if [ $NEWCONF = 1 ]; then
+# tools/get.sh sets up TLS itself and prints its own next steps.
+if [ $NEWCONF = 1 ] && [ -z "${EPICMAIL_GET:-}" ]; then
   cat <<EOF
 
 Next:

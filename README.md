@@ -14,7 +14,7 @@
 [![Version 0.1.1](https://img.shields.io/badge/version-0.1.1-informational.svg)](Cargo.toml)
 [![Epicbox 2.0.0 · 3.0.0 · 3.1.0](https://img.shields.io/badge/epicbox-2.0.0%20%C2%B7%203.0.0%20%C2%B7%203.1.0-6f42c1.svg)](#protocols)
 
-[Quick start](#quick-start) · [Build](#build-from-source) · [Operating](docs/operating.md) ·
+[Run a relay](#run-a-relay) · [Build](#build-from-source) · [Operating](docs/operating.md) ·
 [Architecture](docs/architecture.md) · [mux/1](docs/mux-1.md) · [Security](#security)
 
 </div>
@@ -51,44 +51,62 @@ the `/v1` HTTPS API may change before 1.0.
       |                              |  delete the slate               |
 ```
 
-## Quick start
+## Run a relay
 
-You need Rust through `rustup`; it installs the pinned 1.100 from `rust-toolchain.toml`. Only
-`server.domain` must be set: the domain wallets write in their addresses.
+On a Linux server with systemd (x86_64 or aarch64), point a domain at the machine, open ports 80
+and 443, and run:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/BTLabsUK/epicmail/main/tools/get.sh | sh -s -- --domain relay.example.org
+```
+
+It downloads the latest release binary for the machine, checks it against the release's
+`SHA256SUMS`, installs the relay as a hardened systemd service with its config in
+`/etc/epicmail/epicmail.toml`, and installs Caddy for TLS. Wallets then use Epicbox domain
+`relay.example.org`, port 443. Run the same command again to upgrade: it backs up the store,
+checks the config with the new binary and restarts only when something changed.
+
+- `--version v0.1.2` installs a given release instead of the latest.
+- `--no-tls` skips Caddy, for a server with its own proxy. An nginx, Caddy or Apache already on
+  the machine is never changed; the script prints the site to add instead.
+- `--uninstall` removes the service and binary and keeps config and data.
+
+Each release lists its build provenance, so a download can be checked by hand:
+`gh attestation verify epicmail-x86_64-linux-musl --repo BTLabsUK/epicmail`.
+
+### By hand
+
+From a checkout, `tools/install.sh` does the same install with a binary built from source, or
+with one built elsewhere (`--bin FILE`); `--help` lists its options. Then put a TLS proxy in
+front: `packaging/Caddyfile.example` or `packaging/nginx.example.conf`.
+
+```sh
+tools/install.sh --domain relay.example.org
+```
+
+Docker: `docker build -t epicmail .` makes an image on an empty base;
+[docs/operating.md](docs/operating.md#docker) shows how to run it. The operating guide also covers
+limits, health checks, backup, logging and upgrades.
+
+### Try it locally
+
+You need Rust through `rustup`; it installs the pinned 1.100 from `rust-toolchain.toml`.
 
 ```sh
 cargo build --release
 cp packaging/epicmail.example.toml epicmail.toml     # set server.domain
-target/release/epicmail check-config --config epicmail.toml
-target/release/epicmail serve        --config epicmail.toml
+target/release/epicmail serve --config epicmail.toml
 curl -fsS http://127.0.0.1:3423/ready
 ```
 
 It listens on `127.0.0.1:3423` and keeps its data in `epicmail.db`. To try it with a wallet, set
 the wallet's Epicbox domain to `localhost`, port `3423`, with TLS off.
 
-### On a Linux server
-
-From a checkout, `tools/install.sh` builds the relay, writes `/etc/epicmail/epicmail.toml`,
-installs the hardened systemd unit and starts it:
-
-```sh
-tools/install.sh --domain relay.example.org
-```
-
-Run it again after `git pull` to upgrade: it backs up the store, checks the config with the new
-binary, swaps the binary and restarts. `--uninstall` removes the service and keeps config and
-data; `--help` lists the options. Then put nginx or Caddy in front for TLS
-(`packaging/nginx.example.conf`, `packaging/Caddyfile.example`).
-
-[docs/operating.md](docs/operating.md) covers the rest: Docker, limits, health checks, backup,
-logging and upgrades.
-
 ## Build from source
 
 ```sh
 cargo build --release                 # target/release/epicmail
-tools/build-static.sh                 # static x86_64 Linux binary (musl)
+tools/build-static.sh [aarch64]       # static Linux binary (musl), this host's arch by default
 docker build -t epicmail .            # static binary on an empty base, unprivileged user
 ```
 
@@ -298,7 +316,8 @@ issue.
 | `tests/` | Loopback relays, log privacy, signature differential |
 | `examples/` | Traffic generators and checks for a running relay |
 | `packaging/` | systemd unit, nginx and Caddy examples, example config |
-| `tools/` | Install script, static build, classic wallet run, export from Postgres-backed relays |
+| `tools/` | One-line installer (`get.sh`), install script, static build, classic wallet run, export from Postgres-backed relays |
+| `.github/` | Release workflow: static binaries, checksums, attestations, install test |
 
 ## Documentation
 
