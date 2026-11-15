@@ -1,7 +1,8 @@
 # Static musl build, scratch runtime.
 #   docker build -t epicmail .
 #   docker run -d --name relay -p 127.0.0.1:3423:3423 \
-#     -v relay-data:/data -v ./epicmail.toml:/etc/epicmail/epicmail.toml:ro epicmail
+#     -v relay-data:/data -v relay-logs:/var/log/epicmail \
+#     -v ./epicmail.toml:/etc/epicmail/epicmail.toml:ro epicmail
 # The config must set server.listen = "0.0.0.0:3423" and store.path = "/data/epicmail.db".
 # No HEALTHCHECK: scratch has no shell or curl. Check from outside, see docs/operating.md.
 
@@ -23,9 +24,11 @@ RUN touch src/main.rs src/lib.rs \
 FROM scratch
 COPY --from=build /epicmail /usr/local/bin/epicmail
 COPY --from=build --chown=65532:65532 /data-skel /data
+# The log file's default directory ([log.file] path).
+COPY --from=build --chown=65532:65532 /data-skel /var/log/epicmail
 COPY packaging/epicmail.example.toml /etc/epicmail/epicmail.example.toml
 USER 65532:65532
-VOLUME ["/data"]
+VOLUME ["/data", "/var/log/epicmail"]
 EXPOSE 3423
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/epicmail"]

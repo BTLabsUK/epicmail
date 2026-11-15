@@ -288,14 +288,16 @@ The store holds what delivery needs: ciphertext slates, addresses, signatures, t
 delivery counts. It holds no client IPs. Deleted slates are overwritten where that costs no extra
 I/O, and `store.max_bytes` caps the live data.
 
-**Logs.** At `info`, the default, the log names no client: it holds the startup line, a
-traffic summary every five minutes in counts only (when anything changed), expiry sweeps,
-forwards per peer relay and problems. At `debug` and `trace`, and in the optional log file
-(`[log.file]`, rotated, compressed and pruned by the relay), lines hold **client IP addresses
-and shortened addresses** (the first and last six characters of the key, plus the domain),
-message ids and timing: personal data, to be kept short and private. Keep `log.level` at `info`
-and the file off to log no IPs; set journald's `MaxRetentionSec` or `log.file.keep` to limit how
-long logs are kept ([docs/operating.md](docs/operating.md#8-logging)). No level ever logs full
+**Logs.** stderr (the journal) is at `info` by default and names no client: it holds the
+startup line, a traffic summary every five minutes in counts only (when anything changed),
+expiry sweeps, forwards per peer relay and problems. The log file, **on by default**
+(`/var/log/epicmail/epicmail.log` at `trace`, rotated daily, compressed, 14 days kept), and
+stderr at `debug` or `trace` hold **client IP addresses and shortened addresses** (the first and
+last six characters of the key, plus the domain), message ids and timing: personal data, to be
+kept short and private. To log no IPs, set `[log.file] enabled = false` and keep `log.level` at
+`info`; to keep them for less time, lower `log.file.keep` or journald's `MaxRetentionSec`
+([docs/operating.md](docs/operating.md#8-logging)). A relay that cannot write the file logs a
+warning and runs without it. No level ever logs full
 keys, slates, signatures, challenges or resume tokens. Metric labels carry outcomes and limit
 names only.
 
