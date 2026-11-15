@@ -1,0 +1,267 @@
+#!/bin/bash
+# tools/ship: change -> live relay, verified, with automatic rollback.
+#
+#   tools/ship                      fast path: build x86_64 musl on the relay host from a warm
+#                                   target dir, run the tests here in parallel, swap the binary,
+#                                   restart, verify (host and public URL), roll back on failure
+#   tools/ship --src DIR            ship another checkout (default: the checkout this runs in)
+#   tools/ship --tests none         skip the local test run
+#   tools/ship --no-deploy          build and test only
+#   tools/ship --deploy-file FILE   deploy a prebuilt binary (skips build and tests)
+#   tools/ship --rollback           swap the live binary with epicmail.prev, restart, verify
+#
+#   tools/ship --release X.Y.Z      slow path, in the background: full test suite, the three
+#                                   binaries, SHA256SUMS, staged under ~/.cache/epicmail-ship
+#   tools/ship --publish X.Y.Z      sign SHA256SUMS with minisign and create the GitHub release
+#                                   from the staged files (asks for the key passphrase)
+#
+# What ships is the working tree of --src, uncommitted changes included. The first line says
+# which commit and whether the tree is dirty. See docs/operating.md, "Shipping a change".
+set -uo pipefail
+
+SELF=$(readlink -f "$0")
+TOOLS=$(dirname "$SELF")
+HOST=${SHIP_HOST:-hostinger-2}
+PUBLIC_URL=${SHIP_URL:-https://epicbox.btlabs.uk}
+RDIR=${SHIP_REMOTE_DIR:-epicmail-fast}          # fast-path build dir on HOST, relative to $HOME
+RELDIR=${SHIP_RELEASE_DIR:-epicmail-build/src}  # slow-path build dir on HOST (its own target dir)
+STATE=${SHIP_STATE:-$HOME/.cache/epicmail-ship}
+TARGET=x86_64-unknown-linux-musl
+GH_REPO=${SHIP_GH_REPO:-BTLabsUK/epicmail}
+REMOTE_PATH='$HOME/.local/opt/zig-x86_64-linux-0.15.2:$HOME/.local/bin:$HOME/.cargo/bin:$PATH'
+
+mkdir -p "$STATE"
+SSHO=(-o BatchMode=yes -o ConnectTimeout=10 -o ControlMaster=auto -o "ControlPath=$STATE/cm-%C" -o ControlPersist=600)
+R() { ssh "${SSHO[@]}" "$HOST" "$@"; }
+RSYNC() { rsync -e "ssh ${SSHO[*]}" "$@"; }
+
+T_START=$(date +%s.%N)
+declare -a TIMES=()
+tnow() { date +%s.%N; }
+secs() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%.1f", b-a}'; }
+step_done() { local name=$1 t0=$2; TIMES+=("$(printf '%-34s %6s s' "$name" "$(secs "$t0" "$(tnow)")")"); }
+say() { echo "== $*"; }
+die() { echo "ship: $*" >&2; exit 1; }
+summary() {
+  echo; echo "---- timings"
+  printf '%s\n' "${TIMES[@]}"
+  printf '%-34s %6s s\n' "TOTAL" "$(secs "$T_START" "$(tnow)")"
+}
+
+# ------------------------------------------------------------------ arguments
+SRC=""; TESTS=quick; DEPLOY=1; DEPLOY_FILE=""; MODE=fast; VER=""; DRYRUN=0; WAIT=0; NOTES=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --src) SRC=$2; shift ;;
+    --tests) TESTS=$2; shift ;;
+    --no-deploy) DEPLOY=0 ;;
+    --deploy-file) DEPLOY_FILE=$2; shift ;;
+    --rollback) MODE=rollback ;;
+    --release) MODE=release; VER=$2; shift ;;
+    --release-run) MODE=release-run; VER=$2; shift ;;
+    --publish) MODE=publish; VER=$2; shift ;;
+    --dry-run) DRYRUN=1 ;;
+    --wait) WAIT=1 ;;
+    --notes) NOTES=$2; shift ;;
+    -h|--help) sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown argument: $1 (tools/ship --help)" ;;
+  esac
+  shift
+done
+if [ -z "$SRC" ]; then SRC=$(git rev-parse --show-toplevel 2>/dev/null || dirname "$TOOLS"); fi
+SRC=$(cd "$SRC" && pwd) || die "no such directory: $SRC"
+[ -f "$SRC/Cargo.toml" ] || die "$SRC has no Cargo.toml"
+LANDING=""; [ -f "$SRC/src/http/landing.rs" ] && LANDING=--landing
+DESC=$(git -C "$SRC" describe --always --dirty 2>/dev/null || echo "no git")
+CRATEVER=$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$SRC/Cargo.toml" | head -1)
+
+upload_helpers() {
+  R "mkdir -p ~/$RDIR/ship" && RSYNC -q "$TOOLS/ship-deploy.sh" "$TOOLS/ship-probe.py" "$HOST:$RDIR/ship/" \
+    && R "chmod +x ~/$RDIR/ship/ship-deploy.sh"
+}
+
+# Rsync the tree. Not -t: a changed file gets the time of the copy, so cargo always sees it as
+# newer than its last build, even when the file came from an older checkout. Unchanged files
+# (same checksum) are skipped and keep their time, so cargo reuses their build.
+sync_tree() {
+  RSYNC -rlpc --delete --exclude target --exclude .git --exclude 'docs/private' "$SRC/" "$HOST:$1/"
+}
+
+# ------------------------------------------------------------------ deploy and verify
+# deploy HOSTPATH: run the host-side swap + health + rollback, then verify from outside.
+deploy() {
+  local bin=$1 t0 rc
+  t0=$(tnow)
+  say "deploy: swap, restart, verify on $HOST"
+  R "~/$RDIR/ship/ship-deploy.sh deploy $bin $LANDING"; rc=$?
+  step_done "deploy + host health check" "$t0"
+  case $rc in
+    0) ;;
+    3) echo; echo "!! ROLLED BACK: the new binary failed its health check; the previous binary is live again."; return 3 ;;
+    4) echo; echo "!! NOT DEPLOYED: preflight failed, the live relay was not touched."; return 4 ;;
+    *) echo; echo "!! CRITICAL: the new binary failed and the rollback did not come up healthy. Check the relay by hand."; return 5 ;;
+  esac
+  t0=$(tnow)
+  say "verify from outside: $PUBLIC_URL"
+  if python3 -I "$TOOLS/ship-probe.py" "$PUBLIC_URL" $LANDING | sed 's/^/[public] /'; [ "${PIPESTATUS[0]}" = 0 ]; then
+    step_done "public URL check" "$t0"
+  else
+    step_done "public URL check (FAILED)" "$t0"
+    echo "!! the public URL fails its check; rolling back"
+    local t1; t1=$(tnow)
+    R "~/$RDIR/ship/ship-deploy.sh rollback $LANDING"; rc=$?
+    step_done "automatic rollback" "$t1"
+    [ $rc = 0 ] && echo "!! ROLLED BACK: the previous binary is live again." || echo "!! CRITICAL: rollback failed (exit $rc)"
+    return 3
+  fi
+  return 0
+}
+
+# ------------------------------------------------------------------ fast path
+fast() {
+  say "ship $DESC (crate $CRATEVER) from $SRC -> $HOST"
+  local t0 run; run=$(mktemp -d "${TMPDIR:-/tmp}/ship.XXXXXX")
+  trap 'rm -rf "$run"' EXIT
+
+  if [ -n "$DEPLOY_FILE" ]; then
+    t0=$(tnow); upload_helpers || die "cannot reach $HOST"
+    R "cat > ~/$RDIR/deploy-file.bin" < "$DEPLOY_FILE" || die "upload failed"
+    step_done "upload helpers + file" "$t0"
+    deploy "\$HOME/$RDIR/deploy-file.bin"; local rc=$?; summary; exit $rc
+  fi
+
+  # Lane A: sync and build on the host (the critical path).
+  (
+    set -o pipefail
+    s=$(tnow)
+    upload_helpers && R "mkdir -p ~/$RDIR/src" && sync_tree "$RDIR/src" || { echo "sync failed"; exit 1; }
+    echo "sync $(secs "$s" "$(tnow)")" > "$run/a.times"
+    s=$(tnow)
+    R "export PATH=$REMOTE_PATH; cd ~/$RDIR/src && cargo zigbuild --release --locked --target $TARGET --bin epicmail 2>&1 \
+       && f=target/$TARGET/release/epicmail && ls -l \$f | awk '{print \"binary:\", \$5, \"bytes\"}' \
+       && { ldd \$f 2>&1 | grep -Eq 'not a dynamic|statically linked' && echo 'static: yes' || { echo 'static: NO'; exit 1; }; }" \
+      > "$run/a.log" 2>&1
+    rc=$?
+    echo "build $(secs "$s" "$(tnow)")" >> "$run/a.times"
+    exit $rc
+  ) &
+  local pa=$!
+
+  # Lane B: tests here, in parallel, on a warm persistent target dir.
+  local pb=""
+  if [ "$TESTS" != none ]; then
+    (
+      s=$(tnow)
+      heavy=""; command -v hagen-heavy >/dev/null 2>&1 && heavy=hagen-heavy
+      cd "$SRC" && CARGO_TARGET_DIR="$STATE/target-test" $heavy cargo test --locked > "$run/b.log" 2>&1
+      rc=$?
+      echo "tests $(secs "$s" "$(tnow)")" > "$run/b.times"
+      exit $rc
+    ) &
+    pb=$!
+  fi
+
+  say "building on $HOST and testing here, in parallel"
+  local rca=0 rcb=0
+  wait $pa || rca=$?
+  while read -r name v; do TIMES+=("$(printf '%-34s %6s s' "lane A: $name (on $HOST)" "$v")"); done < "$run/a.times"
+  sed 's/^/[build] /' <(grep -E 'Compiling epicmail|Finished|error|warning: unused|binary:|static:' "$run/a.log")
+  if [ -n "$pb" ]; then
+    wait $pb || rcb=$?
+    while read -r name v; do TIMES+=("$(printf '%-34s %6s s' "lane B: $name (here, parallel)" "$v")"); done < "$run/b.times"
+    sed 's/^/[tests] /' <(grep -E '^test result|FAILED|failed|panicked|^error' "$run/b.log" | head -20)
+  fi
+  if [ $rca != 0 ]; then echo "---- build log tail"; tail -25 "$run/a.log"; summary; die "BUILD FAILED; nothing deployed"; fi
+  if [ $rcb != 0 ]; then echo "---- test log tail"; tail -40 "$run/b.log"; summary; die "TESTS FAILED; nothing deployed"; fi
+
+  if [ $DEPLOY = 0 ]; then summary; exit 0; fi
+  deploy "\$HOME/$RDIR/src/target/$TARGET/release/epicmail"; local rc=$?
+  summary; exit $rc
+}
+
+rollback() {
+  say "manual rollback on $HOST"
+  upload_helpers || die "cannot reach $HOST"
+  local t0; t0=$(tnow)
+  R "~/$RDIR/ship/ship-deploy.sh rollback $LANDING"; local rc=$?
+  step_done "rollback + host health check" "$t0"
+  [ $rc = 0 ] && python3 -I "$TOOLS/ship-probe.py" "$PUBLIC_URL" $LANDING | sed 's/^/[public] /'
+  summary; exit $rc
+}
+
+# ------------------------------------------------------------------ slow path
+release() {
+  [ -n "$VER" ] || die "--release needs a version"
+  local rev="$STATE/release-$VER"; mkdir -p "$rev"
+  local log="$rev/job.log"
+  # Preconditions that need no waiting.
+  [ "$CRATEVER" = "$VER" ] || die "Cargo.toml says $CRATEVER, not $VER; bump the version first"
+  git -C "$SRC" rev-parse -q --verify "refs/tags/v$VER^{commit}" >/dev/null || die "tag v$VER does not exist; create it on the release commit first"
+  [ "$(git -C "$SRC" rev-parse HEAD)" = "$(git -C "$SRC" rev-parse "v$VER^{commit}")" ] || die "HEAD is not tag v$VER; check out the tag in --src"
+  [ -z "$(git -C "$SRC" status --porcelain)" ] || die "the tree has uncommitted changes"
+  local dry=""; [ $DRYRUN = 1 ] && dry=--dry-run
+  if [ $WAIT = 1 ]; then
+    "$SELF" --release-run "$VER" --src "$SRC" $dry 2>&1 | tee "$log"; exit "${PIPESTATUS[0]}"
+  fi
+  say "slow path for v$VER started in the background; the fast path stays free to use"
+  nohup setsid "$SELF" --release-run "$VER" --src "$SRC" $dry > "$log" 2>&1 < /dev/null &
+  echo "log:    $log"
+  echo "follow: tail -f $log"
+  echo "when it ends with STAGED: tools/ship --publish $VER"
+}
+
+release_run() {
+  local rev="$STATE/release-$VER"; local out="$rev/files"; mkdir -p "$out"; rm -f "$out"/*
+  say "release v$VER ($DESC) from $SRC, build dir ~/$RELDIR on $HOST (niced; the fast path is not blocked)"
+  local t0=$(tnow)
+  RSYNC -rlpc --delete --exclude target --exclude .git --exclude 'docs/private' "$SRC/" "$HOST:$RELDIR/" || die "sync failed"
+  step_done "sync" "$t0"
+  t0=$(tnow)
+  R "export PATH=$REMOTE_PATH; cd ~/$RELDIR && nice -n19 ionice -c3 cargo test --locked 2>&1 | grep -E '^test result|FAILED|failed|^error' ; exit \${PIPESTATUS[0]}" \
+    || die "FULL TEST SUITE FAILED"
+  step_done "full test suite (on $HOST)" "$t0"
+  local t name
+  for t in x86_64-unknown-linux-musl:linux-x86_64 aarch64-unknown-linux-musl:linux-aarch64 x86_64-pc-windows-gnu:windows-x86_64.exe; do
+    local triple=${t%%:*} label=${t#*:}
+    t0=$(tnow)
+    R "export PATH=$REMOTE_PATH; cd ~/$RELDIR && nice -n19 ionice -c3 cargo zigbuild --release --locked --target $triple --bin epicmail 2>&1 | tail -2; exit \${PIPESTATUS[0]}" \
+      || die "BUILD FAILED for $triple"
+    local bin=target/$triple/release/epicmail; [ "${triple#*windows}" != "$triple" ] && bin=$bin.exe
+    RSYNC -q "$HOST:$RELDIR/$bin" "$out/epicmail-$VER-$label" || die "fetch failed for $triple"
+    step_done "build $triple" "$t0"
+  done
+  ( cd "$out" && sha256sum epicmail-"$VER"-* > SHA256SUMS ) || die "checksums failed"
+  cat "$out/SHA256SUMS"
+  summary
+  if [ $DRYRUN = 1 ]; then echo "DRY RUN: stopped before staging for publish"; exit 0; fi
+  echo "STAGED in $out. Next: tools/ship --publish $VER"
+}
+
+publish() {
+  [ -n "$VER" ] || die "--publish needs a version"
+  local out="$STATE/release-$VER/files"
+  [ -f "$out/SHA256SUMS" ] || die "nothing staged for $VER: run tools/ship --release $VER first"
+  local key=${SHIP_MINISIGN_KEY:-$HOME/.config/epicmail/release.key}
+  [ -f "$key" ] || die "minisign secret key not found at $key; set SHIP_MINISIGN_KEY=/path/to/key"
+  local pub; pub=$(sed -n 's/^KEY=\${EPICMAIL_MINISIGN_KEY:-\(RW[A-Za-z0-9+\/=]*\)}.*/\1/p' "$SRC/tools/get.sh" 2>/dev/null | head -1)
+  [ -n "$pub" ] || die "cannot read the pinned release public key from $SRC/tools/get.sh"
+  say "signing SHA256SUMS with $key"
+  ( cd "$out" && rm -f SHA256SUMS.sig && minisign -S -s "$key" -m SHA256SUMS -x SHA256SUMS.sig ) || die "signing failed"
+  minisign -Vq -P "$pub" -m "$out/SHA256SUMS" -x "$out/SHA256SUMS.sig" || die "the signature does not verify against the key pinned in get.sh; refusing to publish"
+  say "signature verifies against the pinned key"
+  ( cd "$out" && sha256sum -c SHA256SUMS ) >/dev/null || die "checksum mismatch in staged files"
+  [ -f "$out/epicmail-release-key.pub" ] || gh release download --repo "$GH_REPO" --pattern epicmail-release-key.pub --dir "$out" 2>/dev/null \
+    || echo "note: epicmail-release-key.pub not attached (none found on the latest release)"
+  local notes=(--generate-notes); [ -n "$NOTES" ] && notes=(--notes-file "$NOTES")
+  say "gh release create v$VER on $GH_REPO"
+  gh release create "v$VER" --repo "$GH_REPO" --verify-tag --title "epicmail $VER" "${notes[@]}" "$out"/* || die "gh release create failed"
+  echo "published: https://github.com/$GH_REPO/releases/tag/v$VER"
+}
+
+case $MODE in
+  fast) fast ;;
+  rollback) rollback ;;
+  release) release ;;
+  release-run) release_run ;;
+  publish) publish ;;
+esac
