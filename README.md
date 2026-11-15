@@ -11,7 +11,7 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![MSRV 1.100](https://img.shields.io/badge/rust-1.100-orange.svg)](rust-toolchain.toml)
-[![Version 0.1.1](https://img.shields.io/badge/version-0.1.1-informational.svg)](Cargo.toml)
+[![Version 0.1.2](https://img.shields.io/badge/version-0.1.2-informational.svg)](Cargo.toml)
 [![Epicbox 2.0.0 · 3.0.0 · 3.1.0](https://img.shields.io/badge/epicbox-2.0.0%20%C2%B7%203.0.0%20%C2%B7%203.1.0-6f42c1.svg)](#protocols)
 
 [Run a relay](#run-a-relay) · [Build](#build-from-source) · [Operating](docs/operating.md) ·
@@ -27,7 +27,7 @@ epicmail is that relay. It speaks the same websocket protocol as the existing Ep
 federates with them, and serves today's wallets unchanged. A sender gets `Ok` only after its
 slate is on disk, every input has a limit, and logs never hold addresses, slates or client IPs.
 
-Status: early release (0.1.1). The Epicbox protocol support is complete and mux/1 is frozen;
+Status: early release (0.1.2). The Epicbox protocol support is complete and mux/1 is frozen;
 the `/v1` HTTPS API may change before 1.0.
 
 ## Shape
@@ -66,7 +66,7 @@ It downloads the latest release binary for the machine, checks it against the re
 `relay.example.org`, port 443. Run the same command again to upgrade: it backs up the store,
 checks the config with the new binary and restarts only when something changed.
 
-- `--version 0.1.1` installs a given release instead of the latest.
+- `--version 0.1.2` installs a given release instead of the latest.
 - `--no-tls` skips Caddy, for a server with its own proxy. An nginx, Caddy or Apache already on
   the machine is never changed; the script prints the site to add instead.
 - `--uninstall` removes the service and binary and keeps config and data.
@@ -94,7 +94,7 @@ To install a release binary by hand, download it with `SHA256SUMS`, check it, an
 executable: a downloaded file never keeps the executable bit.
 
 ```sh
-v=0.1.1 a=x86_64   # or aarch64
+v=0.1.2 a=x86_64   # or aarch64
 base=https://github.com/BTLabsUK/epicmail/releases/download/v$v
 curl -fsSLO $base/epicmail-$v-linux-$a -O $base/SHA256SUMS -O $base/SHA256SUMS.sig
 minisign -Vm SHA256SUMS -P RWQ+swweZiIFJfbre/aOhYqQ1+82BHFnw8gF6ETbhCp5b7RB6RuMEVtP
@@ -219,7 +219,7 @@ For clients that cannot hold a websocket. The client makes its own challenge,
 | `/ready` | Readiness: the store is writable; 503 while draining |
 | `/metrics` | Prometheus, names start with `epicbox_`; loopback or `server.metrics_listen` only |
 | `/status.json` | Public totals, no per-address data |
-| `/.well-known/epicbox.json` | Software, version, identity, protocols, features |
+| `/.well-known/epicbox.json` | Software, identity, protocols, features and client limits (no version, no per-IP limits) |
 
 ## Transaction cancel (3.1.0)
 

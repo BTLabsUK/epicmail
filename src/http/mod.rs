@@ -225,7 +225,6 @@ async fn status(State(st): State<AppState>) -> Response {
     Json(json!({
         "name": r.cfg.server.name,
         "identity": format!("{}:{}", r.cfg.server.domain, r.cfg.server.port),
-        "version": env!("CARGO_PKG_VERSION"),
         "uptime_s": r.started.elapsed().as_secs(),
         "draining": r.draining.load(Ordering::Relaxed),
         "store_ok": r.store_ok.load(Ordering::Relaxed),
@@ -239,6 +238,7 @@ async fn status(State(st): State<AppState>) -> Response {
     .into_response()
 }
 
+/// Publishes what a client needs: no exact version, no per-IP abuse thresholds.
 async fn well_known(State(st): State<AppState>) -> Response {
     let cfg = &st.relay.cfg;
     let mut versions = vec!["2.0.0", "3.0.0"];
@@ -259,9 +259,6 @@ async fn well_known(State(st): State<AppState>) -> Response {
                     "hold_max_s": session::HOLD_MAX_S,
                     "waiting_frames_per_min": session::WAITING_PER_MIN,
                     "attach_frames_per_min": l.mux_attach_frames_per_min,
-                    "failed_sigs_per_min_per_ip": l.failed_sigs_per_min_per_ip,
-                    "sig_checks_per_min_per_ip": l.sig_checks_per_min_per_ip,
-                    "mux_sockets_per_ip": l.mux_sockets_per_ip,
                 }
             }),
         );
@@ -271,7 +268,6 @@ async fn well_known(State(st): State<AppState>) -> Response {
     }
     Json(json!({
         "software": "epicmail",
-        "version": env!("CARGO_PKG_VERSION"),
         "name": cfg.server.name,
         "identity": format!("{}:{}", cfg.server.domain, cfg.server.port),
         "protocol_versions": versions,

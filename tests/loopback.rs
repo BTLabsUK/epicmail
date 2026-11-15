@@ -421,6 +421,36 @@ async fn https_post_pull_made() {
     let (st, wk) = http(&n, "GET", "/.well-known/epicbox.json", None).await;
     assert_eq!(st, 200);
     assert!(wk["features"]["mux/1"].is_object(), "{wk}");
+    assert_discovery_shape(&wk);
+
+    let (st, status) = http(&n, "GET", "/status.json", None).await;
+    assert_eq!(st, 200);
+    assert!(status.get("version").is_none(), "{status}");
+}
+
+/// The discovery document keeps what clients read and omits the exact version and the per-IP
+/// abuse thresholds.
+fn assert_discovery_shape(wk: &Value) {
+    let mut keys: Vec<&str> = wk.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(keys, ["features", "federation", "identity", "name", "protocol_versions", "software"], "{wk}");
+    assert_eq!(wk["software"], "epicmail");
+    let mut limits: Vec<&str> =
+        wk["features"]["mux/1"]["limits"].as_object().unwrap().keys().map(String::as_str).collect();
+    limits.sort();
+    assert_eq!(
+        limits,
+        [
+            "attach_frames_per_min",
+            "attach_per_frame",
+            "hold_max_s",
+            "ids_per_ack",
+            "inflight_per_socket",
+            "mailboxes_per_socket",
+            "waiting_frames_per_min"
+        ],
+        "{wk}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
