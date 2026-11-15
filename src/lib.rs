@@ -10,6 +10,7 @@ pub mod forward;
 pub mod http;
 pub mod ids;
 pub mod limits;
+pub mod logfile;
 pub mod logging;
 pub mod metrics;
 pub mod migrate;

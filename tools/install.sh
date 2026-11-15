@@ -113,7 +113,8 @@ else
   NEWCONF=1
   [ -n "$DOMAIN" ] || die "a first install needs --domain: the domain wallets write in their addresses"
   sed -e "s|^domain = \"[^\"]*\"|domain = \"$DOMAIN\"|" \
-    -e "s|^path = \"[^\"]*\"|path = \"/var/lib/$NAME/epicmail.db\"|" \
+    -e "/^\[store\]/,/^\[/ s|^path = \"[^\"]*\"|path = \"/var/lib/$NAME/epicmail.db\"|" \
+    -e "/^\[log\.file\]/,/^\[/ s|^path = \"[^\"]*\"|path = \"/var/log/$NAME/epicmail.log\"|" \
     packaging/epicmail.example.toml >"$TMP/epicmail.toml"
   [ -z "$PORT" ] || sed -i "s|^port = [0-9]*|port = $PORT|" "$TMP/epicmail.toml"
   [ -z "$LISTEN" ] || sed -i "s|^listen = \"[^\"]*\"|listen = \"$LISTEN\"|" "$TMP/epicmail.toml"
@@ -126,12 +127,13 @@ fi
 
 val() { sed -n "s/^$1 = \"\([^\"]*\)\".*/\1/p" "$TMP/epicmail.toml" | head -n 1; }
 LISTEN_AT=$(val listen)
-STORE=$(val path)
+STORE=$(sed -n '/^\[store\]/,/^\[/ s/^path = "\([^"]*\)".*/\1/p' "$TMP/epicmail.toml" | head -n 1)
 
 sed -e "s|^ExecStart=.*|ExecStart=$DEST serve --config $CONF|" \
   -e "s|/var/lib/epicmail/|/var/lib/$NAME/|" \
   -e "s|^StateDirectory=.*|StateDirectory=$NAME|" \
   -e "s|^ConfigurationDirectory=.*|ConfigurationDirectory=$NAME|" \
+  -e "s|^LogsDirectory=.*|LogsDirectory=$NAME|" \
   -e "s|^SyslogIdentifier=.*|SyslogIdentifier=$NAME|" \
   packaging/epicmail.service >"$TMP/unit"
 

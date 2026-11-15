@@ -12,6 +12,9 @@ DynamicUser=yes
 StateDirectory=epicmail
 StateDirectoryMode=0750
 ConfigurationDirectory=epicmail
+# For [log.file]: /var/log/epicmail, writable by the service.
+LogsDirectory=epicmail
+LogsDirectoryMode=0750
 Restart=on-failure
 RestartSec=2
 

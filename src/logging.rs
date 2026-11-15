@@ -2,51 +2,126 @@
 //!
 //! The policy (also in docs/operating.md, "Logging"):
 //!
-//! - `error`: the relay cannot do its job (store writes failing, a listener stopped).
-//! - `warn`: something outside the relay misbehaves (a peer relay unreachable or refusing), or
-//!   one network prefix sent more bad signatures or invalid posts in a summary interval than
-//!   `log.warn_bad_requests`.
+//! - `error`: the relay cannot do its job (store writes failing, a listener stopped, a panic).
+//! - `warn`: something bad outside the relay (a peer relay unreachable or refusing, the store
+//!   full), a network prefix sending more bad signatures or invalid posts in a summary interval
+//!   than `log.warn_bad_requests`, the log file falling behind.
 //! - `info`: lifecycle (start, drain, stop); a traffic summary every `log.summary_interval_s`
 //!   when something changed ([`crate::traffic`]); expiry sweeps that removed messages, forwards
-//!   or cancel records; forwards delivered, per peer relay; and limits that refused a request,
-//!   with the client's network prefix so an operator can act on abuse.
-//! - `debug`: one line per post, subscribe, cancel, attach and socket, for tracing a problem.
+//!   or cancel records; forwards delivered, sampled per peer relay. Nothing per client.
+//! - `debug`: the life of each message (post, delivery, ack, cancel, forward, each with its id
+//!   and result) and each connection opened and closed, with the client IP.
+//! - `trace`: every frame, Subscribe, Attach, Resume, Hold, Detach and limit refusal, with the
+//!   reason when refused and the client IP.
 //!
-//! Lines that can repeat under load or attack go through [`sampled!`](crate::sampled): at most
-//! [`SAMPLE_PER_MIN`] per call site a minute, each carrying `suppressed`, the number dropped
-//! since the last one written.
+//! `warn` and `error` lines that can repeat under load or attack go through
+//! [`sampled!`](crate::sampled): at most [`SAMPLE_PER_MIN`] per call site a minute, each carrying
+//! `suppressed`, the number dropped since the last one written.
 //!
-//! What a line may hold: mailbox keys and txids shortened with [`short`], peer relay host
-//! names, network prefixes (never a full client IP) and counts. Never: full addresses or keys,
-//! slates, signatures, challenges, resume tokens, message ids or client IPs.
+//! What a line may hold: mailbox keys and txids shortened with [`short`], peer relay host names
+//! and counts at every level; client IPs and message ids at `debug` and `trace` only. Never, at
+//! any level: full addresses or keys, slates, signatures, challenges or resume tokens.
 
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer, Registry};
 
 use crate::address::parse_address;
 use crate::config::Log;
+use crate::logfile::{self, FileLog};
 
 /// Lines one sampled call site may write per minute.
 pub const SAMPLE_PER_MIN: u32 = 10;
 
-/// Install the global subscriber: stderr, the configured filter (`RUST_LOG` overrides it), and
-/// text or JSON lines. Text has no colour codes unless stderr is a terminal, and no timestamp
-/// when stderr goes to journald, which stamps every line itself.
-pub fn init(cfg: &Log) {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.level));
-    let b = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .with_ansi(std::io::stderr().is_terminal());
-    if cfg.format == "json" {
-        b.json().flatten_event(true).init();
-    } else if std::env::var_os("JOURNAL_STREAM").is_some() {
-        b.without_time().init();
+/// Keeps the log file's writer thread running; dropping it writes what is queued and stops it.
+pub struct LogGuard(#[allow(dead_code)] Option<logfile::Guard>);
+
+/// The file output, once started, for [`file_dropped`].
+static FILE: OnceLock<FileLog> = OnceLock::new();
+
+/// Lines the file output dropped since start (queue full or file not writable); 0 without one.
+pub fn file_dropped() -> u64 {
+    FILE.get().map_or(0, FileLog::dropped)
+}
+
+/// Install the global subscriber: stderr with `log.level` (`RUST_LOG` overrides it), and with
+/// `with_file` and `log.file.enabled` the log file with its own level and format. Text on stderr
+/// has no colour codes unless stderr is a terminal, and no timestamp when stderr goes to
+/// journald, which stamps every line itself. A panic is logged at error before the default hook
+/// runs.
+pub fn init(cfg: &Log, with_file: bool) -> anyhow::Result<LogGuard> {
+    let journald = std::env::var_os("JOURNAL_STREAM").is_some();
+    let console = EnvFilter::try_from_default_env().unwrap_or_else(|_| filter(&cfg.level));
+    init_with(cfg, with_file, console, std::io::stderr, std::io::stderr().is_terminal(), journald)
+}
+
+/// [`init`] with the stderr writer, its filter and its options given, for tests.
+pub fn init_with<W>(
+    cfg: &Log,
+    with_file: bool,
+    console_filter: EnvFilter,
+    console: W,
+    ansi: bool,
+    no_time: bool,
+) -> anyhow::Result<LogGuard>
+where
+    W: for<'w> MakeWriter<'w> + Send + Sync + 'static,
+{
+    let mut layers: Vec<Boxed> = vec![output(&cfg.format, console, ansi, no_time).with_filter(console_filter).boxed()];
+    let mut guard = None;
+    if with_file && cfg.file.enabled {
+        let f = &cfg.file;
+        let policy = logfile::Policy {
+            rotate: logfile::Rotate::parse(&f.rotate).unwrap_or(logfile::Rotate::Daily),
+            max_bytes: f.max_size_mb.saturating_mul(1 << 20),
+            keep: f.keep as usize,
+            compress: f.compress,
+        };
+        let (log, g) = FileLog::start(f.path.clone(), policy)
+            .map_err(|e| anyhow::anyhow!("log.file.path {}: {e}", f.path.display()))?;
+        let _ = FILE.set(log.clone());
+        layers.push(output(&f.format, log, false, false).with_filter(filter(&f.level)).boxed());
+        guard = Some(g);
+    }
+    tracing_subscriber::registry().with(layers).try_init()?;
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(panic = %info, "panic");
+        default_hook(info);
+    }));
+    Ok(LogGuard(guard))
+}
+
+/// The filter for a `level` setting. A bare `trace` or `debug` applies to the relay only, with
+/// the libraries at `info`: their own debug and trace output (HTTP, websocket, TLS) can hold
+/// whole frames, so it is not turned on by accident. A full filter such as
+/// `"debug,tungstenite=trace"` is used as written.
+pub fn filter(level: &str) -> EnvFilter {
+    match level.trim() {
+        l @ ("trace" | "debug") => EnvFilter::new(format!("info,epicmail={l}")),
+        other => EnvFilter::new(other),
+    }
+}
+
+type Boxed = Box<dyn Layer<Registry> + Send + Sync>;
+
+/// One output: text or JSON lines to `w`.
+fn output<W>(format: &str, w: W, ansi: bool, no_time: bool) -> Boxed
+where
+    W: for<'w> MakeWriter<'w> + Send + Sync + 'static,
+{
+    let base = tracing_subscriber::fmt::layer().with_writer(w).with_ansi(ansi);
+    if format == "json" {
+        base.json().flatten_event(true).boxed()
+    } else if no_time {
+        base.without_time().boxed()
     } else {
-        b.init();
+        base.boxed()
     }
 }
 

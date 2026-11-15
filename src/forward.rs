@@ -204,6 +204,7 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
                     metrics::counter!("epicbox_forwards_total", "result" => "ok").increment(1);
                     relay.traffic.add(crate::traffic::Count::ForwardsSent, 1);
                     static FORWARDED: crate::logging::KeyedGate = crate::logging::KeyedGate::new();
+                    tracing::debug!(peer, kind = ?row.kind, result = "ok", attempts, "forward");
                     if let Some(suppressed) = FORWARDED.admit(peer, now_ms()) {
                         tracing::info!(peer, kind = ?row.kind, suppressed, "forwarded");
                     }
@@ -211,6 +212,7 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
                 }
                 Err(Failure::Refused(e)) => {
                     let drop = attempts >= MAX_REFUSALS;
+                    tracing::debug!(peer, kind = ?row.kind, result = "refused", attempts, dropped = drop, "forward");
                     metrics::counter!("epicbox_forwards_total", "result" => "refused").increment(1);
                     relay.traffic.add(crate::traffic::Count::ForwardsFailed, 1);
                     // The text is the peer's: logged escaped, so it cannot add lines to our log.
@@ -225,6 +227,7 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
                 Err(Failure::Transport(e)) => {
                     metrics::counter!("epicbox_forwards_total", "result" => "failed").increment(1);
                     relay.traffic.add(crate::traffic::Count::ForwardsFailed, 1);
+                    tracing::debug!(peer, kind = ?row.kind, result = "retry", attempts, "forward");
                     // The whole peer waits, not only this row.
                     let next = backoff.failed(peer, now_ms());
                     crate::sampled!(warn, peer, error = ?e, attempts, retry_in_s = (next - now_ms()) / 1000, "forward failed");

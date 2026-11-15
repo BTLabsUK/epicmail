@@ -208,14 +208,12 @@ impl Limiter {
         self.http_ip.take(&p, cost.max(1) as f64, m)
     }
 
-    /// Record a request that a limit refused: the `epicbox_limit_refusals_total` metric, and a
-    /// sampled log line with the client's network prefix, which is what an operator needs to act
-    /// on abuse. The full client address is never logged.
+    /// Record a request that a limit refused: the `epicbox_limit_refusals_total` metric, the
+    /// traffic summary's count, and a trace line with the client IP.
     pub fn refused(&self, limit: &'static str, ip: IpAddr) {
         metrics::counter!("epicbox_limit_refusals_total", "limit" => limit).increment(1);
         self.traffic.add(Count::LimitRefusals, 1);
-        let (net, _) = self.prefix(ip);
-        crate::sampled!(info, limit, net = %net, "limit refused a request");
+        tracing::trace!(limit, ip = %ip, "limit refused a request");
     }
 
     /// Count a failed signature against the prefix, and for the log summary.

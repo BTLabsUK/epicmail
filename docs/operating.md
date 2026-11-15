@@ -181,17 +181,42 @@ Retention, mailbox caps and the 7 day limit keep the database small for most rel
 
 ## 8. Logging
 
-The relay writes log lines to stderr and never to a file. Under systemd, journald keeps them
-(`journalctl -u epicmail`); in Docker, the container's log driver does.
+The relay logs to two outputs, each with its own level and format:
+
+- **stderr**, always: `log.level` and `log.format`. Under systemd journald keeps it
+  (`journalctl -u epicmail`); in Docker, the container's log driver does.
+- **a file**, when `[log.file] enabled = true`: `log.file.level` and `log.file.format`, rotated,
+  compressed and pruned by the relay itself (below), so it needs no logrotate.
+
+The usual setup is `info` on stderr for the journal and `trace` or `debug` in the file for
+looking back at what happened to one wallet or one message.
 
 ### Levels
 
-| Level | Used for |
+| Level | What it holds |
 |---|---|
-| `error` | The relay cannot do its job: store reads or writes failing, a listener stopped, the store writer thread dying. Act on every one. |
-| `warn` | Something outside the relay misbehaves or a capacity is reached: a peer relay unreachable or refusing forwards, the store full (`store.max_bytes`), one network prefix sending more bad signatures or invalid posts in a summary interval than `log.warn_bad_requests`. |
-| `info` | Lifecycle: the startup line with the identity, version and switches in force, drain and stop. The traffic summary (below). Expiry sweeps that removed messages, forwards or cancel records. Forwards delivered to another relay, by peer. Each limit that refuses a request, with the limit name and the client's network prefix. |
-| `debug` | One line per socket opened and closed, Subscribe, post, mux/1 Attach or Resume and cancel. Expiry sweeps that removed only used `/v1` challenges or transaction links. For tracing a problem, not for normal running. |
+| `error` | The relay cannot do its job: store reads or writes failing, a listener stopped, the store writer thread dying, a panic. Act on every one. |
+| `warn` | Something bad outside the relay, or a capacity reached: a peer relay unreachable or refusing forwards, the store full (`store.max_bytes`), a network prefix sending more bad signatures or invalid posts in a summary interval than `log.warn_bad_requests`, the log file falling behind. |
+| `info` | The startup line (identity, version, switches), drain and stop. The traffic summary (below). Expiry sweeps that removed messages, forwards or cancel records. Forwards delivered to another relay, sampled per peer. Nothing per client. |
+| `debug` | The life of each message: every post (client IP, shortened sender and recipient, size, message id, and stored, forwarded with the peer, or refused with the reason), every delivery and ack with its message id and shortened mailbox, every cancel, every forward attempt with the peer and the result. Each connection opened and closed, with the client IP, transport, duration and frame counts. |
+| `trace` | All of `debug`, and every frame received (type and size), every Subscribe, Attach and Resume with its result or the reason it was refused, Made refused, Hold, Detach, cancels pushed to wallets, `/v1/pull` proofs, and every request a limit refused, with the client IP. |
+
+A bare `debug` or `trace` applies to the relay only; the libraries (HTTP, websocket, TLS) stay
+at `info`, because their own debug output can hold whole frames. A full filter such as
+`"info,epicmail::forward=trace"` is used as written. `RUST_LOG` overrides `log.level` (stderr
+only).
+
+Sample lines (text format; the file's JSON holds the same fields):
+
+```
+DEBUG epicmail::relay::session: connected socket=7 ip=203.0.113.9
+TRACE epicmail::relay::session: frame socket=7 frame="subscribe" bytes=212
+TRACE epicmail::relay::session::classic: subscribed socket=7 mailbox=esYjKK…JDJd9y ver="3.1.0"
+DEBUG epicmail::relay::post: post ip=203.0.113.9 from=esWQsH…T78BcP@relay.example:443 to=esYjKK…JDJd9y@relay.example:443 size=1873 id=zyFkKokdcpfGjpz3TvudT8PcUmljLWez result="stored"
+DEBUG epicmail::relay::session::classic: delivered socket=7 mailbox=esYjKK…JDJd9y id=zyFkKokdcpfGjpz3TvudT8PcUmljLWez transport="classic"
+DEBUG epicmail::relay::session::classic: acked socket=7 mailbox=esYjKK…JDJd9y id=zyFkKokdcpfGjpz3TvudT8PcUmljLWez transport="classic"
+DEBUG epicmail::relay::session: disconnected socket=7 ip=203.0.113.9 transport="classic" duration_ms=48113 frames_in=9 frames_out=11
+```
 
 ### Traffic summary
 
@@ -211,7 +236,7 @@ INFO epicmail::traffic: traffic interval_s=300 posts_stored=152 posts_forwarded=
 `sockets` and the `*_waiting` values are as they are now. `posts_refused` covers invalid posts,
 limits, a full store and posts for a cancelled transaction; `logins_ok` counts mailboxes proven
 by Subscribe, mux/1 Attach or `/v1/pull`; `bad_signatures` counts every signature that did not
-verify. `delivered` counts a redelivery again.
+verify. `delivered` counts a redelivery again. The summary holds counts only.
 
 At the same time, each network prefix (/24, /48) that sent more than `log.warn_bad_requests`
 (30 by default; 0 turns it off) bad signatures, or more than that many invalid posts, in the
@@ -225,47 +250,81 @@ WARN epicmail::traffic: many bad requests from one network suppressed=0 net=203.
 A wallet that signs the fixed first challenge (before 3.5.2) fails its Subscribe on every
 connection, so a prefix with many such wallets can show up here too.
 
-### Level setting
+### Privacy
 
-`log.level = "info"` is the default and the right setting for a public relay. To trace a
-problem, set `level = "info,epicmail=debug"` (or the same in `RUST_LOG`) and restart. Do not
-use a bare `debug`: it also enables the libraries' own debug output (HTTP, websocket, TLS),
-which is not reviewed for what it holds.
+- **At `info`, `warn` and `error`** no line names a client: no IP, no address. Clients appear
+  only as network prefixes in the bad-request warning; peer relays by `domain:port`.
+- **At `debug` and `trace`** lines hold client IP addresses, shortened mailbox keys
+  (`esYjKK…JDJd9y`: the first and last six characters, enough to follow one mailbox and to match
+  a user's report, not enough to address mail), the domains in addresses, message ids, sizes and
+  timing. That is personal data: a log at these levels shows who talked to whom and when. Keep
+  such logs only as long as you need them (below), restrict who can read them (the log
+  directory is `0750` for the service user), and do not share them.
+- **Never, at any level:** full keys or addresses, slates, signatures, challenges, txids in full,
+  resume tokens or any payload. Text from peer relays is stripped of control characters.
+  `tests/log_privacy.rs` runs two relays through posts, deliveries, a cancel, a forward, a mux/1
+  session and bad requests with both outputs at `trace`, and fails if a line holds any of these.
 
-### What a line holds
+To log no client IPs at all, keep `log.level` at `info` and leave `[log.file]` off, or set its
+level to `info`.
 
-- Mailbox keys, sender and recipient keys and txids are shortened to their first and last six
-  characters: `from=9rGnvF…4fDoMd@relay.example:443`. That is enough to follow one mailbox
-  through the log and to match a user's report, and not enough to address mail to it.
-- Peer relays appear by `domain:port`. Clients appear only by network prefix (`net=203.0.113.0/24`,
-  the same grouping the limits use), and only on limit refusals, bad-request warnings and, at
-  debug, on socket open. The traffic summary holds counts only.
-- Never logged: full keys or addresses, slates, signatures, challenges, message ids, resume
-  tokens, client IP addresses. Text received from peer relays is stripped of control
-  characters. `tests/log_privacy.rs` drives two relays at debug level, through a forward, bad
-  requests, the summary and the warning, and fails if a line holds any of these.
-
-Common fields: `socket` (a number local to the process), `net`, `mailbox`, `from`, `to`,
-`txid`, `peer`, `limit`, `result`, `error`, `suppressed`.
+Common fields: `socket` (a number local to the process), `ip`, `net`, `mailbox`, `from`, `to`,
+`id`, `size`, `txid` (shortened), `peer`, `transport`, `limit`, `result`, `reason`, `error`,
+`suppressed`.
 
 ### Floods
 
-Lines that a client or a failing dependency can repeat (store errors, forward failures, peer
-refusals, limit refusals, bad-request warnings, a full store) are sampled: each call site writes
+`warn` and `error` lines that a client or a failing dependency can repeat (store errors, forward
+failures, peer refusals, bad-request warnings, a full store) are sampled: each call site writes
 at most 10 lines a minute, and each line carries `suppressed`, the number dropped since the
-previous one. Forwards delivered are sampled per peer relay: at most 10 lines a minute for each. A flood
-therefore costs at most a few hundred lines a minute. Exact counts are in the traffic summary and the metrics
-(`epicbox_limit_refusals_total`, `epicbox_forwards_total`, `epicbox_store_commit_errors_total`).
+previous one. Forwards delivered are sampled per peer relay at `info` in the same way. Exact
+counts are in the traffic summary and the metrics (`epicbox_limit_refusals_total`,
+`epicbox_forwards_total`, `epicbox_store_commit_errors_total`).
+
+`debug` and `trace` are not sampled: each event is one line. Writing the file never slows the
+relay: lines go through a queue of 16384 to a writer thread, and when the disk cannot keep up
+the queue is full and new lines are dropped. Every 15 s the relay logs at `warn` how many lines
+the file dropped, if any. Rotation by size (`max_size_mb`) and `keep` bound the disk the file
+can use: at most `(keep + 1) × max_size_mb`, less with compression.
 
 ### Format
 
-`log.format = "text"` writes one human-readable line per event, without colour codes unless
-stderr is a terminal, and without a timestamp when stderr is connected to journald (journald
-stamps each line). `"json"` writes one JSON object per line with the fields at the top level,
-for a log shipper.
+`"text"` writes one human-readable line per event, without colour codes unless stderr is a
+terminal, and without a timestamp when stderr is connected to journald (journald stamps each
+line). `"json"` writes one JSON object per line with the fields at the top level and a
+`timestamp`, for a log shipper or `jq`.
+
+### The log file
+
+```toml
+[log.file]
+enabled = true
+path = "/var/log/epicmail/epicmail.log"
+level = "trace"
+format = "json"
+rotate = "daily"        # "hourly", "daily" or "size"
+max_size_mb = 100       # with "size" the only trigger; otherwise also a cap per file
+keep = 14               # rotated files kept
+compress = true         # gzip rotated files
+```
+
+The systemd unit creates `/var/log/epicmail` for the service (`LogsDirectory=epicmail`); with
+another path, make sure the service may write there (`ReadWritePaths=` in a drop-in, since the
+unit runs with `ProtectSystem=strict`). The relay rotates the file at the turn of each UTC hour
+or day, or before it grows past `max_size_mb`, to
+`epicmail-<YYYYmmddTHHMMSS>Z.log`, gzips it in the background (`.log.gz`) when `compress` is
+on, and deletes all but the newest `keep` rotated files. A file left from an earlier hour or day
+is rotated when the relay starts. With `rotate = "daily"` and `keep = 14` the file holds about
+two weeks. Read it with `jq`, for example the life of one message:
+
+```
+zcat -f /var/log/epicmail/epicmail*.log* | jq -c 'select(.id == "zyFkKokdcpfGjpz3TvudT8PcUmljLWez")'
+```
 
 ### Rotation and retention
 
+- **The log file** rotates, compresses and prunes itself (above). For two weeks of history,
+  `rotate = "daily"` and `keep = 14`.
 - **journald.** journald rotates on its own; set the size and age it keeps in
   `/etc/systemd/journald.conf.d/epicmail.conf`, for example:
 
@@ -276,16 +335,18 @@ for a log shipper.
   ```
 
   then `systemctl restart systemd-journald`. The unit file also sets a per-service rate limit
-  (`LogRateLimitIntervalSec`, `LogRateLimitBurst`) as a backstop to the relay's own sampling.
+  (`LogRateLimitIntervalSec`, `LogRateLimitBurst`) as a backstop to the relay's own sampling. With
+  `log.level` at `debug` or `trace` the journal holds client IPs too; set its retention
+  accordingly.
 - **Docker.** The default `json-file` driver does not rotate. Use the `local` driver, which
   does, or set limits:
   `docker run --log-driver local --log-opt max-size=20m --log-opt max-file=5 ...`.
-- **A file.** If you redirect stderr to a file yourself, rotate it with logrotate and
-  `copytruncate`, since the relay keeps stderr open.
+- **stderr to a file of your own.** Rotate it with logrotate and `copytruncate`, since the relay
+  keeps stderr open. `[log.file]` is simpler.
 
-Fourteen days of relay logs is a reasonable default. The reverse proxy's access log holds full
-client IP addresses and is usually the more sensitive log: keep it short, or use a log format
-without `$remote_addr` (nginx) if you do not need it.
+Fourteen days is a reasonable default for relay logs. The reverse proxy's access log holds full
+client IP addresses too: keep it as short, or use a log format without `$remote_addr` (nginx) if
+you do not need it.
 
 ## 9. Upgrade and roll back
 

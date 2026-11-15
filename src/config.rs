@@ -202,13 +202,13 @@ pub struct HttpApi {
     pub max_waiting: u32,
 }
 
-/// `[log]`: logging to stderr.
+/// `[log]`: logging to stderr (journald under systemd), and optionally to a file.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Log {
     /// "text" or "json".
     pub format: String,
-    /// tracing filter, e.g. "info" or "epicmail=debug".
+    /// tracing filter for stderr, e.g. "info" or "info,epicmail=debug". `RUST_LOG` overrides it.
     pub level: String,
     /// Seconds between traffic summaries at info. A summary is written only when something
     /// changed since the last one.
@@ -216,6 +216,43 @@ pub struct Log {
     /// Bad signatures, or invalid posts, from one network prefix in one summary interval above
     /// which a warning names the prefix. 0: never.
     pub warn_bad_requests: u64,
+    /// `[log.file]`: a second output, to a file the relay rotates itself.
+    pub file: LogFile,
+}
+
+/// `[log.file]`: the log file output, with its own level and format.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LogFile {
+    pub enabled: bool,
+    pub path: PathBuf,
+    /// tracing filter for the file; it may be more verbose than `log.level`.
+    pub level: String,
+    /// "json" or "text".
+    pub format: String,
+    /// "hourly", "daily" or "size".
+    pub rotate: String,
+    /// A file is rotated before it grows past this; with "size" it is the only trigger.
+    pub max_size_mb: u64,
+    /// Rotated files kept.
+    pub keep: u32,
+    /// Gzip rotated files.
+    pub compress: bool,
+}
+
+impl Default for LogFile {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: "/var/log/epicmail/epicmail.log".into(),
+            level: "trace".into(),
+            format: "json".into(),
+            rotate: "daily".into(),
+            max_size_mb: 100,
+            keep: 14,
+            compress: true,
+        }
+    }
 }
 
 /// `[test]`: switches for test rigs.
@@ -335,7 +372,13 @@ impl Default for HttpApi {
 
 impl Default for Log {
     fn default() -> Self {
-        Self { format: "text".into(), level: "info".into(), summary_interval_s: 300, warn_bad_requests: 30 }
+        Self {
+            format: "text".into(),
+            level: "info".into(),
+            summary_interval_s: 300,
+            warn_bad_requests: 30,
+            file: LogFile::default(),
+        }
     }
 }
 
@@ -386,6 +429,25 @@ impl Config {
         }
         if !(1..=86_400).contains(&self.log.summary_interval_s) {
             bail!("log.summary_interval_s must be 1 to 86400");
+        }
+        let f = &self.log.file;
+        if !matches!(f.format.as_str(), "text" | "json") {
+            bail!("log.file.format must be \"text\" or \"json\"");
+        }
+        if let Err(e) = tracing_subscriber::EnvFilter::try_new(&f.level) {
+            bail!("log.file.level is not a valid filter: {e}");
+        }
+        if crate::logfile::Rotate::parse(&f.rotate).is_none() {
+            bail!("log.file.rotate must be \"hourly\", \"daily\" or \"size\"");
+        }
+        if !(1..=1_000_000).contains(&f.max_size_mb) {
+            bail!("log.file.max_size_mb must be 1 to 1000000");
+        }
+        if !(1..=10_000).contains(&f.keep) {
+            bail!("log.file.keep must be 1 to 10000");
+        }
+        if f.enabled && f.path.file_name().is_none() {
+            bail!("log.file.path must name a file");
         }
         for (k, v) in &self.federation.peers {
             if !(v.starts_with("ws://") || v.starts_with("wss://")) {
@@ -468,7 +530,7 @@ mod tests {
     #[test]
     fn defaults_validate_and_bad_values_are_refused() {
         base().validate().unwrap();
-        let cases: [fn(&mut Config); 11] = [
+        let cases: [fn(&mut Config); 14] = [
             |c| c.server.domain.clear(),
             |c| c.store.vacuum_hour_utc = 24,
             |c| c.store.readers = 0,
@@ -477,6 +539,9 @@ mod tests {
             |c| c.log.format = "jsn".into(),
             |c| c.log.level = "epicmail=loud".into(),
             |c| c.log.summary_interval_s = 0,
+            |c| c.log.file.rotate = "weekly".into(),
+            |c| c.log.file.keep = 0,
+            |c| c.log.file.level = "epicmail=loud".into(),
             |c| {
                 c.federation.peers.insert("a.example:443".into(), "http://a.example".into());
             },

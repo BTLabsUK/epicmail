@@ -18,6 +18,7 @@ use super::{client_ip, err, reply, too_many, AppState, HTTPS_PROTOCOL};
 use crate::address::parse_address;
 use crate::clock::now_ms;
 use crate::ids::is_msgid;
+use crate::logging::short;
 use crate::relay::waiters::WaitRefusal;
 use crate::relay::{PostOutcome, PostReq, Refusal, Relay};
 use crate::sig;
@@ -247,6 +248,12 @@ pub(super) async fn pull(
     }
     let keys: HashSet<String> = proven.iter().filter_map(|p| p.key.clone().ok()).collect();
     relay.traffic.add(crate::traffic::Count::LoginsOk, keys.len() as u64);
+    for p in &proven {
+        match &p.key {
+            Ok(k) => tracing::trace!(ip = %ip, mailbox = %short(k), transport = "https", "pull proven"),
+            Err(reason) => tracing::trace!(ip = %ip, reason, transport = "https", "pull refused"),
+        }
+    }
     let lease_ms = (h.lease_s.max(1) * 1000) as i64;
 
     // A long poll registers before the first claim, so a message stored in between still
@@ -349,6 +356,9 @@ async fn claim_round(
         if !msgs.is_empty() {
             metrics::counter!("epicbox_deliveries_total", "mode" => "https").increment(msgs.len() as u64);
             relay.traffic.add(crate::traffic::Count::Delivered, msgs.len() as u64);
+            for m in &msgs {
+                tracing::debug!(mailbox = %short(key), id = %m.msgid, transport = "https", "delivered");
+            }
         }
         let msgs: Vec<Value> = msgs.into_iter().map(message_json).collect();
         results.push(json!({"address": p.address, "messages": msgs}));
@@ -411,6 +421,7 @@ pub(super) async fn made(
             refused += 1;
         }
     }
+    let acked_ids = tracing::enabled!(tracing::Level::DEBUG).then(|| ids.join(","));
     let removed = if ids.is_empty() {
         0
     } else {
@@ -426,6 +437,9 @@ pub(super) async fn made(
         metrics::counter!("epicbox_made_total", "mode" => "https").increment(removed);
         relay.traffic.add(crate::traffic::Count::Acked, removed);
         relay.registry.wake(&key);
+    }
+    if let Some(ids) = acked_ids {
+        tracing::debug!(ip = %ip, mailbox = %short(&key), ids = %ids, removed, refused, transport = "https", "acked");
     }
     reply(R, StatusCode::OK, json!({"removed": removed, "refused": refused}))
 }
