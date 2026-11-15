@@ -150,6 +150,7 @@ if [ $NEWCONF = 0 ] && [ $BACKUP = 1 ] && [ -n "$STORE" ] && $SUDO test -f "$STO
   $SUDO install -d -m 0700 "/var/backups/$NAME"
   if command -v sqlite3 >/dev/null 2>&1; then
     $SUDO sqlite3 "$STORE" ".backup '$OUT'"
+    $SUDO chmod 0600 "$OUT"
   else
     if [ $ACTIVE = 1 ]; then
       say "no sqlite3: stopping $NAME for the copy"
@@ -157,10 +158,9 @@ if [ $NEWCONF = 0 ] && [ $BACKUP = 1 ] && [ -n "$STORE" ] && $SUDO test -f "$STO
       START=1
     fi
     for s in "" -wal; do
-      if $SUDO test -f "$STORE$s"; then $SUDO cp "$STORE$s" "$OUT$s"; fi
+      if $SUDO test -f "$STORE$s"; then $SUDO cp "$STORE$s" "$OUT$s" && $SUDO chmod 0600 "$OUT$s"; fi
     done
   fi
-  $SUDO chmod 0600 "$OUT"*
 fi
 
 # 4. Files in place. The binary is swapped by rename, so a running relay is not disturbed.

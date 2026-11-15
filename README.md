@@ -60,19 +60,25 @@ and 443, and run:
 curl -fsSL https://raw.githubusercontent.com/BTLabsUK/epicmail/main/tools/get.sh | sh -s -- --domain relay.example.org
 ```
 
-It downloads the latest release binary for the machine, checks it against the release's
+It downloads the latest release binary for the machine, checks it against the release's signed
 `SHA256SUMS`, installs the relay as a hardened systemd service with its config in
 `/etc/epicmail/epicmail.toml`, and installs Caddy for TLS. Wallets then use Epicbox domain
 `relay.example.org`, port 443. Run the same command again to upgrade: it backs up the store,
 checks the config with the new binary and restarts only when something changed.
 
-- `--version v0.1.2` installs a given release instead of the latest.
+- `--version 0.1.1` installs a given release instead of the latest.
 - `--no-tls` skips Caddy, for a server with its own proxy. An nginx, Caddy or Apache already on
   the machine is never changed; the script prints the site to add instead.
 - `--uninstall` removes the service and binary and keeps config and data.
 
-Each release lists its build provenance, so a download can be checked by hand:
-`gh attestation verify epicmail-x86_64-linux-musl --repo BTLabsUK/epicmail`.
+Releases are signed with [minisign](https://jedisct1.github.io/minisign/). With `minisign`
+installed the script checks the signature and refuses a release that fails it; without it, it
+says so and checks the SHA-256 only. To check a download by hand:
+
+```sh
+minisign -Vm SHA256SUMS -P RWQ+swweZiIFJfbre/aOhYqQ1+82BHFnw8gF6ETbhCp5b7RB6RuMEVtP
+sha256sum -c --ignore-missing SHA256SUMS
+```
 
 ### By hand
 
@@ -106,7 +112,7 @@ the wallet's Epicbox domain to `localhost`, port `3423`, with TLS off.
 
 ```sh
 cargo build --release                 # target/release/epicmail
-tools/build-static.sh [aarch64]       # static Linux binary (musl), this host's arch by default
+tools/build-static.sh                 # static x86_64 Linux binary (musl)
 docker build -t epicmail .            # static binary on an empty base, unprivileged user
 ```
 
@@ -317,7 +323,6 @@ issue.
 | `examples/` | Traffic generators and checks for a running relay |
 | `packaging/` | systemd unit, nginx and Caddy examples, example config |
 | `tools/` | One-line installer (`get.sh`), install script, static build, classic wallet run, export from Postgres-backed relays |
-| `.github/` | Release workflow: static binaries, checksums, attestations, install test |
 
 ## Documentation
 
