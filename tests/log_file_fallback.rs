@@ -26,7 +26,7 @@ fn an_unwritable_log_file_is_a_warning_not_a_failure() {
     let mut log = Log::default();
     assert!(log.file.enabled, "the log file is on by default");
     assert_eq!(log.file.path, std::path::Path::new("/var/log/epicmail/epicmail.log"));
-    assert_eq!((log.file.level.as_str(), log.file.format.as_str()), ("trace", "json"));
+    assert_eq!((log.file.level.as_str(), log.file.format.as_str()), ("info", "json"));
 
     // A directory that cannot be created: its parent is a regular file.
     let dir = tempfile::tempdir().unwrap();
