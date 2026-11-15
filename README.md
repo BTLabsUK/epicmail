@@ -284,7 +284,8 @@ delivery counts. It holds no client IPs. Deleted slates are overwritten where th
 I/O, and `store.max_bytes` caps the live data.
 
 Logs show keys only shortened, clients only by network prefix, and never slates, signatures,
-tokens or IPs; lines a client can repeat are sampled. Metric labels carry outcomes and limit
+tokens or IPs; lines a client can repeat are sampled. A traffic summary every five minutes
+(when anything changed) shows what the relay did in counts only. Metric labels carry outcomes and limit
 names only.
 
 ## Security
@@ -332,7 +333,7 @@ issue.
 | `src/forward.rs` | Forwarding to other relays |
 | `src/limits.rs` | Rate limits and socket counts |
 | `src/address.rs`, `src/sig.rs` | Epicbox addresses and signatures |
-| `src/logging.rs`, `src/metrics.rs` | Log helpers, Prometheus metrics |
+| `src/logging.rs`, `src/metrics.rs`, `src/traffic.rs` | Log helpers, Prometheus metrics, the log's traffic summary |
 | `src/migrate.rs` | JSON Lines import and export |
 | `tests/` | Loopback relays, log privacy, signature differential |
 | `examples/` | Traffic generators and checks for a running relay |

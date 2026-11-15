@@ -1,6 +1,7 @@
 //! Everything the relay logs at debug level while it serves a post, a subscribe, a delivery, a
-//! Made, a cancel and a /v1 pull holds no full key, address, slate, signature, challenge, message
-//! id or client IP. A separate test binary, because it installs the global log subscriber.
+//! Made, a cancel, a forward to another relay and bad requests, and in its traffic summary and
+//! bad-request warning, holds no full key, address, slate, signature, challenge, message id or
+//! client IP. A separate test binary, because it installs the global log subscriber.
 
 use std::io::Write;
 use std::net::SocketAddr;
@@ -72,19 +73,17 @@ async fn debug_logs_hold_nothing_private() {
     let writer = buf.clone();
     tracing_subscriber::fmt().with_env_filter("debug").with_ansi(false).with_writer(move || writer.clone()).init();
 
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let dir = tempfile::tempdir().unwrap();
-    let mut cfg = Config::default();
-    cfg.server.domain = "relay.test".into();
-    cfg.store.path = dir.path().join("t.db");
-    cfg.validate().unwrap();
-    let cfg = Arc::new(cfg);
-    let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&cfg.store.path, 1, 64).unwrap());
-    let relay = Relay::new(cfg, store);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let app = http::router(AppState { relay, metrics: None, metrics_on_main: false })
-        .into_make_service_with_connect_info::<SocketAddr>();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    // A second relay, so a slate is forwarded and the forward is logged.
+    let other = serve(dir.path(), "other.test", |_| {}).await;
+    let addr = serve(dir.path(), "relay.test", |c| {
+        c.federation.allow_private = true;
+        c.federation.peers.insert("other.test:443".into(), format!("ws://{other}/"));
+        c.log.summary_interval_s = 1;
+        c.log.warn_bad_requests = 1;
+    })
+    .await;
 
     let (alice, bob) = (Key::new(), Key::new());
     let txid = "0123456789abcdef0123456789abcdef";
@@ -115,20 +114,60 @@ async fn debug_logs_hold_nothing_private() {
     let cancel_sig = alice.sign(&format!("{CANCEL_SIG_PREFIX}{txid}"));
     send(&mut a, &json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":txid,"signature":cancel_sig})).await;
     recv(&mut a).await;
-    // A refused Subscribe and a socket closing log too.
-    send(&mut a, &json!({"type":"Subscribe","address":alice.pk,"ver":"3.0.0","signature":"00"})).await;
-    recv(&mut a).await;
+    // A slate for a mailbox on the other relay is forwarded there.
+    let carol = Key::new();
+    let far_body =
+        json!({"destination":{"public_key":carol.pk,"domain":"other.test","port":443},"secret":"FARPAYLOAD"})
+            .to_string();
+    let far_sig = alice.sign(&far_body);
+    let far = json!({"type":"PostSlate","from":format!("{}@relay.test",alice.pk),"to":format!("{}@other.test",carol.pk),
+        "str":far_body,"signature":far_sig});
+    send(&mut a, &far).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    // Refused Subscribes, an invalid post and a socket closing log too; three bad signatures
+    // from one network are over the warning threshold of 1.
+    for _ in 0..3 {
+        send(&mut a, &json!({"type":"Subscribe","address":alice.pk,"ver":"3.0.0","signature":"00"})).await;
+        recv(&mut a).await;
+    }
+    for _ in 0..2 {
+        send(&mut a, &json!({"type":"PostSlate","from":alice.pk,"to":bob.pk,"str":"x","signature":"00"})).await;
+        recv(&mut a).await;
+    }
     drop(a);
     drop(b);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let logs = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    // The summary (every second here), the warning and the forward line.
+    let mut logs = String::new();
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        logs = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        if logs.contains(" traffic ")
+            && logs.contains("many bad requests")
+            && logs.contains("epicmail::forward: forwarded")
+        {
+            break;
+        }
+    }
     assert!(logs.contains("subscribed") && logs.contains("post") && logs.contains("transaction cancelled"), "{logs}");
+    let line =
+        |needle: &str| logs.lines().find(|l| l.contains(needle)).unwrap_or_else(|| panic!("no {needle}:\n{logs}"));
+    let summary = line(" traffic ");
+    assert!(
+        summary.contains(" INFO ") && summary.contains("posts_stored=") && summary.contains("bad_signatures="),
+        "{summary}"
+    );
+    let warning = line("many bad requests");
+    assert!(warning.contains(" WARN ") && warning.contains("net=127.0.0.0/24"), "{warning}");
+    let forwarded = line("epicmail::forward: forwarded");
+    assert!(forwarded.contains(" INFO ") && forwarded.contains("peer=\"other.test:443\""), "{forwarded}");
     for secret in [
         alice.pk.as_str(),
         bob.pk.as_str(),
+        carol.pk.as_str(),
         "PAYLOAD",
         slate_sig.as_str(),
+        far_sig.as_str(),
         sub_sig.as_str(),
         cancel_sig.as_str(),
         challenge.as_str(),
@@ -138,4 +177,24 @@ async fn debug_logs_hold_nothing_private() {
     ] {
         assert!(!logs.contains(secret), "log holds {secret}:\n{logs}");
     }
+}
+
+/// A relay for `domain` on a loopback port, with its forward manager and log summary running.
+async fn serve(dir: &std::path::Path, domain: &str, tweak: impl FnOnce(&mut Config)) -> SocketAddr {
+    let mut cfg = Config::default();
+    cfg.server.domain = domain.into();
+    cfg.store.path = dir.join(format!("{domain}.db"));
+    tweak(&mut cfg);
+    cfg.validate().unwrap();
+    let cfg = Arc::new(cfg);
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&cfg.store.path, 1, 64).unwrap());
+    let relay = Relay::new(cfg, store);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = http::router(AppState { relay: relay.clone(), metrics: None, metrics_on_main: false })
+        .into_make_service_with_connect_info::<SocketAddr>();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::spawn(epicmail::forward::run(relay.clone()));
+    tokio::spawn(epicmail::traffic::run(relay));
+    addr
 }

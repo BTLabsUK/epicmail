@@ -158,6 +158,7 @@ impl Session {
             return Flow::Continue;
         };
         metrics::counter!("epicbox_subscribe_total", "result" => "ok").increment(1);
+        r.traffic.add(crate::traffic::Count::LoginsOk, 1);
         if ver.is_some() {
             self.ver = ver;
         }
@@ -255,6 +256,7 @@ impl Session {
                     self.inflight = Some(Inflight { id: m.id });
                 }
                 metrics::counter!("epicbox_deliveries_total", "mode" => "classic").increment(1);
+                r.traffic.add(crate::traffic::Count::Delivered, 1);
                 self.send(ws, frame).await;
             }
             Ok(_) => {
@@ -348,6 +350,7 @@ impl Session {
             return;
         }
         metrics::counter!("epicbox_made_total", "mode" => "classic").increment(1);
+        r.traffic.add(crate::traffic::Count::Acked, 1);
         self.send(ws, ok()).await;
         self.inflight = None;
         self.attempts = 0;
