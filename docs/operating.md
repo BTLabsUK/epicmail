@@ -14,6 +14,25 @@ epicmail selftest     --config epicmail.toml
 
 ## 1. Install
 
+### Install script
+
+On Linux with systemd, `tools/install.sh` does the binary and systemd steps below in one go. Run
+it from a checkout as your own user; it builds with cargo and uses sudo only to install.
+
+```
+tools/install.sh --domain relay.example.org   # first install: build, configure, start
+tools/install.sh                              # upgrade: back up, build, check, replace, restart
+tools/install.sh --uninstall                  # remove service and binary; config and data stay
+```
+
+A first install writes `/etc/epicmail/epicmail.toml` from the example with `server.domain` and
+`store.path = "/var/lib/epicmail/epicmail.db"` set, installs the binary as
+`/usr/local/bin/epicmail` and the unit as `epicmail.service`, starts it and waits for `/ready`.
+An existing config is never changed. An upgrade first backs up the store with `sqlite3` into
+`/var/backups/epicmail/`, then runs `check-config` with the new binary before it replaces
+anything. `--name` installs a second instance with its own unit, config and data directories (add
+`--prefix` to keep its binary apart too), `--bin` installs a binary built elsewhere, and `--help` lists the rest.
+
 ### Binary
 
 ```
