@@ -1591,7 +1591,10 @@ async fn txcancel_cancel_confirmed_ambiguous_and_bad_signature() {
     bad["signature"] = json!(mallory.sign(TXID));
     send(&mut a, bad).await;
     let e = recv(&mut a).await;
-    assert_eq!((e["code"].as_str(), e["kind"].as_str(), e["ref"].as_str()), (Some("bad_signature"), Some("InvalidSignature"), Some("c2")));
+    assert_eq!(
+        (e["code"].as_str(), e["kind"].as_str(), e["ref"].as_str()),
+        (Some("bad_signature"), Some("InvalidSignature"), Some("c2"))
+    );
     // Missing txid.
     send(&mut a, json!({"type":"CancelTx","ref":"c3","address":alice.pk,"signature":"00"})).await;
     assert_eq!(recv(&mut a).await["code"], "bad_request");
