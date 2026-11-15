@@ -11,7 +11,7 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![MSRV 1.100](https://img.shields.io/badge/rust-1.100-orange.svg)](rust-toolchain.toml)
-[![Release](https://img.shields.io/github/v/release/BTLabsUK/epicmail)](https://github.com/BTLabsUK/epicmail/releases/latest)
+[![Version](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2FBTLabsUK%2Fepicmail%2Fmain%2FCargo.toml&query=%24.package.version&label=version&color=informational)](Cargo.toml)
 [![Epicbox 2.0.0 · 3.0.0 · 3.1.0](https://img.shields.io/badge/epicbox-2.0.0%20%C2%B7%203.0.0%20%C2%B7%203.1.0-6f42c1.svg)](#protocols)
 
 [Run a relay](#run-a-relay) · [Build](#build-from-source) · [Operating](docs/operating.md) ·
