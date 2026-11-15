@@ -60,10 +60,10 @@ and 443, and run:
 curl -fsSL https://raw.githubusercontent.com/BTLabsUK/epicmail/main/tools/get.sh | sh -s -- --domain relay.example.org
 ```
 
-It downloads the latest release binary for the machine, checks it against the release's signed
+It downloads the latest release binary for the machine, checks it with `minisign` (required) against the release's signed
 `SHA256SUMS`, installs the relay as a hardened systemd service with its config in
 `/etc/epicmail/epicmail.toml`, and installs Caddy for TLS. Wallets then use Epicbox domain
-`relay.example.org`, port 443. Run the same command again to upgrade: it backs up the store,
+`relay.example.org`, port 443. Run the same command again to upgrade (without `--domain`: `curl -fsSL .../tools/get.sh | sh`): it backs up the store,
 checks the config with the new binary and restarts only when something changed.
 
 - `--version 0.1.2` installs a given release instead of the latest.

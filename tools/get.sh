@@ -4,9 +4,9 @@
 #   curl -fsSL https://raw.githubusercontent.com/BTLabsUK/epicmail/main/tools/get.sh | sh -s -- --domain relay.example.org
 #
 # It downloads the release's static binary for this machine and its SHA256SUMS, checks the
-# signature on SHA256SUMS (with minisign, when it is installed) and the binary's checksum, and
-# refuses on any mismatch. Then it installs the relay with tools/install.sh and the packaging
-# files from the main branch. Unless --no-tls, it installs Caddy and serves the relay as
+# signature on SHA256SUMS (minisign is required; the key is pinned in this script) and the
+# binary's checksum, and refuses on any mismatch. Then it fetches the source of the same tag
+# and installs the relay with that tag's tools/install.sh and packaging files. Unless --no-tls, it installs Caddy and serves the relay as
 # wss://DOMAIN. Run it again to upgrade; a run with nothing new changes nothing.
 #
 # Options:
@@ -17,7 +17,7 @@
 #                     passed to install.sh (sh install.sh --help explains them)
 #
 # Needs Linux with systemd on x86_64 or aarch64, curl, sha256sum, and sudo unless run as root.
-# minisign (apt/dnf install minisign) makes it check the release signature too.
+# minisign (apt/dnf install minisign) checks the release signature; there is no way to skip it.
 #
 # For mirrors, forks and tests: EPICMAIL_REPO=owner/name takes releases and files from another
 # repository; EPICMAIL_DOWNLOAD=URL takes the release files from URL/<file> (file:///dir works);
@@ -97,15 +97,12 @@ fetch() { curl -fsSL -o "$TMP/$2" "$1" || die "cannot download $1"; }
 
 # 2. SHA256SUMS and its signature.
 fetch "$BASE/SHA256SUMS" SHA256SUMS
-if command -v minisign >/dev/null 2>&1; then
-  fetch "$BASE/SHA256SUMS.sig" SHA256SUMS.sig
-  minisign -Vq -P "$KEY" -m "$TMP/SHA256SUMS" -x "$TMP/SHA256SUMS.sig" >/dev/null 2>&1 ||
-    die "the signature on SHA256SUMS does not verify against the release key. Nothing was installed."
-  say "release signature checked (minisign key 250522661E0CB33E)"
-else
-  say "minisign is not installed, so the release signature was NOT checked. To check it, install"
-  say "minisign and run this again, or check SHA256SUMS by hand: minisign -Vm SHA256SUMS -P $KEY"
-fi
+command -v minisign >/dev/null 2>&1 ||
+  die "minisign is needed to check the release signature. Install it (apt install minisign, dnf install minisign, brew install minisign) and run this again."
+fetch "$BASE/SHA256SUMS.sig" SHA256SUMS.sig
+minisign -Vq -P "$KEY" -m "$TMP/SHA256SUMS" -x "$TMP/SHA256SUMS.sig" >/dev/null 2>&1 ||
+  die "the signature on SHA256SUMS does not verify against the release key. Nothing was installed."
+say "release signature checked (minisign key 250522661E0CB33E)"
 
 # 3. The binary for this machine, checked against SHA256SUMS.
 if [ -z "$VERSION" ]; then
@@ -126,11 +123,18 @@ fetch "$BASE/$BIN" "$BIN"
 say "checksum checked"
 chmod 0755 "$TMP/$BIN"
 
-# install.sh and the files it installs, from the main branch, in a checkout's layout.
+# install.sh and the files it installs, from the source of the same tag, in a checkout's layout.
 mkdir "$TMP/tools" "$TMP/packaging"
-fetch "$SRC/tools/install.sh" tools/install.sh
-fetch "$SRC/packaging/epicmail.service" packaging/epicmail.service
-fetch "$SRC/packaging/epicmail.example.toml" packaging/epicmail.example.toml
+if [ -n "${EPICMAIL_SOURCE:-}" ]; then
+  fetch "$SRC/tools/install.sh" tools/install.sh
+  fetch "$SRC/packaging/epicmail.service" packaging/epicmail.service
+  fetch "$SRC/packaging/epicmail.example.toml" packaging/epicmail.example.toml
+else
+  command -v tar >/dev/null 2>&1 || die "tar is needed"
+  fetch "https://github.com/$REPO/archive/refs/tags/v$VERSION.tar.gz" source.tar.gz
+  (cd "$TMP" && tar -xzf source.tar.gz --strip-components=1 --wildcards '*/tools/install.sh' '*/packaging') ||
+    die "cannot unpack the source of v$VERSION"
+fi
 
 # 4. Install, upgrade or remove the relay.
 EPICMAIL_GET=1 sh "$TMP/tools/install.sh" --bin "$TMP/$BIN" "$@"

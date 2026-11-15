@@ -20,10 +20,17 @@ epicmail selftest     --config epicmail.toml
 curl -fsSL https://raw.githubusercontent.com/BTLabsUK/epicmail/main/tools/get.sh | sh -s -- --domain relay.example.org
 ```
 
+To upgrade, run it without `--domain`:
+
+```
+curl -fsSL https://raw.githubusercontent.com/BTLabsUK/epicmail/main/tools/get.sh | sh
+```
+
 `tools/get.sh` downloads a release's static binary and its `SHA256SUMS`, and refuses them unless
-the binary matches the checksum and, when `minisign` is installed, the signature on `SHA256SUMS`
-verifies against the release key pinned in the script. It then runs the install script below
-with the binary and the packaging files from the main branch. Unless `--no-tls`,
+the binary matches the checksum and the signature on `SHA256SUMS` verifies against the release
+key pinned in the script. `minisign` must be installed; the check cannot be skipped. It then
+fetches the source of the same tag and runs that tag's install script (below) with the binary and
+the packaging files. Unless `--no-tls`,
 it then installs Caddy from Caddy's own apt or dnf repository and writes `/etc/caddy/Caddyfile`
 with a site for the domain that proxies to the relay (websocket upgrade, one-hour timeouts,
 `/metrics` answered with 404). It never changes a web server it did not install: with nginx,
