@@ -67,6 +67,7 @@ docker build -t epicmail .
 docker run -d --name relay --restart on-failure \
   -p 127.0.0.1:3423:3423 \
   -v relay-data:/data \
+  -v relay-logs:/var/log/epicmail \
   -v /etc/epicmail/epicmail.toml:/etc/epicmail/epicmail.toml:ro \
   epicmail
 ```
@@ -185,10 +186,12 @@ The relay logs to two outputs, each with its own level and format:
 
 - **stderr**, always: `log.level` and `log.format`. Under systemd journald keeps it
   (`journalctl -u epicmail`); in Docker, the container's log driver does.
-- **a file**, when `[log.file] enabled = true`: `log.file.level` and `log.file.format`, rotated,
-  compressed and pruned by the relay itself (below), so it needs no logrotate.
+- **a file**, on by default: `/var/log/epicmail/epicmail.log` at `trace` in JSON, rotated daily,
+  compressed and pruned by the relay itself (below), so it needs no logrotate. When the relay
+  cannot create or write it (run by hand without access to `/var/log`, say), it logs one
+  warning on stderr and runs without the file; it never refuses to start because of it.
 
-The usual setup is `info` on stderr for the journal and `trace` or `debug` in the file for
+So by default the journal holds `info` and the file holds everything down to `trace`, for
 looking back at what happened to one wallet or one message.
 
 ### Levels
@@ -265,8 +268,10 @@ connection, so a prefix with many such wallets can show up here too.
   `tests/log_privacy.rs` runs two relays through posts, deliveries, a cancel, a forward, a mux/1
   session and bad requests with both outputs at `trace`, and fails if a line holds any of these.
 
-To log no client IPs at all, keep `log.level` at `info` and leave `[log.file]` off, or set its
-level to `info`.
+The log file is on by default, so a default install does log client IPs, to
+`/var/log/epicmail/` for 14 days. To log no client IPs at all, keep `log.level` at `info` and set
+`[log.file] enabled = false`, or its `level` to `info`; to keep them for less time, lower
+`log.file.keep` (or use `rotate = "hourly"`).
 
 Common fields: `socket` (a number local to the process), `ip`, `net`, `mailbox`, `from`, `to`,
 `id`, `size`, `txid` (shortened), `peer`, `transport`, `limit`, `result`, `reason`, `error`,

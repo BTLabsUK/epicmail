@@ -243,7 +243,7 @@ pub struct LogFile {
 impl Default for LogFile {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             path: "/var/log/epicmail/epicmail.log".into(),
             level: "trace".into(),
             format: "json".into(),

@@ -87,8 +87,9 @@ warn_bad_requests = 30           # bad signatures or invalid posts from one /24 
                                  # interval above which a warning names the network; 0 = never
 
 [log.file]                       # a second output, rotated by the relay itself
-enabled = false
-path = "/var/log/epicmail/epicmail.log"  # the systemd unit creates /var/log/epicmail (LogsDirectory)
+enabled = true                   # if the path cannot be written, a warning and stderr only
+path = "/var/log/epicmail/epicmail.log"  # the systemd unit creates /var/log/epicmail (LogsDirectory);
+                                 # the container image has it too (mount a volume there)
 level = "trace"                  # may be more verbose than the console; trace and debug hold client
                                  # IPs and shortened addresses, so keep and share the file with care
 format = "json"                  # "json" or "text"

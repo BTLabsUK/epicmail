@@ -50,7 +50,9 @@ pub fn file_dropped() -> u64 {
 }
 
 /// Install the global subscriber: stderr with `log.level` (`RUST_LOG` overrides it), and with
-/// `with_file` and `log.file.enabled` the log file with its own level and format. Text on stderr
+/// `with_file` and `log.file.enabled` the log file with its own level and format. When the file
+/// cannot be opened (no permission for /var/log when run by hand, say), the relay logs one
+/// warning on stderr and runs without it. Text on stderr
 /// has no colour codes unless stderr is a terminal, and no timestamp when stderr goes to
 /// journald, which stamps every line itself. A panic is logged at error before the default hook
 /// runs.
@@ -74,6 +76,7 @@ where
 {
     let mut layers: Vec<Boxed> = vec![output(&cfg.format, console, ansi, no_time).with_filter(console_filter).boxed()];
     let mut guard = None;
+    let mut file_error = None;
     if with_file && cfg.file.enabled {
         let f = &cfg.file;
         let policy = logfile::Policy {
@@ -82,13 +85,23 @@ where
             keep: f.keep as usize,
             compress: f.compress,
         };
-        let (log, g) = FileLog::start(f.path.clone(), policy)
-            .map_err(|e| anyhow::anyhow!("log.file.path {}: {e}", f.path.display()))?;
-        let _ = FILE.set(log.clone());
-        layers.push(output(&f.format, log, false, false).with_filter(filter(&f.level)).boxed());
-        guard = Some(g);
+        match FileLog::start(f.path.clone(), policy) {
+            Ok((log, g)) => {
+                let _ = FILE.set(log.clone());
+                layers.push(output(&f.format, log, false, false).with_filter(filter(&f.level)).boxed());
+                guard = Some(g);
+            }
+            Err(e) => file_error = Some(e),
+        }
     }
     tracing_subscriber::registry().with(layers).try_init()?;
+    if let Some(e) = file_error {
+        tracing::warn!(
+            path = %cfg.file.path.display(),
+            error = %e,
+            "cannot write the log file; logging to stderr only (set log.file.path, or log.file.enabled = false)"
+        );
+    }
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         tracing::error!(panic = %info, "panic");

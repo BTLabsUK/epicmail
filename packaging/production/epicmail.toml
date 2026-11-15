@@ -26,6 +26,8 @@ allow = ["epicbox.epiccash.com", "epicbox.stackwallet.com", "epicbox.epicnet.us"
 # those lets a cancel reach the relay that holds a forwarded slate.
 forward_bare_cancel = true
 
+# The log file is on by default: /var/log/epicmail/epicmail.log at trace, rotated daily, 14 kept.
+
 [limits]
 # Wallets that come through the onion service appear with Tor's per-circuit addresses
 # (fc00:dead:beef:4dad::<circuit>, see nginx-onion.conf). They all fall in one /48, so without
