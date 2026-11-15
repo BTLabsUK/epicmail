@@ -263,6 +263,9 @@ async fn well_known(State(st): State<AppState>) -> Response {
             }),
         );
     }
+    if cfg.protocol.mux && cfg.protocol.cancel {
+        features.insert("txcancel/1".into(), json!({}));
+    }
     if cfg.http_api.enabled {
         features.insert("https".into(), json!({"protocol": HTTPS_PROTOCOL, "base": "/v1"}));
     }

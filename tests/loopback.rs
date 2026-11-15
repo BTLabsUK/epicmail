@@ -421,6 +421,8 @@ async fn https_post_pull_made() {
     let (st, wk) = http(&n, "GET", "/.well-known/epicbox.json", None).await;
     assert_eq!(st, 200);
     assert!(wk["features"]["mux/1"].is_object(), "{wk}");
+    assert!(wk["features"]["txcancel/1"].is_object(), "{wk}");
+    assert!(wk["protocol_versions"].as_array().unwrap().iter().any(|v| v == "3.1.0"), "{wk}");
     assert_discovery_shape(&wk);
 
     let (st, status) = http(&n, "GET", "/status.json", None).await;
