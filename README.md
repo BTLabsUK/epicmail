@@ -105,6 +105,10 @@ tools/install.sh --bin epicmail-$v-linux-$a --domain relay.example.org
 
 A `get.sh` saved to disk runs with `sh get.sh ...`, no `chmod` needed.
 
+[packaging/production/](packaging/production/) shows a real deployment on top of that: an old
+relay name kept as an alias, federation with an allow list, a Tor onion service, and a fixed
+service user.
+
 Docker: `docker build -t epicmail .` makes an image on an empty base;
 [docs/operating.md](docs/operating.md#docker) shows how to run it. The operating guide also covers
 limits, health checks, backup, logging and upgrades.

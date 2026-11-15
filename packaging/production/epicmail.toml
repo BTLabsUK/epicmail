@@ -1,0 +1,33 @@
+# A production relay: behind nginx on the same host, serving an old relay name as well as its
+# own, forwarding to known public relays, and reachable through a Tor onion service
+# (nginx-onion.conf). Only what this setup sets is here; every other setting keeps the default
+# shown in ../epicmail.example.toml.
+
+[server]
+domain = "relay.example.org"
+# An older relay name now served here: wallets whose addresses end in @old-relay.example.org
+# keep working, and mail for them is stored here rather than forwarded. nginx serves the name
+# with its own certificate (nginx-alias.conf).
+aliases = ["old-relay.example.org"]
+# nginx on this host. Without it every client would count as 127.0.0.1.
+trusted_proxies = ["127.0.0.1/32"]
+
+[store]
+path = "/var/lib/epicmail/epicmail.db"
+
+[federation]
+enabled = true
+# Forward only to these relays; a post for any other domain is refused when it arrives, so the
+# relay never queues mail for a relay nobody checked.
+allow = ["epicbox.epiccash.com", "epicbox.stackwallet.com", "epicbox.epicnet.us"]
+
+[protocol]
+# The default, kept explicit: wallets sign cancels over the bare txid today, and forwarding
+# those lets a cancel reach the relay that holds a forwarded slate.
+forward_bare_cancel = true
+
+[limits]
+# Wallets that come through the onion service appear with Tor's per-circuit addresses
+# (fc00:dead:beef:4dad::<circuit>, see nginx-onion.conf). They all fall in one /48, so without
+# this every Tor user would share one network's budget.
+shared_sources = ["fc00:dead:beef:4dad::/64"]
