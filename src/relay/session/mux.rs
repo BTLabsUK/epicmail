@@ -8,12 +8,12 @@ use axum::extract::ws::WebSocket;
 use serde_json::{json, Value};
 
 use super::{ok, with_ref, Flow, Session};
-use crate::ids::is_txid;
-use crate::relay::CancelOutcome;
 use crate::address::parse_address;
 use crate::clock::now_ms;
+use crate::ids::is_txid;
 use crate::ids::{is_msgid, rand_b64url};
 use crate::relay::tokens::TOKEN_TTL_MS;
+use crate::relay::CancelOutcome;
 use crate::relay::{Cmd, PostOutcome, PostReq, Refusal, OFFER_LEASE_MS};
 use crate::sig;
 use crate::store::ClaimMode;
@@ -323,10 +323,7 @@ impl Session {
         let mailboxes: Vec<String> = reply["mailboxes"]
             .as_array()
             .map(|a| {
-                a.iter()
-                    .filter(|e| e["ok"] == true)
-                    .filter_map(|e| e["mailbox"].as_str().map(String::from))
-                    .collect()
+                a.iter().filter(|e| e["ok"] == true).filter_map(|e| e["mailbox"].as_str().map(String::from)).collect()
             })
             .unwrap_or_default();
         self.send(ws, reply).await;
@@ -392,8 +389,7 @@ impl Session {
 
     /// CancelAck: the receiver has seen the cancel. Same effect as a classic re-Subscribe.
     async fn cancel_ack(&mut self, ws: &mut WebSocket, msg: &Value, r#ref: &Option<String>) {
-        let key =
-            msg.get("mailbox").and_then(|a| a.as_str()).and_then(|a| parse_address(a).ok()).map(|a| a.public_key);
+        let key = msg.get("mailbox").and_then(|a| a.as_str()).and_then(|a| parse_address(a).ok()).map(|a| a.public_key);
         let txid = msg.get("epicboxtxid").and_then(|t| t.as_str()).filter(|t| is_txid(t));
         let (Some(key), Some(txid)) = (key, txid) else {
             let e = mux_error("bad_frame", "CancelAck needs mailbox and epicboxtxid.", r#ref, None);
@@ -401,11 +397,9 @@ impl Session {
             return;
         };
         // Only a mailbox this socket holds can be acknowledged; others are ignored, as in Ack.
-        if self.held_mailboxes(ws).await.contains(&key) {
-            if self.relay.store.ack_cancel(&key, txid).await.is_err() {
-                self.send(ws, mux_error("internal", "Internal error; try again.", r#ref, None)).await;
-                return;
-            }
+        if self.held_mailboxes(ws).await.contains(&key) && self.relay.store.ack_cancel(&key, txid).await.is_err() {
+            self.send(ws, mux_error("internal", "Internal error; try again.", r#ref, None)).await;
+            return;
         }
         self.send(ws, with_ref(ok(), r#ref)).await;
     }
