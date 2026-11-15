@@ -90,6 +90,21 @@ front: `packaging/Caddyfile.example` or `packaging/nginx.example.conf`.
 tools/install.sh --domain relay.example.org
 ```
 
+To install a release binary by hand, download it with `SHA256SUMS`, check it, and mark it
+executable: a downloaded file never keeps the executable bit.
+
+```sh
+v=0.1.1 a=x86_64   # or aarch64
+base=https://github.com/BTLabsUK/epicmail/releases/download/v$v
+curl -fsSLO $base/epicmail-$v-linux-$a -O $base/SHA256SUMS -O $base/SHA256SUMS.sig
+minisign -Vm SHA256SUMS -P RWQ+swweZiIFJfbre/aOhYqQ1+82BHFnw8gF6ETbhCp5b7RB6RuMEVtP
+sha256sum -c --ignore-missing SHA256SUMS
+chmod +x epicmail-$v-linux-$a
+tools/install.sh --bin epicmail-$v-linux-$a --domain relay.example.org
+```
+
+A `get.sh` saved to disk runs with `sh get.sh ...`, no `chmod` needed.
+
 Docker: `docker build -t epicmail .` makes an image on an empty base;
 [docs/operating.md](docs/operating.md#docker) shows how to run it. The operating guide also covers
 limits, health checks, backup, logging and upgrades.
