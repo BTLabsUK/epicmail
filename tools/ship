@@ -12,8 +12,8 @@
 #
 #   tools/ship --release X.Y.Z      slow path, in the background: full test suite, the three
 #                                   binaries, SHA256SUMS, staged under ~/.cache/epicmail-ship
-#   tools/ship --publish X.Y.Z      sign SHA256SUMS with minisign and create the GitHub release
-#                                   from the staged files (asks for the key passphrase)
+#   tools/ship --publish X.Y.Z      sign SHA256SUMS with the BT Labs key and create the GitHub release
+#                                   from the staged files
 #
 # What ships is the working tree of --src, uncommitted changes included. The first line says
 # which commit and whether the tree is dirty. See docs/operating.md, "Shipping a change".
@@ -243,12 +243,12 @@ publish() {
   [ -n "$VER" ] || die "--publish needs a version"
   local out="$STATE/release-$VER/files"
   [ -f "$out/SHA256SUMS" ] || die "nothing staged for $VER: run tools/ship --release $VER first"
-  local key=${SHIP_MINISIGN_KEY:-$HOME/.config/epicmail/release.key}
-  [ -f "$key" ] || die "minisign secret key not found at $key; set SHIP_MINISIGN_KEY=/path/to/key"
+  # Signed with the BT Labs key by tools/ship-sign.py (SHIP_SIGN_KEY overrides the key file).
   local pub; pub=$(sed -n 's/^KEY=\${EPICMAIL_MINISIGN_KEY:-\(RW[A-Za-z0-9+\/=]*\)}.*/\1/p' "$SRC/tools/get.sh" 2>/dev/null | head -1)
   [ -n "$pub" ] || die "cannot read the pinned release public key from $SRC/tools/get.sh"
-  say "signing SHA256SUMS with $key"
-  ( cd "$out" && rm -f SHA256SUMS.sig && minisign -S -s "$key" -m SHA256SUMS -x SHA256SUMS.sig ) || die "signing failed"
+  say "signing SHA256SUMS with the BT Labs release key"
+  rm -f "$out/SHA256SUMS.sig"
+  python3 -I "$TOOLS/ship-sign.py" "$out/SHA256SUMS" "$out/SHA256SUMS.sig" "Epicmail $VER SHA256SUMS, BT Labs key btlabs-2026-a" ${SHIP_SIGN_KEY:+"$SHIP_SIGN_KEY"} || die "signing failed"
   minisign -Vq -P "$pub" -m "$out/SHA256SUMS" -x "$out/SHA256SUMS.sig" || die "the signature does not verify against the key pinned in get.sh; refusing to publish"
   say "signature verifies against the pinned key"
   ( cd "$out" && sha256sum -c SHA256SUMS ) >/dev/null || die "checksum mismatch in staged files"
