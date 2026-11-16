@@ -382,6 +382,7 @@ Docs: [LEPIC developer guide](https://docs.btlabs.uk/developers/lepic/), [LEPIC 
 - nginx example: https://github.com/BTLabsUK/epicmail/blob/main/packaging/nginx.example.conf
 - Config example with every setting: https://github.com/BTLabsUK/epicmail/blob/main/packaging/epicmail.example.toml
 - Cancel signature: https://github.com/BTLabsUK/epicmail/blob/main/docs/cancel-signature.md
+- Deposit QR with address and memo (JavaScript, Python): https://github.com/BTLabsUK/epic-deposit-qr
 - Status of BT Labs' own relay: https://status.btlabs.uk
 - LEPIC: https://github.com/BTLabsUK/lepic, https://docs.btlabs.uk/developers/lepic/
 - BT Wallet: https://epiccash.btlabs.uk
