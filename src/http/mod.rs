@@ -272,6 +272,12 @@ async fn well_known(State(st): State<AppState>) -> Response {
     if cfg.protocol.mux && cfg.protocol.cancel {
         features.insert("txcancel/1".into(), json!({}));
     }
+    if cfg.protocol.cancel {
+        features.insert(
+            crate::relay::CANCEL_SEPARATED_EXT.into(),
+            json!({"signed_text": format!("{}<txid>", crate::relay::CANCEL_SIG_PREFIX)}),
+        );
+    }
     if cfg.http_api.enabled {
         features.insert("https".into(), json!({"protocol": HTTPS_PROTOCOL, "base": "/v1"}));
     }

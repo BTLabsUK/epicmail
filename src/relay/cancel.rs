@@ -49,7 +49,8 @@ impl Relay {
         // on sockets that never subscribed, so it is accepted from any socket. It is the same
         // signature PostSlate carries as epicboxtxidsig: anyone who saw the slate can cancel it.
         // The domain-separated form (`epicbox-cancel/1:<txid>`) proves the sender asked to
-        // cancel and is accepted too.
+        // cancel and is accepted too; clients learn of it from the
+        // Ok's `ext` and the well-known file. A forward carries the signature as received.
         let separated = sig::verify(&requester, &format!("{CANCEL_SIG_PREFIX}{txid}"), signature).is_ok();
         let bare_ok = !separated && sig::verify(&requester, &txid, signature).is_ok();
         if !separated && !bare_ok {

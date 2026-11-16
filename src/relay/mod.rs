@@ -31,6 +31,10 @@ pub use registry::{Cmd, Registry, SockHandle};
 pub const OFFER_LEASE_MS: i64 = 60_000;
 /// Domain separation prefix for cancel signatures that may travel between relays.
 pub const CANCEL_SIG_PREFIX: &str = "epicbox-cancel/1:";
+/// The extension token a wallet offers in `ClientDetails` and the relay echoes in its `Ok`:
+/// the relay verifies cancels signed over `CANCEL_SIG_PREFIX` + txid, and the wallet may sign
+/// that form. It is also the feature name in `/.well-known/epicbox.json`.
+pub const CANCEL_SEPARATED_EXT: &str = "epicbox-cancel/1";
 
 /// The shard, of `shards`, that holds mailbox `key`. Keys are chosen by clients, so the hash is
 /// keyed with a random seed per process: nobody can pick keys that all land on one shard.

@@ -14,7 +14,7 @@ use crate::ids::is_txid;
 use crate::ids::{is_msgid, rand_b64url};
 use crate::logging::short;
 use crate::relay::tokens::TOKEN_TTL_MS;
-use crate::relay::CancelOutcome;
+use crate::relay::{CancelOutcome, CANCEL_SEPARATED_EXT};
 use crate::relay::{Cmd, PostOutcome, PostReq, Refusal, OFFER_LEASE_MS};
 use crate::sig;
 use crate::store::ClaimMode;
@@ -84,7 +84,12 @@ pub(super) fn ref_of(msg: &Value) -> Option<String> {
 impl Session {
     /// Switch this socket to mux/1 and send the challenge and limits. False when the client's
     /// prefix is at its mux/1 socket cap; the socket then stays classic.
-    pub(super) async fn upgrade_to_mux(&mut self, ws: &mut WebSocket, txcancel: bool) -> bool {
+    pub(super) async fn upgrade_to_mux(
+        &mut self,
+        ws: &mut WebSocket,
+        txcancel: bool,
+        separated: bool,
+    ) -> bool {
         let (_, mult) = self.relay.limiter.prefix(self.ip);
         if !self.permit.upgrade_mux(mult) {
             self.relay.limiter.refused("mux_sockets", self.ip);
@@ -92,7 +97,13 @@ impl Session {
         }
         let lim = &self.relay.cfg.limits;
         let challenge = rand_b64url(16);
-        let ext = if txcancel { json!(["mux/1", "txcancel/1"]) } else { json!(["mux/1"]) };
+        let mut ext = vec!["mux/1"];
+        if txcancel {
+            ext.push("txcancel/1");
+        }
+        if separated {
+            ext.push(CANCEL_SEPARATED_EXT);
+        }
         let reply = json!({
             "type":"Ok","ext":ext,"challenge":challenge,
             "limits":{

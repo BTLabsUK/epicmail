@@ -1822,3 +1822,148 @@ async fn a_browser_gets_the_landing_page_and_nothing_else_changes() {
     assert!(head.contains("content-type: text/plain"), "{head}");
     assert_eq!(body, PLAIN);
 }
+
+// ---- epicbox-cancel/1: the domain-separated cancel signature ----
+
+const SEPARATED: &str = "epicbox-cancel/1";
+
+fn separated_text(txid: &str) -> String {
+    format!("{}{txid}", epicmail::relay::CANCEL_SIG_PREFIX)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_separated_cancel_form_is_advertised_and_echoed_only_when_offered() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (st, wk) = http(&n, "GET", "/.well-known/epicbox.json", None).await;
+    assert_eq!(st, 200);
+    assert_eq!(wk["features"][SEPARATED]["signed_text"], "epicbox-cancel/1:<txid>", "{wk}");
+
+    // A classic socket that offers it gets it echoed; one that does not gets the plain Ok.
+    let mut c = connect(&n).await;
+    recv_type(&mut c, "Challenge").await;
+    send(&mut c, json!({"type":"ClientDetails","wallet_version":"t","wallet_mode":"listener","protocol_version":"3.1.0","ext":[SEPARATED]})).await;
+    assert_eq!(recv(&mut c).await, json!({"type":"Ok","ext":[SEPARATED]}));
+    let mut c = connect(&n).await;
+    recv_type(&mut c, "Challenge").await;
+    send(&mut c, json!({"type":"ClientDetails","wallet_version":"t","wallet_mode":"listener","protocol_version":"3.1.0"})).await;
+    assert_eq!(recv(&mut c).await, json!({"type":"Ok"}));
+
+    // On a mux/1 socket it joins the other tokens, but only when asked.
+    let mut m = connect(&n).await;
+    recv_type(&mut m, "Challenge").await;
+    send(&mut m, json!({"type":"ClientDetails","ext":["mux/1","txcancel/1",SEPARATED]})).await;
+    assert_eq!(recv(&mut m).await["ext"], json!(["mux/1", "txcancel/1", SEPARATED]));
+    let mut m = connect(&n).await;
+    recv_type(&mut m, "Challenge").await;
+    send(&mut m, json!({"type":"ClientDetails","ext":["mux/1","txcancel/1"]})).await;
+    assert_eq!(recv(&mut m).await["ext"], json!(["mux/1", "txcancel/1"]));
+
+    // With cancel off the relay neither advertises nor echoes it.
+    let dir2 = tempfile::tempdir().unwrap();
+    let n2 = start(dir2.path(), "relay.test", |c| c.protocol.cancel = false).await;
+    let (_, wk) = http(&n2, "GET", "/.well-known/epicbox.json", None).await;
+    assert!(wk["features"].get(SEPARATED).is_none(), "{wk}");
+    let mut c = connect(&n2).await;
+    recv_type(&mut c, "Challenge").await;
+    send(&mut c, json!({"type":"ClientDetails","ext":[SEPARATED]})).await;
+    assert_eq!(recv(&mut c).await, json!({"type":"Ok"}));
+}
+
+/// A new-form cancel is accepted on a classic socket and on a txcancel/1 socket, and a stock
+/// wallet's bare cancel still works. The signature a PostSlate carries as `epicboxtxidsig` is
+/// not a signature over the separated text, so a replay of it is not a new-form cancel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_separated_cancel_is_accepted_and_a_replayed_slate_signature_is_not_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob, mallory) = (Key::new(), Key::new(), Key::new());
+    let tx_classic = "0123456789abcdef0123456789abcdef";
+    let tx_mux = "fedcba9876543210fedcba9876543210";
+    let tx_bare = "abcdefghijklmnopqrstuvwxyz012345";
+
+    // What anyone who saw the PostSlate holds.
+    let seen = alice.sign(tx_classic);
+    assert!(epicmail::sig::verify(&alice.pk, &separated_text(tx_classic), &seen).is_err());
+    assert!(epicmail::sig::verify(&alice.pk, tx_classic, &seen).is_ok());
+
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    for (i, tx) in [tx_classic, tx_mux, tx_bare].into_iter().enumerate() {
+        let mut f = post_frame(&alice, "relay.test", &bob, "relay.test", i as u32 + 1);
+        f["epicboxtxid"] = json!(tx);
+        f["epicboxtxidsig"] = json!(alice.sign(tx));
+        send(&mut a, f).await;
+        assert_eq!(recv(&mut a).await["type"], "Ok");
+    }
+    assert_eq!(waiting(&n).await, 3);
+
+    // The separated form from a socket that never subscribed, signed by a stranger: refused.
+    let mut c = connect(&n).await;
+    recv_type(&mut c, "Challenge").await;
+    send(&mut c, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":tx_classic,"signature":mallory.sign(&separated_text(tx_classic))})).await;
+    assert_eq!(recv(&mut c).await["kind"], "InvalidSignature");
+    assert_eq!(waiting(&n).await, 3);
+
+    // Alice's separated signature cancels on a classic socket.
+    send(&mut c, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":tx_classic,"signature":alice.sign(&separated_text(tx_classic))})).await;
+    assert_eq!(recv(&mut c).await, json!({"type":"TransactionCancelled","epicboxtxid":tx_classic}));
+    assert_eq!(waiting(&n).await, 2);
+
+    // And on a txcancel/1 socket.
+    let mut m = txmux(&n, true, &[&alice]).await;
+    send(&mut m, json!({"type":"CancelTx","ref":"s1","address":alice.pk,"epicboxtxid":tx_mux,"signature":alice.sign(&separated_text(tx_mux))})).await;
+    assert_eq!(recv(&mut m).await, json!({"type":"TransactionCancelled","ref":"s1","epicboxtxid":tx_mux}));
+    assert_eq!(waiting(&n).await, 1);
+
+    // A stock wallet signs the bare txid: still accepted.
+    send(&mut c, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":tx_bare,"signature":alice.sign(tx_bare)})).await;
+    assert_eq!(recv(&mut c).await, json!({"type":"TransactionCancelled","epicboxtxid":tx_bare}));
+    assert_eq!(waiting(&n).await, 0);
+}
+
+/// With `forward_bare_cancel` off, only a cancel that proves the sender asked for it travels
+/// to peer relays: the replayed slate signature is not sent on, the separated one is, and the
+/// forwarded frame carries the signature unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_a_separated_cancel_is_forwarded_when_bare_forwarding_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| {
+        c.protocol.forward_bare_cancel = false;
+        // Nothing listens there, so forward rows stay queued and can be read.
+        c.federation.peers.insert("remote.test:443".into(), "ws://127.0.0.1:9/".into());
+    })
+    .await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let (tx_bare, tx_sep) = ("0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210");
+    let cancels = || {
+        let relay = n.relay.clone();
+        async move {
+            let rows = relay.store.forwards_due("remote.test:443", now_ms() + 7_200_000, 50).await.unwrap();
+            rows.into_iter()
+                .map(|r| serde_json::from_str::<Value>(&r.frame).unwrap())
+                .filter(|f| f["type"] == "CancelTx")
+                .collect::<Vec<Value>>()
+        }
+    };
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    for tx in [tx_bare, tx_sep] {
+        send(&mut a, post_tx_frame(&alice, "relay.test", &bob, "remote.test", tx)).await;
+        assert_eq!(recv(&mut a).await["type"], "Ok");
+    }
+    let mut c = connect(&n).await;
+    recv_type(&mut c, "Challenge").await;
+
+    send(&mut c, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":tx_bare,"signature":alice.sign(tx_bare)})).await;
+    assert_eq!(recv(&mut c).await["type"], "TransactionCancelled");
+    assert!(cancels().await.is_empty(), "a bare cancel was forwarded");
+
+    let sig = alice.sign(&separated_text(tx_sep));
+    send(&mut c, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":tx_sep,"signature":sig})).await;
+    assert_eq!(recv(&mut c).await["type"], "TransactionCancelled");
+    let rows = cancels().await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["epicboxtxid"], tx_sep);
+    assert_eq!(rows[0]["signature"], sig, "the separated signature goes to the peer unchanged");
+}

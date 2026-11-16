@@ -275,7 +275,7 @@ The relay lists `txcancel/1` in `ext` only when the client asked for it, the soc
 {"type":"CancelTx","ref":"7","address":"<key or address>","epicboxtxid":"<32 chars>","signature":"<DER hex over the txid>"}
 ```
 
-The signature is by the key in `address` over the bare txid, or over `epicbox-cancel/1:<txid>`. A mux/1 socket has no Subscribe, so the signature itself proves the key, as for a classic socket that never subscribed (the relay forwards cancels the same way). The relay runs the classic cancel: it writes the tombstone for 7 days, deletes the waiting messages of the transaction and forwards the cancel to the other relays involved with the same `cancelrequestid` loop guard.
+The signature is by the key in `address` over the bare txid, or over `epicbox-cancel/1:<txid>`. A client that wants the second form lists `epicbox-cancel/1` in `ClientDetails.ext`; the relay's `Ok` repeats it when the relay verifies it (it is offered whenever `txcancel/1` is). See [cancel-signature.md](cancel-signature.md). A mux/1 socket has no Subscribe, so the signature itself proves the key, as for a classic socket that never subscribed (the relay forwards cancels the same way). The relay runs the classic cancel: it writes the tombstone for 7 days, deletes the waiting messages of the transaction and forwards the cancel to the other relays involved with the same `cancelrequestid` loop guard.
 
 | answer | when |
 |---|---|

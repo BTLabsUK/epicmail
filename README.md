@@ -229,7 +229,7 @@ relay is refused by any other. Plain `<challenge>` is not accepted.
 | `/ready` | Readiness: the store is writable; 503 while draining |
 | `/metrics` | Prometheus, names start with `epicbox_`; loopback or `server.metrics_listen` only |
 | `/status.json` | Public totals, no per-address data |
-| `/.well-known/epicbox.json` | Software, identity, protocols, features and client limits (no version, no per-IP limits) |
+| `/.well-known/epicbox.json` | Software, identity, protocols, features (mux/1, `txcancel/1`, `epicbox-cancel/1`, https) and client limits (no version, no per-IP limits) |
 | `/` in a browser | A page for people: what the relay is, live checks, the domain and port for a wallet (`server.landing_page`) |
 
 ## Transaction cancel (3.1.0)
@@ -251,6 +251,13 @@ later send `CancelTx`, signed over the bare txid as wallets sign it today, or ov
 The bare-txid signature is the one the slate already carried, so anyone who saw the slate can
 cancel. `epicbox-cancel/1:<txid>` closes that; `protocol.forward_bare_cancel = false` forwards
 only that form. `protocol.cancel = false` makes the relay a 3.0.0 relay.
+
+A relay that has the cancel on offers the separated form to wallets in band: a client lists
+`epicbox-cancel/1` in `ClientDetails.ext`, and the `Ok` repeats it (on a classic socket as
+`{"type":"Ok","ext":["epicbox-cancel/1"]}`, on mux/1 among the other extensions). The relay also
+lists it as a feature in `/.well-known/epicbox.json`. It verifies the separated form first and the
+bare form second on every path, and forwards the signature as it received it. The exact text and
+the fallback are in [docs/cancel-signature.md](docs/cancel-signature.md).
 
 ## Federation
 

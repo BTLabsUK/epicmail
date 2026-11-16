@@ -11,7 +11,7 @@ use crate::address::parse_address;
 use crate::clock::now_ms;
 use crate::ids::{is_msgid, rand_id};
 use crate::logging::short;
-use crate::relay::{CancelOutcome, Cmd, PostOutcome, PostReq, Refusal, OFFER_LEASE_MS};
+use crate::relay::{CancelOutcome, CANCEL_SEPARATED_EXT, Cmd, PostOutcome, PostReq, Refusal, OFFER_LEASE_MS};
 use crate::sig;
 use crate::store::{ClaimMode, StoredMessage};
 
@@ -83,26 +83,31 @@ impl Session {
     }
 
     /// ClientDetails. A request for mux/1 upgrades the socket when allowed; otherwise `Ok`.
+    /// A wallet that offers `epicbox-cancel/1` gets it echoed in the `Ok`: the relay checks
+    /// cancels signed over `epicbox-cancel/1:<txid>`, so the wallet may sign that form.
     pub(super) async fn client_details(&mut self, ws: &mut WebSocket, msg: &Value) {
-        let wants_mux = msg
-            .get("ext")
-            .and_then(|e| e.as_array())
-            .map(|a| a.iter().any(|x| x.as_str() == Some("mux/1")))
-            .unwrap_or(false);
-        let wants_txcancel = self.relay.cfg.protocol.cancel
-            && msg
-                .get("ext")
+        let offered = |token: &str| {
+            msg.get("ext")
                 .and_then(|e| e.as_array())
-                .map(|a| a.iter().any(|x| x.as_str() == Some("txcancel/1")))
-                .unwrap_or(false);
+                .map(|a| a.iter().any(|x| x.as_str() == Some(token)))
+                .unwrap_or(false)
+        };
+        let cancel = self.relay.cfg.protocol.cancel;
+        let wants_mux = offered("mux/1");
+        let wants_txcancel = cancel && offered("txcancel/1");
+        let separated = cancel && offered(CANCEL_SEPARATED_EXT);
         if wants_mux
             && self.relay.cfg.protocol.mux
             && self.key.is_none()
-            && self.upgrade_to_mux(ws, wants_txcancel).await
+            && self.upgrade_to_mux(ws, wants_txcancel, separated).await
         {
             return;
         }
-        self.send(ws, ok()).await;
+        if separated {
+            self.send(ws, json!({"type":"Ok","ext":[CANCEL_SEPARATED_EXT]})).await;
+        } else {
+            self.send(ws, ok()).await;
+        }
     }
 
     /// True the first time this socket subscribes successfully.
