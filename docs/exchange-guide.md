@@ -313,7 +313,7 @@ NonKyc.io's rules do not allow miners to pay deposits straight from a mining poo
 
 ```toml
 [federation]
-deny_sender_hosts = ["pool-epicbox.example.org"]   # the pool relay's host name, no port
+deny_sender_hosts = []   # the pool relays' host names, no port
 ```
 
 Then `sudo epicmail check-config --config /etc/epicmail/epicmail.toml` and `sudo systemctl restart epicmail`. The list is read at start. Matching is exact on the host, ignores case and ignores the port.
