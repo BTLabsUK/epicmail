@@ -50,9 +50,12 @@ pub enum Count {
     SizeLe6144,
     SizeLe10240,
     SizeOver10240,
+    /// Posts refused because the sender's host is in `federation.deny_sender_hosts`. Also
+    /// counted in `PostsRefused`.
+    PostsDeniedHost,
 }
 
-const N: usize = 18;
+const N: usize = 19;
 
 /// A coarse size class of a slate body. Counts only; there is no finer size anywhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,6 +254,7 @@ fn report(relay: &Relay, reporter: &mut Reporter, interval_s: u64) {
             posts_stored = d.get(Count::PostsStored),
             posts_forwarded = d.get(Count::PostsForwarded),
             posts_refused = d.get(Count::PostsRefused),
+            posts_denied_host = d.get(Count::PostsDeniedHost),
             delivered = d.get(Count::Delivered),
             acked = d.get(Count::Acked),
             cancels = d.get(Count::Cancels),

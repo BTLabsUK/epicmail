@@ -8,7 +8,9 @@
 //!   than `log.warn_bad_requests`, the log file falling behind.
 //! - `info`: lifecycle (start, drain, stop); a traffic summary every `log.summary_interval_s`
 //!   when something changed ([`crate::traffic`]); expiry sweeps that removed messages, forwards
-//!   or cancel records; forwards delivered, sampled per peer relay. Nothing per client.
+//!   or cancel records; forwards delivered, sampled per peer relay; a slate refused because its
+//!   sender's host is in `federation.deny_sender_hosts`, sampled, with the host name only.
+//!   Nothing per client.
 //! - `debug`: the life of each message (post, delivery, ack, cancel, forward, each with its id
 //!   and result) and each connection opened and closed, with the client IP.
 //! - `trace`: every frame, Subscribe, Attach, Resume, Hold, Detach and limit refusal, with the

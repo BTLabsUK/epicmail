@@ -37,7 +37,7 @@ struct Slate {
 impl Relay {
     /// Validate, store or queue a slate. `allow_cancel` accepts the 3.1.0 fields.
     pub async fn post_slate(&self, ip: IpAddr, req: PostReq, allow_cancel: bool) -> PostOutcome {
-        let who = tracing::enabled!(tracing::Level::DEBUG).then(|| {
+        let who = (tracing::level_filters::LevelFilter::current() >= tracing::Level::DEBUG).then(|| {
             let addr = |a: &Option<String>| a.as_deref().map(short_addr).unwrap_or_default();
             (addr(&req.from), addr(&req.to), req.str_.as_ref().map_or(0, String::len))
         });
@@ -50,6 +50,7 @@ impl Relay {
             PostOutcome::Cancelled { .. } => "cancelled",
             PostOutcome::Refused(Refusal::RateLimited(_)) => "rate_limited",
             PostOutcome::Refused(Refusal::Full(_)) => "full",
+            PostOutcome::Refused(Refusal::DeniedHost(_)) => "denied_sender_host",
             PostOutcome::Refused(Refusal::Internal) => "internal",
             PostOutcome::Refused(Refusal::Invalid(..)) => "invalid",
         };
@@ -69,6 +70,10 @@ impl Relay {
             },
             1,
         );
+        if let PostOutcome::Refused(Refusal::DeniedHost(_)) = out {
+            metrics::counter!("epicbox_denied_sender_host_total").increment(1);
+            self.traffic.add(Count::PostsDeniedHost, 1);
+        }
         if let PostOutcome::Refused(Refusal::Invalid(..)) = out {
             self.limiter.invalid_post(ip);
         }
@@ -100,12 +105,18 @@ impl Relay {
             Ok(s) => s,
             Err(r) => return (PostOutcome::Refused(r), None),
         };
+        let local = self.cfg.is_local(&slate.dest_domain, slate.dest_port);
+        if local {
+            if let Some(r) = self.sender_host_refusal(&slate.from) {
+                return (PostOutcome::Refused(r), None);
+            }
+        }
         if let Some(r) = self.store_full() {
             return (PostOutcome::Refused(r), None);
         }
         let now = now_ms();
         let expires_at = now + self.retention_ms();
-        if self.cfg.is_local(&slate.dest_domain, slate.dest_port) {
+        if local {
             (self.store_local(slate, now, expires_at).await, None)
         } else {
             let peer = format!("{}:{}", slate.dest_domain, slate.dest_port);
@@ -177,6 +188,16 @@ impl Relay {
             return Err(Refusal::Invalid("InvalidRequest", "Invalid slate destination.".into()));
         };
         Ok(Slate { from_s, to_s, from, body, signature, txid, txidsig, dest_key, dest_domain, dest_port })
+    }
+
+    /// A refusal when the host in the sender's address is in `federation.deny_sender_hosts`.
+    /// Every PostSlate for a local mailbox passes here, whether the sender connected directly or
+    /// another relay forwarded the slate (it keeps `from` as the wallet wrote it). The host is
+    /// the sender's claim: the signature covers the slate, not the address's host part.
+    fn sender_host_refusal(&self, from: &EpicboxAddress) -> Option<Refusal> {
+        let host = self.cfg.denied_sender_host(from.domain.as_deref())?;
+        crate::sampled!(info, host = %host, "refused a slate from a denied sender host");
+        Some(Refusal::DeniedHost(format!("This relay does not accept slates from {host}.")))
     }
 
     /// A refusal when the store holds `store.max_bytes` of live data or more.

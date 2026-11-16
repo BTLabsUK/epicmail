@@ -108,6 +108,7 @@ pub(super) async fn post(
             too_many(R, format!("Rate limit exceeded; retry in {s} s."), s)
         }
         PostOutcome::Refused(Refusal::Full(d)) => err(R, StatusCode::TOO_MANY_REQUESTS, d),
+        PostOutcome::Refused(Refusal::DeniedHost(d)) => err(R, StatusCode::FORBIDDEN, d),
         PostOutcome::Refused(Refusal::Invalid(_, d)) => err(R, StatusCode::BAD_REQUEST, d),
         PostOutcome::Refused(Refusal::Internal) => {
             err(R, StatusCode::SERVICE_UNAVAILABLE, "Internal error; try again.")
@@ -429,7 +430,7 @@ pub(super) async fn made(
             refused += 1;
         }
     }
-    let acked_ids = tracing::enabled!(tracing::Level::DEBUG).then(|| ids.join(","));
+    let acked_ids = (tracing::level_filters::LevelFilter::current() >= tracing::Level::DEBUG).then(|| ids.join(","));
     let removed = if ids.is_empty() {
         0
     } else {

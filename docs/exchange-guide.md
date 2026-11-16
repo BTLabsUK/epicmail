@@ -307,6 +307,21 @@ Entries expire after 24 hours unless a `timeout` is given. This works when the r
 
 When the relay sees many bad requests from one network, it logs a warning that names it (`many bad requests from one network`, with `net=`). At the default level this is in the journal: `sudo journalctl -u epicmail | grep 'bad requests'`.
 
+### Refusing payments sent from a named relay
+
+NonKyc.io's rules do not allow miners to pay deposits straight from a mining pool's Epicbox. To refuse slates whose sender address names the pool's relay, list its host in `/etc/epicmail/epicmail.toml` and restart:
+
+```toml
+[federation]
+deny_sender_hosts = ["pool-epicbox.example.org"]   # the pool relay's host name, no port
+```
+
+Then `sudo epicmail check-config --config /etc/epicmail/epicmail.toml` and `sudo systemctl restart epicmail`. The list is read at start. Matching is exact on the host, ignores case and ignores the port.
+
+A sender on a listed host gets a protocol error ("This relay does not accept slates from <host>.") and the slate is not stored. This holds for slates posted directly and for slates another relay forwards to yours. When the pool's relay forwards, it has already told the miner's wallet Ok, so the pool side sees the refusal only as a failed forward. Refusals are counted: `epicbox_denied_sender_host_total`, and `posts_denied_host` in the traffic summary. Each refusal logs one `info` line with the host only.
+
+What this does not do: the host in a sender address is written by the sender's wallet and is not covered by the slate's signature. A wallet that puts another host in its address, or pays through another relay, is not stopped. The option blocks slates that name a relay, not a person. For the details, see "Refusing a sender's host" in [the operating guide](https://github.com/BTLabsUK/epicmail/blob/main/docs/operating.md).
+
 ## 3. Cancels while 4.x wallets are in use
 
 This section is about the exchange's own wallet, whatever relay it uses. Epicmail changes none of it.

@@ -163,7 +163,7 @@ impl Session {
                     PostOutcome::Refused(Refusal::Internal) => {
                         mux_error("internal", "Internal error; try again.", &r#ref, None)
                     }
-                    PostOutcome::Refused(Refusal::Invalid(_, d) | Refusal::Full(d)) => {
+                    PostOutcome::Refused(Refusal::Invalid(_, d) | Refusal::Full(d) | Refusal::DeniedHost(d)) => {
                         mux_error("post_refused", &d, &r#ref, None)
                     }
                 };
@@ -401,7 +401,7 @@ impl Session {
             CancelOutcome::Refused(Refusal::Invalid("InvalidSignature", d)) => {
                 mux_error("bad_signature", &d, r#ref, None)
             }
-            CancelOutcome::Refused(Refusal::Invalid(_, d) | Refusal::Full(d)) => {
+            CancelOutcome::Refused(Refusal::Invalid(_, d) | Refusal::Full(d) | Refusal::DeniedHost(d)) => {
                 mux_error("bad_request", &d, r#ref, None)
             }
         };

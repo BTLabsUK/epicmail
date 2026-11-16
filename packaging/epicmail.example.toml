@@ -65,6 +65,9 @@ enabled = true                   # forward mail for other relays' domains
 allow = []                       # only these "domain" or "domain:port" are forwarded to; empty = any public domain
 deny = []                        # never forward to these
 allow_private = false            # allow private, loopback, link-local destinations; test rigs only
+# deny_sender_hosts = ["epicbox.example.org"]  # refuse slates for mailboxes here whose sender address names one of these hosts
+#                                  # (plain host names, no port; case ignored, port ignored). The host is the sender's claim
+#                                  # and is not signed, so this blocks a relay, not a person. Empty = off. Needs a restart.
 timeout_s = 15                   # seconds to wait for connect, Challenge and Ok
 max_lanes = 64                   # parallel peers being delivered to
 # [federation.peers]             # map "domain:port" to an explicit ws:// or wss:// URL

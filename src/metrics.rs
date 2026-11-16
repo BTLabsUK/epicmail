@@ -44,6 +44,10 @@ fn describe() {
         "Seconds from the first slate under a txid to the other party's first slate under it, both stored on this relay."
     );
     describe_counter!("epicbox_posts_total", "PostSlate results, by whether the post carried an epicboxtxid.");
+    describe_counter!(
+        "epicbox_denied_sender_host_total",
+        "Posts refused because the sender's host is in federation.deny_sender_hosts."
+    );
     describe_counter!("epicbox_post_size_total", "Accepted posts by size of the slate body and txid presence.");
     describe_counter!("epicbox_subscribe_total", "Subscribe results.");
     describe_counter!("epicbox_deliveries_total", "Messages offered to a listener.");

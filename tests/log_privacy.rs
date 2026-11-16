@@ -97,6 +97,7 @@ async fn no_level_of_either_output_holds_anything_private() {
     let other = serve(dir.path(), "other.test", |_| {}).await;
     let addr = serve(dir.path(), "relay.test", |c| {
         c.federation.allow_private = true;
+        c.federation.deny_sender_hosts = vec!["pool.test".into()];
         c.federation.peers.insert("other.test:443".into(), format!("ws://{other}/"));
         c.log.summary_interval_s = 1;
         c.log.warn_bad_requests = 1;
@@ -194,6 +195,18 @@ async fn no_level_of_either_output_holds_anything_private() {
         send(&mut a, &json!({"type":"PostSlate","from":alice.pk,"to":bob.pk,"str":"x","signature":"00"})).await;
         recv(&mut a).await;
     }
+    // A slate from a denied sender host: the wallet gets an error; the log names the host only.
+    let denied_body =
+        json!({"destination":{"public_key":bob.pk,"domain":"relay.test","port":443},"secret":"DENIEDPAYLOAD"})
+            .to_string();
+    let denied_sig = alice.sign(&denied_body);
+    send(
+        &mut a,
+        &json!({"type":"PostSlate","from":format!("{}@pool.test:3425",alice.pk),"to":format!("{}@relay.test",bob.pk),
+            "str":denied_body,"signature":denied_sig}),
+    )
+    .await;
+    assert_eq!(recv(&mut a).await["type"], "Error");
     drop((a, b, m2));
 
     // Wait for the summary (every second here), the warning and the forward line.
@@ -219,6 +232,9 @@ async fn no_level_of_either_output_holds_anything_private() {
     };
     assert!(line(" traffic ").contains("posts_stored="));
     assert!(line("many bad requests").contains("net=127.0.0.0/24"));
+    let denied = line("denied sender host");
+    assert!(denied.contains(" INFO ") && denied.contains("host=pool.test"), "{denied}");
+    assert!(line(" traffic ").contains("posts_denied_host="));
     assert!(line("epicmail::forward: forwarded").contains("peer=\"other.test:443\""));
 
     let events: Vec<Value> = file.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
@@ -252,6 +268,8 @@ async fn no_level_of_either_output_holds_anything_private() {
         "MUXONE".into(),
         "MUXTWO".into(),
         slate_sig,
+        denied_sig,
+        "DENIEDPAYLOAD".into(),
         far_sig,
         sub_sig,
         attach_sig,

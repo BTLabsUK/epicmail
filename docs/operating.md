@@ -169,6 +169,18 @@ These are counts only. No label or log field holds an address, a txid, an IP or 
 
 Which payments the round trip covers: only those where both parties' slates are stored on this relay, that is both parties use this relay as their receiving relay. A slate that is forwarded to another relay, or arrives from one and is answered through a forward, is not measured. Only slates that carry a txid count: invoices (I1) carry one but are answered without one (I2), so they stay in the unanswered gauge, and notices, contact traffic and pairing carry none. Transactions first seen before 0.1.10 have no start time and are skipped. The txid and the sender are kept in the same `txlinks` rows as before (two extra rows per transaction: who sent first and the first answer's time) and expire with them.
 
+### Refusing a sender's host
+
+`federation.deny_sender_hosts` is a list of plain host names (`"epicbox.example.org"`, no port, no scheme). Empty by default. A slate for a mailbox on this relay is refused when the host in its sender address (`es…@host[:port]`) matches an entry. Matching is exact on the whole host, ignores case and ignores the port. `example.org` does not match `sub.example.org`. An entry with a port or other characters makes `check-config` and the start fail. The list is read at start, like the rest of the config: edit it and restart.
+
+Where it applies: every way a slate reaches a local mailbox: a wallet posting over the classic websocket, over mux/1 (`postslate`) or `POST /v1/post`, and a slate another relay forwards here (the sender address is kept as the wallet wrote it). Slates for mailboxes on other relays are forwarded as before; the relay they are for applies its own list.
+
+What the sender sees: a protocol error, not a silent drop. Classic websocket: an `Error` frame (`InvalidRequest`, "This relay does not accept slates from <host>."). mux/1: an error frame with code `post_refused` and the same text. `/v1/post`: HTTP 403 with the text. When another relay forwarded the slate, the sender's own relay has already answered Ok, so the sender's wallet sees nothing; the forward is refused, retried a few times and then dropped.
+
+Counting and logging: the counter `epicbox_denied_sender_host_total`, `posts_denied_host` in the traffic summary and `result="denied_sender_host"` on `epicbox_posts_total`. Each refusal also writes one `info` line with the host name only (no addresses, no IP), sampled like other lines: at most 10 a minute, with `suppressed` for the rest. The counter is exact.
+
+Limits to know. The host part of a sender address is claimed by the sender's wallet. The slate's signature covers the slate, not that host. A wallet that writes another host in its address, or sends through another relay, is not stopped. The key part of the address is proven, but it is not what this list matches. So the option blocks slates that come from a named relay's address; it does not block a person, and it does not stop a determined one.
+
 ## 5. Backup and restore
 
 The store is one SQLite file in WAL mode: `epicmail.db`, plus `epicmail.db-wal` and `epicmail.db-shm` while running. The WAL holds committed writes that are not yet in the main file.
@@ -221,7 +233,7 @@ looking back at what happened to one wallet or one message.
 |---|---|
 | `error` | The relay cannot do its job: store reads or writes failing, a listener stopped, the store writer thread dying, a panic. Act on every one. |
 | `warn` | Something bad outside the relay, or a capacity reached: a peer relay unreachable or refusing forwards, the store full (`store.max_bytes`), a network prefix sending more bad signatures or invalid posts in a summary interval than `log.warn_bad_requests`, the log file falling behind. |
-| `info` | The startup line (identity, version, switches), drain and stop. The traffic summary (below). Expiry sweeps that removed messages, forwards or cancel records. Forwards delivered to another relay, sampled per peer. Nothing per client. |
+| `info` | The startup line (identity, version, switches), drain and stop. The traffic summary (below). Expiry sweeps that removed messages, forwards or cancel records. Forwards delivered to another relay, sampled per peer. A slate refused because its sender's host is denied (below), sampled, with the host name only. Nothing per client. |
 | `debug` | The life of each message: every post (client IP, shortened sender and recipient, size, message id, and stored, forwarded with the peer, or refused with the reason), every delivery and ack with its message id and shortened mailbox, every cancel, every forward attempt with the peer and the result. Each connection opened and closed, with the client IP, transport, duration and frame counts. |
 | `trace` | All of `debug`, and every frame received (type and size), every Subscribe, Attach and Resume with its result or the reason it was refused, Made refused, Hold, Detach, cancels pushed to wallets, `/v1/pull` proofs, and every request a limit refused, with the client IP. |
 
@@ -251,7 +263,7 @@ relay stays quiet:
 ```
 INFO epicmail::traffic: traffic interval_s=300 posts_stored=152 posts_forwarded=2 posts_refused=30
   delivered=150 acked=148 cancels=0 logins_ok=412 bad_signatures=60 forwards_sent=2 forwards_failed=0
-  limit_refusals=0 posts_txid=48 posts_no_txid=106 size_le_2560=61 size_le_5120=3 size_le_6144=52
+  limit_refusals=0 posts_denied_host=0 posts_txid=48 posts_no_txid=106 size_le_2560=61 size_le_5120=3 size_le_6144=52
   size_le_10240=38 size_over_10240=0 sockets=37 mailboxes_waiting=109 messages_waiting=159 forwards_waiting=0
   posts_stored_total=… posts_forwarded_total=… posts_refused_total=… delivered_total=… acked_total=…
   bad_signatures_total=…
@@ -259,7 +271,7 @@ INFO epicmail::traffic: traffic interval_s=300 posts_stored=152 posts_forwarded=
 
 (one line in the log). The counts are for the interval; `*_total` counts are since the start;
 `sockets` and the `*_waiting` values are as they are now. `posts_refused` covers invalid posts,
-limits, a full store and posts for a cancelled transaction; `logins_ok` counts mailboxes proven
+limits, a full store, denied sender hosts and posts for a cancelled transaction (`posts_denied_host` counts the denied ones alone); `logins_ok` counts mailboxes proven
 by Subscribe, mux/1 Attach or `/v1/pull`; `bad_signatures` counts every signature that did not
 verify. `posts_txid` and `posts_no_txid` split the posts accepted in the interval by whether they carried an `epicboxtxid`; the `size_*` counts split the same posts by the size of the slate body (up to 2560, 5120, 6144 and 10240 bytes, and larger). A `/v1/pull` proof is a signature over `<challenge>@<domain>:<port>` of this relay, so a proof made for another relay counts here. `delivered` counts a redelivery again. The summary holds counts only.
 

@@ -1967,3 +1967,151 @@ async fn only_a_separated_cancel_is_forwarded_when_bare_forwarding_is_off() {
     assert_eq!(rows[0]["epicboxtxid"], tx_sep);
     assert_eq!(rows[0]["signature"], sig, "the separated signature goes to the peer unchanged");
 }
+
+/// A PostSlate whose `from` is written exactly as given (host, case and port included).
+fn post_frame_from(from: &Key, from_addr: &str, to: &Key, to_domain: &str, n: u32) -> Value {
+    let mut f = post_frame(from, "x", to, to_domain, n);
+    f["from"] = json!(from_addr);
+    f
+}
+
+fn denied_count(n: &Node) -> u64 {
+    n.relay.traffic.counts().get(epicmail::traffic::Count::PostsDeniedHost)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deny_sender_hosts_refuses_listed_hosts_on_every_entry_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| c.federation.deny_sender_hosts = vec!["epicbox.epicmine.test".into()])
+        .await;
+    let (alice, bob) = (Key::new(), Key::new());
+
+    // Classic socket: the wallet gets an Error frame, nothing is stored.
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    for (i, from) in [
+        alice.at("epicbox.epicmine.test"),
+        alice.at("EpicBox.EpicMine.TEST"),
+        alice.at("epicbox.epicmine.test:443"),
+        alice.at("epicbox.epicmine.test:8443"),
+        format!("epicbox://{}", alice.at("epicbox.epicmine.test:3425")),
+    ]
+    .iter()
+    .enumerate()
+    {
+        send(&mut a, post_frame_from(&alice, from, &bob, "relay.test", i as u32)).await;
+        let r = recv(&mut a).await;
+        assert_eq!(r["type"], "Error", "{from}: {r}");
+        assert_eq!(r["kind"], "InvalidRequest");
+        assert!(r["description"].as_str().unwrap().contains("epicbox.epicmine.test"), "{r}");
+        assert!(!r["description"].as_str().unwrap().contains(&alice.pk), "no address in the reply: {r}");
+    }
+    assert_eq!(waiting(&n).await, 0);
+    assert_eq!(denied_count(&n), 5);
+
+    // Other hosts, a parent or child name, a lookalike and no host at all pass.
+    for (i, from) in [
+        alice.at("epicmine.test"),
+        alice.at("x.epicbox.epicmine.test"),
+        alice.at("epicbox.epicmine.test.evil.test"),
+        alice.at("relay.test"),
+        alice.pk.clone(),
+    ]
+    .iter()
+    .enumerate()
+    {
+        send(&mut a, post_frame_from(&alice, from, &bob, "relay.test", 100 + i as u32)).await;
+        assert_eq!(recv(&mut a).await["type"], "Ok", "{from}");
+    }
+    assert_eq!(waiting(&n).await, 5);
+    assert_eq!(denied_count(&n), 5);
+
+    // mux/1: an error frame with the reason.
+    let mut m = txmux(&n, false, &[]).await;
+    let mut f = post_frame_from(&alice, &alice.at("epicbox.epicmine.test"), &bob, "relay.test", 200);
+    f["type"] = json!("PostSlate");
+    f["ref"] = json!("p1");
+    send(&mut m, f).await;
+    let r = recv(&mut m).await;
+    assert_eq!(r["type"], "Error", "{r}");
+    assert_eq!(r["code"], "post_refused", "{r}");
+    assert_eq!(r["ref"], "p1");
+
+    // HTTPS: 403 with the reason.
+    let mut f = post_frame_from(&alice, &alice.at("epicbox.epicmine.test:443"), &bob, "relay.test", 201);
+    f.as_object_mut().unwrap().remove("type");
+    let (st, v) = http(&n, "POST", "/v1/post", Some(f)).await;
+    assert_eq!(st, 403, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("epicbox.epicmine.test"), "{v}");
+    assert_eq!(waiting(&n).await, 5);
+    assert_eq!(denied_count(&n), 7);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_deny_list_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    send(&mut a, post_frame_from(&alice, &alice.at("epicbox.epicmine.test"), &bob, "relay.test", 1)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    assert_eq!(denied_count(&n), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deny_sender_hosts_applies_to_slates_forwarded_by_another_relay() {
+    let dir = tempfile::tempdir().unwrap();
+    let b = start(dir.path(), "relayb.test", |c| c.federation.deny_sender_hosts = vec!["epicbox.epicmine.test".into()])
+        .await;
+    let b_url = format!("ws://{}", b.addr);
+    // Relay A has no deny list: the sender's own relay accepts and queues the slate.
+    let a = start(dir.path(), "relaya.test", |c| {
+        c.federation.peers.insert("relayb.test:443".into(), b_url.clone());
+    })
+    .await;
+    let (alice, bob, carol) = (Key::new(), Key::new(), Key::new());
+    let mut bs = connect(&b).await;
+    subscribe(&mut bs, &bob, "3.0.0").await;
+    assert_eq!(recv(&mut bs).await, json!({"type":"Ok"}));
+
+    let mut asock = connect(&a).await;
+    recv_type(&mut asock, "Challenge").await;
+    // A slate from the denied host is accepted by A (the sender sees Ok), forwarded, and
+    // refused by B; B does not store it. A keeps the row for its few retries of a refused
+    // forward, so B may count the same refusal more than once.
+    send(&mut asock, post_frame_from(&alice, &alice.at("epicbox.epicmine.test"), &bob, "relayb.test", 1)).await;
+    assert_eq!(recv(&mut asock).await["type"], "Ok");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while denied_count(&b) == 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(denied_count(&b) >= 1, "B never refused the forwarded slate");
+    assert_eq!(waiting(&b).await, 0);
+    let denied = denied_count(&b);
+
+    // A slate from another host still crosses.
+    send(&mut asock, post_frame_from(&carol, &carol.at("relaya.test"), &bob, "relayb.test", 2)).await;
+    assert_eq!(recv(&mut asock).await["type"], "Ok");
+    let slate = recv_type(&mut bs, "Slate").await;
+    assert_eq!(slate["from"], carol.at("relaya.test"));
+    assert_eq!(waiting(&b).await, 1);
+    assert!(denied_count(&b) >= denied);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deny_sender_hosts_does_not_stop_forwarding_through_this_relay() {
+    // The list guards this relay's own mailboxes: a slate for another relay is queued as before.
+    let dir = tempfile::tempdir().unwrap();
+    let a = start(dir.path(), "relaya.test", |c| {
+        c.federation.deny_sender_hosts = vec!["epicbox.epicmine.test".into()];
+        c.federation.peers.insert("relayb.test:443".into(), "ws://127.0.0.1:9".into());
+    })
+    .await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut asock = connect(&a).await;
+    recv_type(&mut asock, "Challenge").await;
+    send(&mut asock, post_frame_from(&alice, &alice.at("epicbox.epicmine.test"), &bob, "relayb.test", 1)).await;
+    assert_eq!(recv(&mut asock).await["type"], "Ok");
+    assert_eq!(denied_count(&a), 0);
+}

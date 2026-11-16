@@ -174,6 +174,10 @@ pub struct Federation {
     pub allow: Vec<String>,
     /// Never forward to these.
     pub deny: Vec<String>,
+    /// Refuse slates for this relay's own mailboxes whose sender address (`es…@host[:port]`)
+    /// names one of these hosts. Plain host names; case and port are ignored. The host is what
+    /// the sender's wallet wrote in `from`: it is not signed.
+    pub deny_sender_hosts: Vec<String>,
     /// Allow destinations that resolve to private, loopback or link-local addresses.
     /// Only for test rigs.
     pub allow_private: bool,
@@ -354,6 +358,7 @@ impl Default for Federation {
             enabled: true,
             allow: vec![],
             deny: vec![],
+            deny_sender_hosts: vec![],
             allow_private: false,
             peers: BTreeMap::new(),
             timeout_s: 15,
@@ -459,6 +464,14 @@ impl Config {
         if f.enabled && f.path.file_name().is_none() {
             bail!("log.file.path must name a file");
         }
+        for h in &self.federation.deny_sender_hosts {
+            let ok = !h.contains(':')
+                && normalize_domain(h)
+                    .is_some_and(|d| d.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'));
+            if !ok {
+                bail!("federation.deny_sender_hosts: \"{h}\" must be a plain host name such as \"epicbox.example.org\", without a port");
+            }
+        }
         for (k, v) in &self.federation.peers {
             if !(v.starts_with("ws://") || v.starts_with("wss://")) {
                 bail!("federation.peers.{k}: URL must start with ws:// or wss://");
@@ -497,6 +510,20 @@ impl Config {
                 a == d && port == self.server.port
             }
         })
+    }
+}
+
+impl Config {
+    /// The listed host in `federation.deny_sender_hosts` that `domain` (the host part of a
+    /// sender address) names, in its normal form. Exact match, case-insensitive, trailing dot
+    /// ignored; the port is not part of `domain`.
+    pub fn denied_sender_host(&self, domain: Option<&str>) -> Option<String> {
+        let d = normalize_domain(domain?)?;
+        self.federation
+            .deny_sender_hosts
+            .iter()
+            .any(|h| normalize_domain(h).as_deref() == Some(d.as_str()))
+            .then_some(d)
     }
 }
 
@@ -568,6 +595,28 @@ mod tests {
             let mut c = base();
             f(&mut c);
             assert!(c.validate().is_err(), "case {i} passed validation");
+        }
+    }
+
+    #[test]
+    fn denied_sender_hosts_match_the_host_only() {
+        let mut c = base();
+        assert_eq!(c.denied_sender_host(Some("epicbox.epicmine.io")), None, "empty list denies nothing");
+        c.federation.deny_sender_hosts = vec!["Epicbox.Epicmine.io".into()];
+        c.validate().unwrap();
+        for yes in ["epicbox.epicmine.io", "EPICBOX.EPICMINE.IO", "epicbox.epicmine.io."] {
+            assert_eq!(c.denied_sender_host(Some(yes)).as_deref(), Some("epicbox.epicmine.io"), "{yes}");
+        }
+        for no in
+            ["epicmine.io", "x.epicbox.epicmine.io", "epicbox.epicmine.io.evil.example", "epicbox.epicmine.com", ""]
+        {
+            assert_eq!(c.denied_sender_host(Some(no)), None, "{no}");
+        }
+        assert_eq!(c.denied_sender_host(None), None);
+        for bad in ["epicbox.epicmine.io:443", "", "a..b", "has space.io", "https://x.io"] {
+            let mut c = base();
+            c.federation.deny_sender_hosts = vec![bad.into()];
+            assert!(c.validate().is_err(), "{bad}");
         }
     }
 

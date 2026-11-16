@@ -118,6 +118,8 @@ pub enum Refusal {
     Invalid(&'static str, String),
     /// The recipient's queue is full.
     Full(String),
+    /// The sender's host is in `federation.deny_sender_hosts`.
+    DeniedHost(String),
     /// Store error; nothing was written.
     Internal,
 }
@@ -162,7 +164,7 @@ impl Refusal {
         match self {
             Refusal::RateLimited(s) => error_frame("InvalidRequest", &format!("Rate limit exceeded; retry in {s} s.")),
             Refusal::Invalid(kind, d) => error_frame(kind, d),
-            Refusal::Full(d) => error_frame("InvalidRequest", d),
+            Refusal::Full(d) | Refusal::DeniedHost(d) => error_frame("InvalidRequest", d),
             Refusal::Internal => error_frame("UnknownError", "Internal error; try again."),
         }
     }
