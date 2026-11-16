@@ -41,6 +41,8 @@ impl Relay {
             let addr = |a: &Option<String>| a.as_deref().map(short_addr).unwrap_or_default();
             (addr(&req.from), addr(&req.to), req.str_.as_ref().map_or(0, String::len))
         });
+        let has_txid = allow_cancel && self.cfg.protocol.cancel && req.txid.is_some();
+        let size = req.str_.as_ref().map_or(0, String::len);
         let (out, peer) = self.post_slate_inner(ip, req, allow_cancel).await;
         let label = match &out {
             PostOutcome::Stored { .. } => "stored",
@@ -51,7 +53,14 @@ impl Relay {
             PostOutcome::Refused(Refusal::Internal) => "internal",
             PostOutcome::Refused(Refusal::Invalid(..)) => "invalid",
         };
-        metrics::counter!("epicbox_posts_total", "result" => label).increment(1);
+        let txid_label = if has_txid { "yes" } else { "no" };
+        metrics::counter!("epicbox_posts_total", "result" => label, "txid" => txid_label).increment(1);
+        if matches!(out, PostOutcome::Stored { .. } | PostOutcome::Forwarded { .. }) {
+            let bucket = crate::traffic::size_bucket(size);
+            metrics::counter!("epicbox_post_size_total", "size" => bucket.label(), "txid" => txid_label).increment(1);
+            self.traffic.add(if has_txid { Count::PostsTxid } else { Count::PostsNoTxid }, 1);
+            self.traffic.add(bucket.count(), 1);
+        }
         self.traffic.add(
             match &out {
                 PostOutcome::Stored { .. } => Count::PostsStored,

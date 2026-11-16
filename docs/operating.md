@@ -158,6 +158,17 @@ new connections avoids that.
 - `/.well-known/epicbox.json`: the info document wallets and peers read: software (no exact version), `server.name`, identity (`domain:port`), protocol versions, whether federation is on, the mux/1 and HTTPS features with the limits a client needs (the per-IP abuse limits are not published), `txcancel/1` when mux/1 and the 3.1.0 cancel are both on, and `epicbox-cancel/1` (the text its cancels may be signed over) when the 3.1.0 cancel is on.
 - `/` in a browser: a page for people who open the relay's address. It says what the relay is, shows the domain and port to enter in a wallet, and runs three checks from the visitor's browser every 30 s: `/health`, `/ready` and a websocket that must receive its first `Challenge`. It shows nothing beyond those routes and the info document, loads nothing from other hosts, and is sent only for `GET /` with `Accept: text/html`; every other plain GET still gets the one-line text. `server.landing_page = false` turns it off.
 
+### Payment metrics
+
+These are counts only. No label or log field holds an address, a txid, an IP or a mailbox, and there is no lookup by any of them.
+
+- `epicbox_posts_total{result,txid}`: PostSlate results; `txid="yes"` when the post carried an `epicboxtxid`.
+- `epicbox_post_size_total{size,txid}`: accepted posts by size of the slate body (`le_2560`, `le_5120`, `le_6144`, `le_10240`, `over_10240` bytes).
+- `epicbox_roundtrip_seconds`: histogram of the time from the first slate stored under a txid to the first slate from the other party under the same txid (buckets 5 s to 3 days).
+- `epicbox_roundtrip_unanswered`: transactions whose first slate is older than `store.unanswered_hours` (default 24, 1 to `retention_days` times 24), that have no slate from the other party under that txid, and are not cancelled. It is recomputed every 15 s. A payment that never completes shows here until it is cancelled or its rows expire. Rows older than `store.retention_days` are gone, so the gauge covers the last retention window.
+
+Which payments the round trip covers: only those where both parties' slates are stored on this relay, that is both parties use this relay as their receiving relay. A slate that is forwarded to another relay, or arrives from one and is answered through a forward, is not measured. Only slates that carry a txid count: invoices (I1) carry one but are answered without one (I2), so they stay in the unanswered gauge, and notices, contact traffic and pairing carry none. Transactions first seen before 0.1.10 have no start time and are skipped. The txid and the sender are kept in the same `txlinks` rows as before (two extra rows per transaction: who sent first and the first answer's time) and expire with them.
+
 ## 5. Backup and restore
 
 The store is one SQLite file in WAL mode: `epicmail.db`, plus `epicmail.db-wal` and `epicmail.db-shm` while running. The WAL holds committed writes that are not yet in the main file.
@@ -240,7 +251,8 @@ relay stays quiet:
 ```
 INFO epicmail::traffic: traffic interval_s=300 posts_stored=152 posts_forwarded=2 posts_refused=30
   delivered=150 acked=148 cancels=0 logins_ok=412 bad_signatures=60 forwards_sent=2 forwards_failed=0
-  limit_refusals=0 sockets=37 mailboxes_waiting=109 messages_waiting=159 forwards_waiting=0
+  limit_refusals=0 posts_txid=48 posts_no_txid=106 size_le_2560=61 size_le_5120=3 size_le_6144=52
+  size_le_10240=38 size_over_10240=0 sockets=37 mailboxes_waiting=109 messages_waiting=159 forwards_waiting=0
   posts_stored_total=… posts_forwarded_total=… posts_refused_total=… delivered_total=… acked_total=…
   bad_signatures_total=…
 ```
@@ -249,7 +261,7 @@ INFO epicmail::traffic: traffic interval_s=300 posts_stored=152 posts_forwarded=
 `sockets` and the `*_waiting` values are as they are now. `posts_refused` covers invalid posts,
 limits, a full store and posts for a cancelled transaction; `logins_ok` counts mailboxes proven
 by Subscribe, mux/1 Attach or `/v1/pull`; `bad_signatures` counts every signature that did not
-verify. A `/v1/pull` proof is a signature over `<challenge>@<domain>:<port>` of this relay, so a proof made for another relay counts here. `delivered` counts a redelivery again. The summary holds counts only.
+verify. `posts_txid` and `posts_no_txid` split the posts accepted in the interval by whether they carried an `epicboxtxid`; the `size_*` counts split the same posts by the size of the slate body (up to 2560, 5120, 6144 and 10240 bytes, and larger). A `/v1/pull` proof is a signature over `<challenge>@<domain>:<port>` of this relay, so a proof made for another relay counts here. `delivered` counts a redelivery again. The summary holds counts only.
 
 At the same time, each network prefix (/24, /48) that sent more than `log.warn_bad_requests`
 (30 by default; 0 turns it off) bad signatures, or more than that many invalid posts, in the

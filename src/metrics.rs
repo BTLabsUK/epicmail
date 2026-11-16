@@ -1,16 +1,21 @@
 //! Prometheus metrics. Labels never carry addresses, keys, IPs or payloads.
 
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 
 /// Installs the global Prometheus recorder and describes every metric. Call once per process.
 pub fn install() -> anyhow::Result<PrometheusHandle> {
-    let handle = PrometheusBuilder::new().install_recorder()?;
+    let handle = PrometheusBuilder::new()
+        .set_buckets_for_metric(
+            Matcher::Full("epicbox_roundtrip_seconds".into()),
+            &[5.0, 30.0, 120.0, 600.0, 3600.0, 21_600.0, 86_400.0, 259_200.0],
+        )?
+        .install_recorder()?;
     describe();
     Ok(handle)
 }
 
 fn describe() {
-    use metrics::{describe_counter, describe_gauge};
+    use metrics::{describe_counter, describe_gauge, describe_histogram};
     describe_gauge!("epicbox_sockets", "Open websocket connections.");
     describe_gauge!("epicbox_listening_mailboxes", "Mailboxes with at least one listening socket.");
     describe_gauge!("epicbox_mux_holders", "Mailboxes held by a mux/1 socket.");
@@ -29,7 +34,17 @@ fn describe() {
     describe_gauge!("epicbox_store_ok", "1 when the last store check (/ready probe or expiry sweep) succeeded.");
     describe_counter!("epicbox_frames_in_total", "Websocket frames received.");
     describe_counter!("epicbox_frames_out_total", "Websocket frames sent.");
-    describe_counter!("epicbox_posts_total", "PostSlate results.");
+    describe_gauge!(
+        "epicbox_roundtrip_unanswered",
+        "Transactions with a txid whose first slate is older than store.unanswered_hours and that have no slate from \
+         the other party under that txid and are not cancelled. Counts only transactions stored on this relay."
+    );
+    describe_histogram!(
+        "epicbox_roundtrip_seconds",
+        "Seconds from the first slate under a txid to the other party's first slate under it, both stored on this relay."
+    );
+    describe_counter!("epicbox_posts_total", "PostSlate results, by whether the post carried an epicboxtxid.");
+    describe_counter!("epicbox_post_size_total", "Accepted posts by size of the slate body and txid presence.");
     describe_counter!("epicbox_subscribe_total", "Subscribe results.");
     describe_counter!("epicbox_deliveries_total", "Messages offered to a listener.");
     describe_counter!("epicbox_made_total", "Messages acknowledged and removed.");

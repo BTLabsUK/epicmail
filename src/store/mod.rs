@@ -235,6 +235,10 @@ pub trait Store: Send + Sync + 'static {
     async fn sweep(&self, now: i64, retention_ms: i64) -> Result<SweepStats>;
     async fn vacuum(&self) -> Result<()>;
     async fn stats(&self, now: i64) -> Result<Stats>;
+    /// Transactions whose first slate with a txid was stored here at or before `before`, that
+    /// have had no slate from the other party under the same txid and are not cancelled. A count
+    /// only; it covers transactions whose slates were stored on this relay.
+    async fn unanswered(&self, before: i64) -> Result<i64>;
     /// Bytes of live data as of the last commit, if the store tracks it. Cheap: no store work.
     fn used_bytes(&self) -> Option<u64> {
         None

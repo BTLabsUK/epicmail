@@ -66,6 +66,9 @@ pub struct StoreCfg {
     /// not the file size); 0 means no cap. Mail for self-made addresses is limited only per
     /// prefix and per minute, so without a cap enough prefixes could fill the disk.
     pub max_bytes: u64,
+    /// Hours after which a payment slate with a txid that has had no answer under that txid is
+    /// counted in `epicbox_roundtrip_unanswered`. At most `retention_days` in hours.
+    pub unanswered_hours: u32,
 }
 
 /// `[protocol]`: the websocket protocol. Every Challenge, the first included, is fresh and
@@ -292,6 +295,7 @@ impl Default for StoreCfg {
             readers: 4,
             vacuum_hour_utc: 3,
             max_bytes: 2 << 30,
+            unanswered_hours: 24,
         }
     }
 }
@@ -401,6 +405,9 @@ impl Config {
         }
         if !self.server.domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
             bail!("server.domain may hold only letters, digits and dots (the address format)");
+        }
+        if !(1..=self.store.retention_days.saturating_mul(24)).contains(&self.store.unanswered_hours) {
+            bail!("store.unanswered_hours must be 1 to store.retention_days * 24");
         }
         if self.store.retention_days < 7 {
             bail!("store.retention_days must be at least 7");
@@ -533,11 +540,13 @@ mod tests {
     #[test]
     fn defaults_validate_and_bad_values_are_refused() {
         base().validate().unwrap();
-        let cases: [fn(&mut Config); 14] = [
+        let cases: [fn(&mut Config); 16] = [
             |c| c.server.domain.clear(),
             |c| c.store.vacuum_hour_utc = 24,
             |c| c.store.readers = 0,
             |c| c.store.retention_days = 6,
+            |c| c.store.unanswered_hours = 0,
+            |c| c.store.unanswered_hours = 7 * 24 + 1,
             |c| c.limits.http_per_min_per_ip = 10,
             |c| c.log.format = "jsn".into(),
             |c| c.log.level = "epicmail=loud".into(),

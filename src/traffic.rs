@@ -39,9 +39,62 @@ pub enum Count {
     ForwardsFailed,
     /// Requests a limit refused.
     LimitRefusals,
+    /// Accepted posts that carried an epicboxtxid.
+    PostsTxid,
+    /// Accepted posts without one.
+    PostsNoTxid,
+    /// Accepted posts by size of the slate body: up to 2560 bytes, up to 5120, up to 6144, up to
+    /// 10240, larger.
+    SizeLe2560,
+    SizeLe5120,
+    SizeLe6144,
+    SizeLe10240,
+    SizeOver10240,
 }
 
-const N: usize = 11;
+const N: usize = 18;
+
+/// A coarse size class of a slate body. Counts only; there is no finer size anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeBucket {
+    Le2560,
+    Le5120,
+    Le6144,
+    Le10240,
+    Over10240,
+}
+
+pub fn size_bucket(bytes: usize) -> SizeBucket {
+    match bytes {
+        0..=2560 => SizeBucket::Le2560,
+        2561..=5120 => SizeBucket::Le5120,
+        5121..=6144 => SizeBucket::Le6144,
+        6145..=10240 => SizeBucket::Le10240,
+        _ => SizeBucket::Over10240,
+    }
+}
+
+impl SizeBucket {
+    pub fn label(self) -> &'static str {
+        match self {
+            SizeBucket::Le2560 => "le_2560",
+            SizeBucket::Le5120 => "le_5120",
+            SizeBucket::Le6144 => "le_6144",
+            SizeBucket::Le10240 => "le_10240",
+            SizeBucket::Over10240 => "over_10240",
+        }
+    }
+
+    pub fn count(self) -> Count {
+        match self {
+            SizeBucket::Le2560 => Count::SizeLe2560,
+            SizeBucket::Le5120 => Count::SizeLe5120,
+            SizeBucket::Le6144 => Count::SizeLe6144,
+            SizeBucket::Le10240 => Count::SizeLe10240,
+            SizeBucket::Over10240 => Count::SizeOver10240,
+        }
+    }
+}
 
 /// The most network prefixes tallied between two reports, so a flood from many networks
 /// cannot grow memory without bound. Prefixes past it are counted in the totals only.
@@ -206,6 +259,13 @@ fn report(relay: &Relay, reporter: &mut Reporter, interval_s: u64) {
             forwards_sent = d.get(Count::ForwardsSent),
             forwards_failed = d.get(Count::ForwardsFailed),
             limit_refusals = d.get(Count::LimitRefusals),
+            posts_txid = d.get(Count::PostsTxid),
+            posts_no_txid = d.get(Count::PostsNoTxid),
+            size_le_2560 = d.get(Count::SizeLe2560),
+            size_le_5120 = d.get(Count::SizeLe5120),
+            size_le_6144 = d.get(Count::SizeLe6144),
+            size_le_10240 = d.get(Count::SizeLe10240),
+            size_over_10240 = d.get(Count::SizeOver10240),
             sockets = g.sockets,
             mailboxes_waiting = g.mailboxes_waiting,
             messages_waiting = g.messages_waiting,
@@ -269,6 +329,17 @@ mod tests {
         t.add(Count::PostsStored, 1);
         let s = r.next(counts(&t), idle).unwrap();
         assert_eq!((s.delta.get(Count::PostsStored), s.total.get(Count::PostsStored)), (1, 4));
+    }
+
+    #[test]
+    fn size_buckets_cover_every_size_once() {
+        assert_eq!(size_bucket(0), SizeBucket::Le2560);
+        assert_eq!(size_bucket(2560), SizeBucket::Le2560);
+        assert_eq!(size_bucket(2561), SizeBucket::Le5120);
+        assert_eq!(size_bucket(5545), SizeBucket::Le6144);
+        assert_eq!(size_bucket(8800), SizeBucket::Le10240);
+        assert_eq!(size_bucket(10241), SizeBucket::Over10240);
+        assert_eq!(size_bucket(usize::MAX).count(), Count::SizeOver10240);
     }
 
     #[test]

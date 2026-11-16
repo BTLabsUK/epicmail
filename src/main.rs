@@ -199,6 +199,10 @@ async fn housekeeping(relay: Arc<Relay>) {
             }
             Err(e) => epicmail::sampled!(error, error = %e, "store stats failed"),
         }
+        match relay.store.unanswered(now - i64::from(relay.cfg.store.unanswered_hours) * 3_600_000).await {
+            Ok(n) => metrics::gauge!("epicbox_roundtrip_unanswered").set(n as f64),
+            Err(e) => epicmail::sampled!(error, error = %e, "store unanswered count failed"),
+        }
         let (mailboxes, mux, _) = relay.registry.counts();
         metrics::gauge!("epicbox_listening_mailboxes").set(mailboxes as f64);
         metrics::gauge!("epicbox_mux_holders").set(mux as f64);

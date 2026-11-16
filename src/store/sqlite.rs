@@ -84,6 +84,10 @@ CREATE TABLE IF NOT EXISTS used_challenges(key TEXT PRIMARY KEY, expires_at INTE
 
 const LINK_KEY: i64 = 0;
 const LINK_ENDPOINT: i64 = 1;
+/// The sender of the first slate stored under a txid; `created_at` is when it was stored.
+const LINK_ORIGIN: i64 = 2;
+/// Set once when the other party's first slate under the txid was stored.
+const LINK_ANSWER: i64 = 3;
 /// Most incremental vacuum rounds of 2000 pages in one daily vacuum (about 32 GiB).
 const VACUUM_MAX_ROUNDS: usize = 4096;
 
@@ -333,6 +337,33 @@ fn link_tx(conn: &Connection, txid: &str, keys: &[&str], endpoint: Option<&str>,
     Ok(())
 }
 
+/// Round trip of a payment: remember who sent the first slate under `txid` and when, and when
+/// the other party's first slate arrives record the time between them, once. Transactions
+/// first seen before this existed have no origin and are skipped. Nothing here leaves the
+/// store but the duration.
+fn round_trip(conn: &Connection, txid: &str, sender: &str, first: bool, now: i64) -> rusqlite::Result<()> {
+    if first {
+        conn.prepare_cached("INSERT OR IGNORE INTO txlinks(txid,kind,value,created_at) VALUES(?1,?2,?3,?4)")?
+            .execute(params![txid, LINK_ORIGIN, sender, now])?;
+        return Ok(());
+    }
+    let origin: Option<(String, i64)> = conn
+        .prepare_cached("SELECT value, created_at FROM txlinks WHERE txid=?1 AND kind=?2")?
+        .query_row(params![txid, LINK_ORIGIN], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    if let Some((origin, since)) = origin {
+        if origin != sender {
+            let added = conn
+                .prepare_cached("INSERT OR IGNORE INTO txlinks(txid,kind,value,created_at) VALUES(?1,?2,'1',?3)")?
+                .execute(params![txid, LINK_ANSWER, now])?;
+            if added == 1 {
+                metrics::histogram!("epicbox_roundtrip_seconds").record(((now - since).max(0) as f64) / 1000.0);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn tx_participants(conn: &Connection, txid: &str) -> rusqlite::Result<Vec<String>> {
     let mut st = conn.prepare_cached("SELECT value FROM txlinks WHERE txid=?1 AND kind=?2 ORDER BY value")?;
     let rows = st.query_map(params![txid, LINK_KEY], |r| r.get::<_, String>(0))?;
@@ -343,6 +374,7 @@ fn tx_participants(conn: &Connection, txid: &str) -> rusqlite::Result<Vec<String
 impl Store for SqliteStore {
     async fn put_message(&self, m: NewMessage) -> Result<PutOutcome> {
         self.write(move |c| {
+            let mut first_of_tx = false;
             if let Some(txid) = &m.txid {
                 let cancelled: bool = c.prepare_cached("SELECT 1 FROM cancels WHERE txid=?1")?.exists([txid])?;
                 if cancelled {
@@ -352,6 +384,7 @@ impl Store for SqliteStore {
                 if !parts.is_empty() && !parts.iter().any(|p| p == &m.sender_key) {
                     return Ok(PutOutcome::NotParticipant);
                 }
+                first_of_tx = parts.is_empty();
             }
             let dedupe = dedupe_message(&m.queue, &m.sender_key, &m.body, &m.signature);
             if let Some(msgid) = c
@@ -406,6 +439,7 @@ impl Store for SqliteStore {
                     m.remote_endpoint.as_deref(),
                     m.created_at,
                 )?;
+                round_trip(c, txid, &m.sender_key, first_of_tx, m.created_at)?;
             }
             Ok(PutOutcome::Stored { msgid: m.msgid })
         })
@@ -828,6 +862,19 @@ impl Store for SqliteStore {
         .await
     }
 
+    async fn unanswered(&self, before: i64) -> Result<i64> {
+        self.read(move |c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM txlinks o WHERE o.kind=?2 AND o.created_at<=?1 \
+                 AND NOT EXISTS (SELECT 1 FROM txlinks a WHERE a.txid=o.txid AND a.kind=?3) \
+                 AND NOT EXISTS (SELECT 1 FROM cancels k WHERE k.txid=o.txid)",
+                params![before, LINK_ORIGIN, LINK_ANSWER],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+    }
+
     fn used_bytes(&self) -> Option<u64> {
         Some(self.used.load(Ordering::Relaxed))
     }
@@ -1008,6 +1055,36 @@ mod tests {
         }
         let g = s.claim("q", 200, 1, vec![], ClaimMode::Offer { lease_ms: 0 }).await.unwrap();
         assert_eq!(g[0].msgid, "m2");
+    }
+
+    #[tokio::test]
+    async fn round_trips_are_counted_once_and_unanswered_ones_age_into_the_gauge() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = SqliteStore::open(&dir.path().join("t.db"), 2, 64).unwrap();
+        let tx = |mut m: NewMessage, t: &str| {
+            m.txid = Some(t.into());
+            m
+        };
+        // t1: S1 from a to b at 1000, answered by b at 5000. t2: S1 never answered. t3: cancelled.
+        s.put_message(tx(msg("b", "a", "s1", 1000), "t1")).await.unwrap();
+        s.put_message(tx(msg("a", "b", "s2", 5000), "t1")).await.unwrap();
+        s.put_message(tx(msg("c", "d", "x1", 1000), "t2")).await.unwrap();
+        s.put_message(tx(msg("f", "e", "y1", 1000), "t3")).await.unwrap();
+        s.cancel_tx("t3", vec!["e".into(), "f".into()], Some("f".into()), 1500, vec![]).await.unwrap();
+        assert_eq!(s.unanswered(999).await.unwrap(), 0, "nothing is old enough yet");
+        assert_eq!(s.unanswered(1000).await.unwrap(), 1, "only t2: t1 is answered, t3 is cancelled");
+        // A second answer is not a second round trip.
+        s.put_message(tx(msg("a", "b", "s2b", 6000), "t1")).await.unwrap();
+        let answers: i64 = s
+            .read(|c| c.query_row("SELECT count(*) FROM txlinks WHERE kind=3", [], |r| r.get(0)))
+            .await
+            .unwrap();
+        assert_eq!(answers, 1);
+        // The other party answering t2 closes it.
+        s.put_message(tx(msg("c", "e2", "x2", 7000), "t2")).await.unwrap();
+        assert_eq!(s.unanswered(1000).await.unwrap(), 1, "e2 is not a participant: still open");
+        s.put_message(tx(msg("d", "c", "x3", 7000), "t2")).await.unwrap();
+        assert_eq!(s.unanswered(1000).await.unwrap(), 0);
     }
 
     #[tokio::test]

@@ -15,6 +15,8 @@ landing_page = true              # answer a browser's GET / with a page: what th
 [store]
 path = "epicmail.db"             # SQLite file; /var/lib/epicmail/... under systemd, /data/... in Docker
 retention_days = 7               # days an uncollected message is kept; 7 is the minimum
+unanswered_hours = 24            # hours after which a payment slate with no answer under its txid is
+                                 # counted in epicbox_roundtrip_unanswered; 1 to retention_days * 24
 group_commit_max = 256           # most writes per commit
 readers = 4                      # reader connections
 vacuum_hour_utc = 3              # UTC hour of the daily incremental vacuum
