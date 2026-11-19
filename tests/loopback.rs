@@ -2320,3 +2320,51 @@ async fn a_bare_cancel_is_refused_when_switched_off() {
     assert_eq!(recv(&mut c).await, json!({"type":"TransactionCancelled","epicboxtxid":tx}));
     assert_eq!(waiting(&n).await, 0);
 }
+
+/// The exact handshake of the client in app 26.11.5 (LEPIC 663f729b) on a relay set up as
+/// production is (domain plus the old name as an alias): it offers mux/1, txcancel/1 and
+/// epicbox-cancel/1, signs the bare challenge, and sends no `host`. The relay's answers carry
+/// the same fields as before epicbox-attach/1: no new ext token, no new key in the Ok, and the
+/// mailbox attaches and gets its mail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_26_11_5_client_handshake_is_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "epicmail.relay.test", |c| c.server.aliases = vec!["epicbox.relay.test".into()]).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    send(&mut a, post_frame(&alice, "epicbox.relay.test", &bob, "epicbox.relay.test", 1)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+
+    let mut m = connect(&n).await;
+    recv_type(&mut m, "Challenge").await;
+    send(
+        &mut m,
+        json!({"type":"ClientDetails","wallet_version":"4.1.0","wallet_mode":"listener","protocol_version":"3.0.0",
+               "ext":["mux/1","txcancel/1","epicbox-cancel/1"]}),
+    )
+    .await;
+    let ok = recv(&mut m).await;
+    assert_eq!(ok["type"], "Ok", "{ok}");
+    assert_eq!(ok["ext"], json!(["mux/1", "txcancel/1", "epicbox-cancel/1"]), "{ok}");
+    let mut keys: Vec<&str> = ok.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["challenge", "ext", "limits", "type"], "{ok}");
+    let ch = ok["challenge"].as_str().unwrap().to_string();
+
+    send(&mut m, json!({"type":"Attach","ref":"1","mailboxes":[{"address":bob.pk,"signature":bob.sign(&ch)}]})).await;
+    let at = recv(&mut m).await;
+    assert_eq!(at["type"], "Attached", "{at}");
+    assert_eq!(at["ref"], "1", "{at}");
+    assert_eq!(at["mailboxes"][0]["ok"], true, "{at}");
+    assert_eq!(at["mailboxes"][0]["waiting"], 1, "{at}");
+    let mail = recv(&mut m).await;
+    assert_eq!(mail["type"], "Mail", "{mail}");
+    assert_eq!(mail["mailbox"], bob.pk);
+
+    // A wrong signature is still `bad_signature`, as before.
+    let carol = Key::new();
+    send(&mut m, json!({"type":"Attach","ref":"2","mailboxes":[{"address":carol.pk,"signature":bob.sign(&ch)}]})).await;
+    let at = recv_type(&mut m, "Attached").await;
+    assert_eq!(at["mailboxes"][0]["code"], "bad_signature", "{at}");
+}
