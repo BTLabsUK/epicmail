@@ -48,6 +48,10 @@ fn describe() {
         "epicbox_denied_sender_host_total",
         "Posts refused because the sender's host is in federation.deny_sender_hosts."
     );
+    describe_counter!(
+        "epicbox_attach_wrong_host_total",
+        "mux/1 sockets whose Attach named a host not in server.domain or server.aliases (once per socket)."
+    );
     describe_counter!("epicbox_post_size_total", "Accepted posts by size of the slate body and txid presence.");
     describe_counter!("epicbox_subscribe_total", "Subscribe results.");
     describe_counter!("epicbox_deliveries_total", "Messages offered to a listener.");

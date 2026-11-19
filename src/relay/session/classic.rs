@@ -11,7 +11,9 @@ use crate::address::parse_address;
 use crate::clock::now_ms;
 use crate::ids::{is_msgid, rand_id};
 use crate::logging::short;
-use crate::relay::{CancelOutcome, CANCEL_SEPARATED_EXT, Cmd, PostOutcome, PostReq, Refusal, OFFER_LEASE_MS};
+use crate::relay::{
+    CancelOutcome, Cmd, PostOutcome, PostReq, Refusal, ATTACH_HOST_EXT, CANCEL_SEPARATED_EXT, OFFER_LEASE_MS,
+};
 use crate::sig;
 use crate::store::{ClaimMode, StoredMessage};
 
@@ -84,7 +86,9 @@ impl Session {
 
     /// ClientDetails. A request for mux/1 upgrades the socket when allowed; otherwise `Ok`.
     /// A wallet that offers `epicbox-cancel/1` gets it echoed in the `Ok`: the relay checks
-    /// cancels signed over `epicbox-cancel/1:<txid>`, so the wallet may sign that form.
+    /// cancels signed over `epicbox-cancel/1:<txid>`, so the wallet may sign that form. A mux/1
+    /// client that offers `epicbox-attach/1` gets it echoed among the mux/1 tokens: the relay
+    /// checks Attach signatures bound to its host name, so the client may sign that form.
     pub(super) async fn client_details(&mut self, ws: &mut WebSocket, msg: &Value) {
         let offered = |token: &str| {
             msg.get("ext")
@@ -96,10 +100,11 @@ impl Session {
         let wants_mux = offered("mux/1");
         let wants_txcancel = cancel && offered("txcancel/1");
         let separated = cancel && offered(CANCEL_SEPARATED_EXT);
+        let attach_host = offered(ATTACH_HOST_EXT);
         if wants_mux
             && self.relay.cfg.protocol.mux
             && self.key.is_none()
-            && self.upgrade_to_mux(ws, wants_txcancel, separated).await
+            && self.upgrade_to_mux(ws, wants_txcancel, separated, attach_host).await
         {
             return;
         }

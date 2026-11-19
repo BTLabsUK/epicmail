@@ -14,7 +14,7 @@ use crate::ids::is_txid;
 use crate::ids::{is_msgid, rand_b64url};
 use crate::logging::short;
 use crate::relay::tokens::TOKEN_TTL_MS;
-use crate::relay::{CancelOutcome, CANCEL_SEPARATED_EXT};
+use crate::relay::{CancelOutcome, ATTACH_HOST_EXT, ATTACH_SIG_PREFIX, CANCEL_SEPARATED_EXT};
 use crate::relay::{Cmd, PostOutcome, PostReq, Refusal, OFFER_LEASE_MS};
 use crate::sig;
 use crate::store::ClaimMode;
@@ -55,6 +55,8 @@ pub(super) struct Mux {
     /// Waiting budget window: (start, frames counted in it).
     waiting_window: (Instant, u32),
     last_sweep: Instant,
+    /// An Attach on this socket named a host this relay does not list; logged once.
+    wrong_host_seen: bool,
 }
 
 /// A mux/1 `Error` frame. `kind` is derived from `code` so classic-style clients still read it.
@@ -89,6 +91,7 @@ impl Session {
         ws: &mut WebSocket,
         txcancel: bool,
         separated: bool,
+        attach_host: bool,
     ) -> bool {
         let (_, mult) = self.relay.limiter.prefix(self.ip);
         if !self.permit.upgrade_mux(mult) {
@@ -103,6 +106,9 @@ impl Session {
         }
         if separated {
             ext.push(CANCEL_SEPARATED_EXT);
+        }
+        if attach_host {
+            ext.push(ATTACH_HOST_EXT);
         }
         let reply = json!({
             "type":"Ok","ext":ext,"challenge":challenge,
@@ -127,10 +133,28 @@ impl Session {
             attach_window: (Instant::now(), 0),
             waiting_window: (Instant::now(), 0),
             last_sweep: Instant::now(),
+            wrong_host_seen: false,
         });
         metrics::counter!("epicbox_mux_sessions_total").increment(1);
         self.send(ws, reply).await;
         true
+    }
+
+    /// Logs, once per socket, an Attach that named a host this relay does not list, and counts
+    /// it in `epicbox_attach_wrong_host_total`.
+    fn note_wrong_host(&mut self, host: &str) {
+        let Some(mux) = self.mux.as_mut() else { return };
+        if std::mem::replace(&mut mux.wrong_host_seen, true) {
+            return;
+        }
+        metrics::counter!("epicbox_attach_wrong_host_total").increment(1);
+        let host: String = host.chars().take(64).collect();
+        tracing::info!(
+            socket = self.id,
+            ip = %self.ip,
+            host = ?host,
+            "attach named a host this relay does not list; add it to server.aliases if wallets dial it"
+        );
     }
 
     /// Dispatch one frame on a mux/1 socket.
@@ -259,10 +283,32 @@ impl Session {
                 out.push(json!({"mailbox":address,"ok":false,"code":"bad_address"}));
                 continue;
             };
-            if sig::verify(&key, &challenge, signature).is_err() {
-                r.limiter.sig_failed(self.ip);
-                tracing::trace!(socket = self.id, ip = %self.ip, mailbox = %short(&key), reason = "bad_signature", "attach refused");
-                out.push(json!({"mailbox":key,"ok":false,"code":"bad_signature"}));
+            // An entry with `host` is signed over `epicbox-attach/1:<host>:<challenge>`, with
+            // `host` exactly as sent, and `host` must name this relay: a signature made for
+            // another relay's challenge and relayed here does not prove the key. Without `host`
+            // it is the bare challenge, the first mux/1 form, while `accept_bare_attach` allows it.
+            let host = e.get("host").and_then(|h| h.as_str());
+            let proven_sig = match host {
+                Some(h) if !r.cfg.is_public_host(h) => Err("wrong_host"),
+                Some(h) => {
+                    let text = format!("{ATTACH_SIG_PREFIX}{h}:{challenge}");
+                    sig::verify(&key, &text, signature).map_err(|_| "bad_signature")
+                }
+                None if !r.cfg.protocol.accept_bare_attach => Err("bad_signature"),
+                None => sig::verify(&key, &challenge, signature).map_err(|_| "bad_signature"),
+            };
+            if let Err(code) = proven_sig {
+                // A wrong host is the relay's missing alias as often as a relayed signature,
+                // and the client retries with the bare form, so it is not a failed signature:
+                // counting it would rate-limit that retry. It is logged once per socket so an
+                // operator sees the name to add to `server.aliases`.
+                if code == "wrong_host" {
+                    self.note_wrong_host(host.unwrap_or(""));
+                } else {
+                    r.limiter.sig_failed(self.ip);
+                }
+                tracing::trace!(socket = self.id, ip = %self.ip, mailbox = %short(&key), reason = code, "attach refused");
+                out.push(json!({"mailbox":key,"ok":false,"code":code}));
                 continue;
             }
             match self.take_mailbox(&key).await {

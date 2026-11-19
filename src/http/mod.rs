@@ -275,7 +275,19 @@ async fn well_known(State(st): State<AppState>) -> Response {
     if cfg.protocol.cancel {
         features.insert(
             crate::relay::CANCEL_SEPARATED_EXT.into(),
-            json!({"signed_text": format!("{}<txid>", crate::relay::CANCEL_SIG_PREFIX)}),
+            json!({
+                "signed_text": format!("{}<txid>", crate::relay::CANCEL_SIG_PREFIX),
+                "bare_accepted": cfg.protocol.accept_bare_cancel,
+            }),
+        );
+    }
+    if cfg.protocol.mux {
+        features.insert(
+            crate::relay::ATTACH_HOST_EXT.into(),
+            json!({
+                "signed_text": format!("{}<host>:<challenge>", crate::relay::ATTACH_SIG_PREFIX),
+                "bare_accepted": cfg.protocol.accept_bare_attach,
+            }),
         );
     }
     if cfg.http_api.enabled {

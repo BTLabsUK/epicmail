@@ -99,6 +99,14 @@ pub struct Protocol {
     /// forwards only CancelTx signed over `epicbox-cancel/1:<txid>`; a bare signature is the
     /// same one the PostSlate carried, so it does not show that the sender asked to cancel.
     pub forward_bare_cancel: bool,
+    /// Accept CancelTx signed over the bare txid (the 3.1.0 form stock wallets use). On by
+    /// default. Off accepts only the `epicbox-cancel/1:<txid>` form: the bare signature is the
+    /// one every PostSlate carries as `epicboxtxidsig`, so anyone who saw the slate holds it.
+    pub accept_bare_cancel: bool,
+    /// Accept a mux/1 Attach signed over the bare challenge (the first mux/1 form). On by
+    /// default. Off accepts only `epicbox-attach/1:<host>:<challenge>`, with `host` one of this
+    /// relay's names (`server.domain` and the host part of `server.aliases`).
+    pub accept_bare_attach: bool,
 }
 
 /// `[limits]`. "Per IP" means per IP prefix (`ipv4_prefix`, `ipv6_prefix`).
@@ -315,6 +323,8 @@ impl Default for Protocol {
             idle_timeout_s: 90,
             watchdog_misses: 3,
             forward_bare_cancel: true,
+            accept_bare_cancel: true,
+            accept_bare_attach: true,
         }
     }
 }
@@ -514,6 +524,19 @@ impl Config {
 }
 
 impl Config {
+    /// True when `host` (a host name without a port, any case, trailing dot ignored) is one of
+    /// the names wallets dial this relay by: `server.domain` or the host part of an alias.
+    pub fn is_public_host(&self, host: &str) -> bool {
+        let Some(h) = normalize_domain(host) else { return false };
+        if normalize_domain(&self.server.domain).as_deref() == Some(h.as_str()) {
+            return true;
+        }
+        self.server.aliases.iter().any(|a| {
+            let name = a.rsplit_once(':').map_or(a.as_str(), |(d, _)| d);
+            normalize_domain(name).as_deref() == Some(h.as_str())
+        })
+    }
+
     /// The listed host in `federation.deny_sender_hosts` that `domain` (the host part of a
     /// sender address) names, in its normal form. Exact match, case-insensitive, trailing dot
     /// ignored; the port is not part of `domain`.

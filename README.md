@@ -250,7 +250,9 @@ later send `CancelTx`, signed over the bare txid as wallets sign it today, or ov
 
 The bare-txid signature is the one the slate already carried, so anyone who saw the slate can
 cancel. `epicbox-cancel/1:<txid>` closes that; `protocol.forward_bare_cancel = false` forwards
-only that form. `protocol.cancel = false` makes the relay a 3.0.0 relay.
+only that form, and `protocol.accept_bare_cancel = false` accepts only that form (both on by
+default, since stock wallets sign the bare txid). `protocol.cancel = false` makes the relay a
+3.0.0 relay.
 
 A relay that has the cancel on offers the separated form to wallets in band: a client lists
 `epicbox-cancel/1` in `ClientDetails.ext`, and the `Ok` repeats it (on a classic socket as
@@ -258,6 +260,15 @@ A relay that has the cancel on offers the separated form to wallets in band: a c
 lists it as a feature in `/.well-known/epicbox.json`. It verifies the separated form first and the
 bare form second on every path, and forwards the signature as it received it. The exact text and
 the fallback are in [docs/cancel-signature.md](docs/cancel-signature.md).
+
+A mux/1 Attach can be bound to the relay's name the same way: a client lists `epicbox-attach/1`,
+and on a socket where it is echoed each entry names the host it dialled and signs
+`epicbox-attach/1:<host>:<challenge>`. The relay refuses a host that is not `server.domain` or an
+alias with `wrong_host`, logs the first one of a socket at `info` and counts it in
+`epicbox_attach_wrong_host_total`; it is not a failed signature, so the client's bare retry is
+not rate-limited. The bare-challenge form stays accepted while
+`protocol.accept_bare_attach` is on (the default); list every name wallets dial, onion included,
+in `server.aliases` before turning it off. Details in [docs/mux-1.md](docs/mux-1.md) section 9.
 
 ## Federation
 
