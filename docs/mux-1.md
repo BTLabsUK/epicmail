@@ -329,7 +329,10 @@ this extension the signature also names the relay the wallet meant to reach.
 - The relay checks `host` against its names: `server.domain` and the host part of each
   `server.aliases` entry, compared without case and trailing dot. Any other host gets
   `wrong_host`; a host that is one of its names but a signature that does not verify over the
-  text gets `bad_signature`. Both count as failed signatures.
+  text gets `bad_signature`, which counts as a failed signature. `wrong_host` does not count: it
+  is as often a name missing from `server.aliases` as a relayed signature, and the client's bare
+  retry must not be rate-limited. The relay logs the first `wrong_host` of a socket at `info`
+  with the host, and counts it in `epicbox_attach_wrong_host_total`.
 - An entry without `host` is the bare form: the signature is over the challenge alone. The relay
   takes it while `protocol.accept_bare_attach` is on (the default), so released clients keep
   working. A relay from before the extension reads only `address` and `signature`.

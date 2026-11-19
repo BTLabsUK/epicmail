@@ -55,6 +55,8 @@ pub(super) struct Mux {
     /// Waiting budget window: (start, frames counted in it).
     waiting_window: (Instant, u32),
     last_sweep: Instant,
+    /// An Attach on this socket named a host this relay does not list; logged once.
+    wrong_host_seen: bool,
 }
 
 /// A mux/1 `Error` frame. `kind` is derived from `code` so classic-style clients still read it.
@@ -131,10 +133,28 @@ impl Session {
             attach_window: (Instant::now(), 0),
             waiting_window: (Instant::now(), 0),
             last_sweep: Instant::now(),
+            wrong_host_seen: false,
         });
         metrics::counter!("epicbox_mux_sessions_total").increment(1);
         self.send(ws, reply).await;
         true
+    }
+
+    /// Logs, once per socket, an Attach that named a host this relay does not list, and counts
+    /// it in `epicbox_attach_wrong_host_total`.
+    fn note_wrong_host(&mut self, host: &str) {
+        let Some(mux) = self.mux.as_mut() else { return };
+        if std::mem::replace(&mut mux.wrong_host_seen, true) {
+            return;
+        }
+        metrics::counter!("epicbox_attach_wrong_host_total").increment(1);
+        let host: String = host.chars().take(64).collect();
+        tracing::info!(
+            socket = self.id,
+            ip = %self.ip,
+            host = ?host,
+            "attach named a host this relay does not list; add it to server.aliases if wallets dial it"
+        );
     }
 
     /// Dispatch one frame on a mux/1 socket.
@@ -278,7 +298,15 @@ impl Session {
                 None => sig::verify(&key, &challenge, signature).map_err(|_| "bad_signature"),
             };
             if let Err(code) = proven_sig {
-                r.limiter.sig_failed(self.ip);
+                // A wrong host is the relay's missing alias as often as a relayed signature,
+                // and the client retries with the bare form, so it is not a failed signature:
+                // counting it would rate-limit that retry. It is logged once per socket so an
+                // operator sees the name to add to `server.aliases`.
+                if code == "wrong_host" {
+                    self.note_wrong_host(host.unwrap_or(""));
+                } else {
+                    r.limiter.sig_failed(self.ip);
+                }
                 tracing::trace!(socket = self.id, ip = %self.ip, mailbox = %short(&key), reason = code, "attach refused");
                 out.push(json!({"mailbox":key,"ok":false,"code":code}));
                 continue;

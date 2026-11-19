@@ -2248,6 +2248,43 @@ async fn a_new_client_without_the_echo_signs_the_bare_challenge() {
     assert_eq!(e["ok"], true, "{e}");
 }
 
+/// A relay updated without its aliases set: wallets dial a name it does not list. A new client
+/// with many mailboxes gets `wrong_host` for each, then attaches them all with the bare form on
+/// the same socket. `wrong_host` is not a failed signature, so the retry is not rate-limited:
+/// 128 refusals are past the 120 a minute that would block the prefix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relay_missing_an_alias_lets_a_new_client_fall_back_to_the_bare_form() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "epicmail.relay.test", |_| {}).await;
+    let keys: Vec<Key> = (0..128).map(|_| Key::new()).collect();
+    let (mut m, ext, ch) = mux_with(&n, json!(["mux/1", ATTACH])).await;
+    assert_eq!(ext, json!(["mux/1", ATTACH]));
+    let dialled = "epicbox.relay.test";
+    for chunk in keys.chunks(64) {
+        let entries: Vec<Value> = chunk
+            .iter()
+            .map(|k| json!({"address":k.pk,"host":dialled,"signature":k.sign(&attach_text(dialled, &ch))}))
+            .collect();
+        send(&mut m, json!({"type":"Attach","ref":"h","mailboxes":entries})).await;
+        let at = recv(&mut m).await;
+        assert_eq!(at["type"], "Attached", "{at}");
+        for e in at["mailboxes"].as_array().unwrap() {
+            assert_eq!(e["code"], "wrong_host", "{e}");
+        }
+    }
+    for chunk in keys.chunks(64) {
+        let entries: Vec<Value> = chunk.iter().map(|k| json!({"address":k.pk,"signature":k.sign(&ch)})).collect();
+        send(&mut m, json!({"type":"Attach","ref":"b","mailboxes":entries})).await;
+        let at = recv(&mut m).await;
+        assert_eq!(at["type"], "Attached", "{at}");
+        let list = at["mailboxes"].as_array().unwrap();
+        assert_eq!(list.len(), 64);
+        for e in list {
+            assert_eq!(e["ok"], true, "{e}");
+        }
+    }
+}
+
 // ---- accept_bare_cancel ----
 
 /// With `accept_bare_cancel` off only the separated form cancels; a bare txid signature, which

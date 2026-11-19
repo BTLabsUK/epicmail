@@ -264,7 +264,9 @@ the fallback are in [docs/cancel-signature.md](docs/cancel-signature.md).
 A mux/1 Attach can be bound to the relay's name the same way: a client lists `epicbox-attach/1`,
 and on a socket where it is echoed each entry names the host it dialled and signs
 `epicbox-attach/1:<host>:<challenge>`. The relay refuses a host that is not `server.domain` or an
-alias with `wrong_host`. The bare-challenge form stays accepted while
+alias with `wrong_host`, logs the first one of a socket at `info` and counts it in
+`epicbox_attach_wrong_host_total`; it is not a failed signature, so the client's bare retry is
+not rate-limited. The bare-challenge form stays accepted while
 `protocol.accept_bare_attach` is on (the default); list every name wallets dial, onion included,
 in `server.aliases` before turning it off. Details in [docs/mux-1.md](docs/mux-1.md) section 9.
 
