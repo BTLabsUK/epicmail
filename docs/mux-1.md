@@ -30,6 +30,7 @@ A client that does not ask for mux/1 sees plain 3.0.0. A relay that does not off
 | `classic_only` | InvalidRequest | `Subscribe`, `Made`, `Unsubscribe` or `Challenge` on a mux/1 socket |
 | `bad_address` | InvalidRequest | address does not parse or its key is invalid |
 | `bad_signature` | InvalidSignature | signature does not verify over the socket challenge |
+| `wrong_host` | InvalidSignature | an Attach entry's `host` is not one of this relay's names (section 9) |
 | `too_many_mailboxes` | TooManySubscriptions | over the per-Attach or per-socket cap |
 | `token_unknown` | InvalidChallenge | resume token not known, used already, or expired |
 | `unknown_id` | InvalidRequest | Hold names an id that is not in flight on this socket |
@@ -307,3 +308,33 @@ The relay sends it once per mailbox and txid on a socket until the mailbox is de
 ```
 
 The client confirms it handled the cancel. The relay marks the tombstone acknowledged for that mailbox, which is what a classic 3.1.0 re-Subscribe does, so neither kind of socket hears about it again. It is idempotent. A mailbox not attached on this socket, or an unknown txid, is ignored and still answered `Ok`. A txid that is not 32 characters, or a missing mailbox, gets `bad_frame`.
+
+## 9. Extension epicbox-attach/1: attach bound to the relay's name
+
+A bare-challenge Attach signature proves the key to whichever relay issued the challenge. A relay
+that passes another relay's challenge to a wallet could attach the wallet's mailbox there. With
+this extension the signature also names the relay the wallet meant to reach.
+
+- The client lists `epicbox-attach/1` in `ClientDetails.ext`. A relay that has it repeats it in
+  the mux/1 `Ok`. It is never sent to a client that did not ask, and the relay also lists it as a
+  feature in `/.well-known/epicbox.json` with `signed_text` and `bare_accepted`.
+- On a socket where it was echoed, each Attach entry carries `host`, the name the wallet dialled
+  (lower case, no port, no trailing dot), and `signature` is over
+  `epicbox-attach/1:<host>:<challenge>`, with `host` exactly as sent:
+
+```json
+{"type":"Attach","ref":"1","mailboxes":[{"address":"<key>","host":"relay.example.org","signature":"<DER hex>"}]}
+```
+
+- The relay checks `host` against its names: `server.domain` and the host part of each
+  `server.aliases` entry, compared without case and trailing dot. Any other host gets
+  `wrong_host`; a host that is one of its names but a signature that does not verify over the
+  text gets `bad_signature`. Both count as failed signatures.
+- An entry without `host` is the bare form: the signature is over the challenge alone. The relay
+  takes it while `protocol.accept_bare_attach` is on (the default), so released clients keep
+  working. A relay from before the extension reads only `address` and `signature`.
+- Client fallback: without the echo, sign the bare challenge and send no `host`. On `wrong_host`
+  (for example a wallet that dialled an onion name the relay does not list) the client may sign
+  the bare challenge for those mailboxes once.
+- Before `accept_bare_attach` is turned off, every name wallets dial (onion included) must be in
+  `server.aliases`.

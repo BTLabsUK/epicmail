@@ -281,6 +281,15 @@ async fn well_known(State(st): State<AppState>) -> Response {
             }),
         );
     }
+    if cfg.protocol.mux {
+        features.insert(
+            crate::relay::ATTACH_HOST_EXT.into(),
+            json!({
+                "signed_text": format!("{}<host>:<challenge>", crate::relay::ATTACH_SIG_PREFIX),
+                "bare_accepted": cfg.protocol.accept_bare_attach,
+            }),
+        );
+    }
     if cfg.http_api.enabled {
         features.insert("https".into(), json!({"protocol": HTTPS_PROTOCOL, "base": "/v1"}));
     }

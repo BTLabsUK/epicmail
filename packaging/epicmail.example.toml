@@ -32,6 +32,7 @@ idle_timeout_s = 90              # close a socket with no pong or frame for this
 watchdog_misses = 3              # unanswered Challenges, with mail waiting, before close 1001
 forward_bare_cancel = true       # forward CancelTx signed over the bare txid, as wallets sign it
 accept_bare_cancel = true        # accept CancelTx signed over the bare txid; false takes only epicbox-cancel/1:<txid>
+accept_bare_attach = true        # accept mux/1 Attach signed over the bare challenge; false takes only epicbox-attach/1
 
 [limits]
 max_frame_bytes = 1048576        # largest websocket frame (1 MiB)

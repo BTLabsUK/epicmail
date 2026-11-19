@@ -2116,6 +2116,138 @@ async fn deny_sender_hosts_does_not_stop_forwarding_through_this_relay() {
     assert_eq!(denied_count(&a), 0);
 }
 
+// ---- epicbox-attach/1 ----
+
+const ATTACH: &str = "epicbox-attach/1";
+
+/// What a wallet signs to attach `challenge` at `host` in the host-bound form.
+fn attach_text(host: &str, challenge: &str) -> String {
+    format!("{}{host}:{challenge}", epicmail::relay::ATTACH_SIG_PREFIX)
+}
+
+/// Open a mux/1 socket asking for `ext`; returns the socket, the echoed ext and the challenge.
+async fn mux_with(n: &Node, ext: Value) -> (Ws, Value, String) {
+    let mut m = connect(n).await;
+    recv_type(&mut m, "Challenge").await;
+    send(&mut m, json!({"type":"ClientDetails","wallet_version":"t","wallet_mode":"listener","protocol_version":"3.1.0","ext":ext})).await;
+    let ok = recv(&mut m).await;
+    let ch = ok["challenge"].as_str().expect("mux/1 challenge").to_string();
+    (m, ok["ext"].clone(), ch)
+}
+
+async fn attach_one(m: &mut Ws, entry: Value) -> Value {
+    send(m, json!({"type":"Attach","ref":"a","mailboxes":[entry]})).await;
+    let at = recv_type(m, "Attached").await;
+    at["mailboxes"][0].clone()
+}
+
+/// The relay advertises the host-bound attach form and echoes it only to a client that asks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_host_bound_attach_is_advertised_and_echoed_only_when_offered() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (st, wk) = http(&n, "GET", "/.well-known/epicbox.json", None).await;
+    assert_eq!(st, 200);
+    assert_eq!(wk["features"][ATTACH]["signed_text"], "epicbox-attach/1:<host>:<challenge>", "{wk}");
+    assert_eq!(wk["features"][ATTACH]["bare_accepted"], true, "{wk}");
+    assert_discovery_shape(&wk);
+
+    let (_, ext, _) = mux_with(&n, json!(["mux/1", ATTACH])).await;
+    assert_eq!(ext, json!(["mux/1", ATTACH]));
+    let (_, ext, _) = mux_with(&n, json!(["mux/1"])).await;
+    assert_eq!(ext, json!(["mux/1"]));
+
+    let n2 = start(dir.path(), "relay2.test", |c| c.protocol.accept_bare_attach = false).await;
+    let (_, wk) = http(&n2, "GET", "/.well-known/epicbox.json", None).await;
+    assert_eq!(wk["features"][ATTACH]["bare_accepted"], false, "{wk}");
+}
+
+/// A released client (no extension, bare challenge) attaches on a relay that has the new form.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_released_client_attaches_with_the_bare_challenge() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let bob = Key::new();
+    let (mut m, ext, ch) = mux_with(&n, json!(["mux/1", "txcancel/1"])).await;
+    assert_eq!(ext, json!(["mux/1", "txcancel/1"]));
+    let e = attach_one(&mut m, json!({"address":bob.pk,"signature":bob.sign(&ch)})).await;
+    assert_eq!(e["ok"], true, "{e}");
+}
+
+/// A new client binds its signature to the name it dialled: the relay's domain or an alias, in
+/// any case. The host must be the one signed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_bound_attach_names_this_relay() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| {
+        c.server.aliases = vec!["old.relay.test.".into(), "other.relay.test:8443".into()];
+        c.protocol.accept_bare_attach = false;
+    })
+    .await;
+    for host in ["relay.test", "old.relay.test", "other.relay.test", "Relay.Test"] {
+        let bob = Key::new();
+        let (mut m, ext, ch) = mux_with(&n, json!(["mux/1", ATTACH])).await;
+        assert_eq!(ext, json!(["mux/1", ATTACH]));
+        let e = attach_one(&mut m, json!({"address":bob.pk,"host":host,"signature":bob.sign(&attach_text(host, &ch))}))
+            .await;
+        assert_eq!(e["ok"], true, "{host}: {e}");
+    }
+
+    // The host sent is the host signed: a signature for another name does not verify.
+    let bob = Key::new();
+    let (mut m, _, ch) = mux_with(&n, json!(["mux/1", ATTACH])).await;
+    let e = attach_one(
+        &mut m,
+        json!({"address":bob.pk,"host":"relay.test","signature":bob.sign(&attach_text("old.relay.test", &ch))}),
+    )
+    .await;
+    assert_eq!(e["code"], "bad_signature", "{e}");
+
+    // With the bare form off, a bare signature is refused.
+    let (mut m, _, ch) = mux_with(&n, json!(["mux/1", ATTACH])).await;
+    let e = attach_one(&mut m, json!({"address":bob.pk,"signature":bob.sign(&ch)})).await;
+    assert_eq!(e["code"], "bad_signature", "{e}");
+}
+
+/// A signature bound to relay X is refused by relay Y, even over Y's own challenge: a relay that
+/// passes on another relay's challenge cannot attach the wallet's mailbox there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_signature_for_another_relay_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let y = start(dir.path(), "relayy.test", |_| {}).await;
+    let bob = Key::new();
+    let (mut m, _, ch) = mux_with(&y, json!(["mux/1", ATTACH])).await;
+    let e = attach_one(
+        &mut m,
+        json!({"address":bob.pk,"host":"relayx.test","signature":bob.sign(&attach_text("relayx.test", &ch))}),
+    )
+    .await;
+    assert_eq!(e["ok"], false, "{e}");
+    assert_eq!(e["code"], "wrong_host", "{e}");
+    // Naming Y with X's signature is a bad signature.
+    let e = attach_one(
+        &mut m,
+        json!({"address":bob.pk,"host":"relayy.test","signature":bob.sign(&attach_text("relayx.test", &ch))}),
+    )
+    .await;
+    assert_eq!(e["code"], "bad_signature", "{e}");
+}
+
+/// A relay from before the extension reads only `address` and `signature`: a new client that
+/// was not echoed the extension sends the bare form, and the new relay treats an entry without
+/// `host` the same way. A host-bound signature is not a bare one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_client_without_the_echo_signs_the_bare_challenge() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let bob = Key::new();
+    let (mut m, _, ch) = mux_with(&n, json!(["mux/1"])).await;
+    let e = attach_one(&mut m, json!({"address":bob.pk,"signature":bob.sign(&attach_text("relay.test", &ch))})).await;
+    assert_eq!(e["code"], "bad_signature", "{e}");
+    let e = attach_one(&mut m, json!({"address":bob.pk,"signature":bob.sign(&ch)})).await;
+    assert_eq!(e["ok"], true, "{e}");
+}
+
 // ---- accept_bare_cancel ----
 
 /// With `accept_bare_cancel` off only the separated form cancels; a bare txid signature, which

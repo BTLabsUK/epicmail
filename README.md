@@ -261,6 +261,13 @@ lists it as a feature in `/.well-known/epicbox.json`. It verifies the separated 
 bare form second on every path, and forwards the signature as it received it. The exact text and
 the fallback are in [docs/cancel-signature.md](docs/cancel-signature.md).
 
+A mux/1 Attach can be bound to the relay's name the same way: a client lists `epicbox-attach/1`,
+and on a socket where it is echoed each entry names the host it dialled and signs
+`epicbox-attach/1:<host>:<challenge>`. The relay refuses a host that is not `server.domain` or an
+alias with `wrong_host`. The bare-challenge form stays accepted while
+`protocol.accept_bare_attach` is on (the default); list every name wallets dial, onion included,
+in `server.aliases` before turning it off. Details in [docs/mux-1.md](docs/mux-1.md) section 9.
+
 ## Federation
 
 A slate for another relay's domain is queued and forwarded over `wss://`, as a wallet would post

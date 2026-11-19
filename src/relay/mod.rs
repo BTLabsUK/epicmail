@@ -35,6 +35,13 @@ pub const CANCEL_SIG_PREFIX: &str = "epicbox-cancel/1:";
 /// the relay verifies cancels signed over `CANCEL_SIG_PREFIX` + txid, and the wallet may sign
 /// that form. It is also the feature name in `/.well-known/epicbox.json`.
 pub const CANCEL_SEPARATED_EXT: &str = "epicbox-cancel/1";
+/// The extension token a mux/1 client offers in `ClientDetails` and the relay echoes in its
+/// `Ok`: the relay checks Attach signatures over `ATTACH_SIG_PREFIX` + host + `:` + challenge,
+/// bound to one of its public names, and the client may sign that form. It is also the feature
+/// name in `/.well-known/epicbox.json`.
+pub const ATTACH_HOST_EXT: &str = "epicbox-attach/1";
+/// Domain separation prefix for Attach signatures bound to the relay's host name.
+pub const ATTACH_SIG_PREFIX: &str = "epicbox-attach/1:";
 
 /// The shard, of `shards`, that holds mailbox `key`. Keys are chosen by clients, so the hash is
 /// keyed with a random seed per process: nobody can pick keys that all land on one shard.
