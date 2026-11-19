@@ -52,7 +52,8 @@ impl Relay {
         // cancel and is accepted too; clients learn of it from the
         // Ok's `ext` and the well-known file. A forward carries the signature as received.
         let separated = sig::verify(&requester, &format!("{CANCEL_SIG_PREFIX}{txid}"), signature).is_ok();
-        let bare_ok = !separated && sig::verify(&requester, &txid, signature).is_ok();
+        let bare_ok =
+            !separated && self.cfg.protocol.accept_bare_cancel && sig::verify(&requester, &txid, signature).is_ok();
         if !separated && !bare_ok {
             self.limiter.sig_failed(ip);
             return R(Refusal::Invalid("InvalidSignature", "Invalid signature.".into()));

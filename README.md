@@ -250,7 +250,9 @@ later send `CancelTx`, signed over the bare txid as wallets sign it today, or ov
 
 The bare-txid signature is the one the slate already carried, so anyone who saw the slate can
 cancel. `epicbox-cancel/1:<txid>` closes that; `protocol.forward_bare_cancel = false` forwards
-only that form. `protocol.cancel = false` makes the relay a 3.0.0 relay.
+only that form, and `protocol.accept_bare_cancel = false` accepts only that form (both on by
+default, since stock wallets sign the bare txid). `protocol.cancel = false` makes the relay a
+3.0.0 relay.
 
 A relay that has the cancel on offers the separated form to wallets in band: a client lists
 `epicbox-cancel/1` in `ClientDetails.ext`, and the `Ok` repeats it (on a classic socket as

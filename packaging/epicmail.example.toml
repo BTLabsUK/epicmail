@@ -31,6 +31,7 @@ ping_interval_s = 30             # websocket ping interval, seconds
 idle_timeout_s = 90              # close a socket with no pong or frame for this long, seconds
 watchdog_misses = 3              # unanswered Challenges, with mail waiting, before close 1001
 forward_bare_cancel = true       # forward CancelTx signed over the bare txid, as wallets sign it
+accept_bare_cancel = true        # accept CancelTx signed over the bare txid; false takes only epicbox-cancel/1:<txid>
 
 [limits]
 max_frame_bytes = 1048576        # largest websocket frame (1 MiB)

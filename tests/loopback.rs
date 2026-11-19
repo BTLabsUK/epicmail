@@ -2115,3 +2115,39 @@ async fn deny_sender_hosts_does_not_stop_forwarding_through_this_relay() {
     assert_eq!(recv(&mut asock).await["type"], "Ok");
     assert_eq!(denied_count(&a), 0);
 }
+
+// ---- accept_bare_cancel ----
+
+/// With `accept_bare_cancel` off only the separated form cancels; a bare txid signature, which
+/// anyone who saw the PostSlate holds, is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bare_cancel_is_refused_when_switched_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| c.protocol.accept_bare_cancel = false).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let tx = "0123456789abcdef0123456789abcdef";
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    let mut f = post_frame(&alice, "relay.test", &bob, "relay.test", 1);
+    f["epicboxtxid"] = json!(tx);
+    f["epicboxtxidsig"] = json!(alice.sign(tx));
+    send(&mut a, f).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+
+    let (_, wk) = http(&n, "GET", "/.well-known/epicbox.json", None).await;
+    assert_eq!(wk["features"][SEPARATED]["bare_accepted"], false, "{wk}");
+
+    let mut c = connect(&n).await;
+    recv_type(&mut c, "Challenge").await;
+    send(&mut c, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":tx,"signature":alice.sign(tx)})).await;
+    assert_eq!(recv(&mut c).await["kind"], "InvalidSignature");
+    assert_eq!(waiting(&n).await, 1);
+
+    send(
+        &mut c,
+        json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":tx,"signature":alice.sign(&separated_text(tx))}),
+    )
+    .await;
+    assert_eq!(recv(&mut c).await, json!({"type":"TransactionCancelled","epicboxtxid":tx}));
+    assert_eq!(waiting(&n).await, 0);
+}

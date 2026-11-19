@@ -99,6 +99,10 @@ pub struct Protocol {
     /// forwards only CancelTx signed over `epicbox-cancel/1:<txid>`; a bare signature is the
     /// same one the PostSlate carried, so it does not show that the sender asked to cancel.
     pub forward_bare_cancel: bool,
+    /// Accept CancelTx signed over the bare txid (the 3.1.0 form stock wallets use). On by
+    /// default. Off accepts only the `epicbox-cancel/1:<txid>` form: the bare signature is the
+    /// one every PostSlate carries as `epicboxtxidsig`, so anyone who saw the slate holds it.
+    pub accept_bare_cancel: bool,
 }
 
 /// `[limits]`. "Per IP" means per IP prefix (`ipv4_prefix`, `ipv6_prefix`).
@@ -315,6 +319,7 @@ impl Default for Protocol {
             idle_timeout_s: 90,
             watchdog_misses: 3,
             forward_bare_cancel: true,
+            accept_bare_cancel: true,
         }
     }
 }

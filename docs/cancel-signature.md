@@ -69,5 +69,8 @@ Reading the file is optional. The `Ok` echo on the connection you cancel on is t
 Epicmail (0.1.9 and later) verifies the prefixed form first and the bare form second, on a classic
 socket, on mux/1 `txcancel/1`, and on a cancel forwarded from another relay. It forwards the
 signature unchanged with `cancelrequestid`, so a peer that has the form verifies it. Stock 3.1.0
-wallets keep working because the bare form is still accepted. Dropping it is a later step, once
-wallets have moved.
+wallets keep working because the bare form is still accepted. Setting
+`protocol.accept_bare_cancel = false` (it defaults to true) drops it: the relay then cancels only
+on the prefixed form and refuses a bare one with `InvalidSignature`, and
+`/.well-known/epicbox.json` says `"bare_accepted": false` for the feature. Turn it off only once
+the wallets that use this relay send the prefixed form.
