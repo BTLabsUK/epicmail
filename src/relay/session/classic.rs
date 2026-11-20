@@ -343,6 +343,9 @@ impl Session {
             Some("2.0.0") => Ver::V2,
             Some("3.0.0") => Ver::V3,
             Some("3.1.0") if r.cfg.protocol.cancel => Ver::V31,
+            // With cancel off a wallet that announces 3.1.0 is served as 3.0.0, as the stock
+            // cancel relay does; ignoring its Made would redeliver the message on every connect.
+            Some("3.1.0") => Ver::V3,
             // The stock relay ignores other Made frames without an answer.
             _ => return,
         };

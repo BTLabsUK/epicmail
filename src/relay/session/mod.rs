@@ -425,7 +425,7 @@ impl Session {
             "made" => self.made(ws, msg).await,
             "canceltx" if self.relay.cfg.protocol.cancel => self.cancel(ws, msg).await,
             "getversion" => {
-                let v = json!({"type":"GetVersion","str":self.relay.cfg.protocol.getversion});
+                let v = json!({"type":"GetVersion","str":self.relay.cfg.protocol.getversion_answer()});
                 self.send(ws, v).await;
             }
             "fastsend" => {

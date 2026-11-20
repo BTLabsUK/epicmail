@@ -371,7 +371,7 @@ The first command prints a number above 0 when the kernel is in the pool. The se
 
 The relay sends a cancel to a wallet only when the wallet subscribed as protocol 3.1.0. epic-wallet 4.1.0 subscribes as 3.0.0 and has no handler for relay cancels, so moving to Epicmail does not change how its cancels behave. Epicmail accepts `protocol.cancel = true` (the default) for wallets that do not use it.
 
-If the exchange wallet is ever replaced by a build that subscribes as 3.1.0, check what it does on receiving a cancel first. A relay cancel on a deposit is only safe when the wallet checks the chain before it acts on it. The trace log (`/var/log/epicmail/epicmail.log`) records the protocol version of each subscribing wallet. To switch relay cancels off, set `cancel = false` under `[protocol]` in `/etc/epicmail/epicmail.toml` and restart.
+If the exchange wallet is ever replaced by a build that subscribes as 3.1.0, check what it does on receiving a cancel first. A relay cancel on a deposit is only safe when the wallet checks the chain before it acts on it. The trace log (`/var/log/epicmail/epicmail.log`) records the protocol version of each subscribing wallet. To switch relay cancels off, set `cancel = false` under `[protocol]` in `/etc/epicmail/epicmail.toml` and restart. With `cancel = false` the relay answers GetVersion with 3.0.0 whatever `getversion` says, and treats a Made or Subscribe announcing 3.1.0 as 3.0.0.
 
 ## 4. What improves with LEPIC and BT Wallet
 

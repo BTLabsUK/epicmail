@@ -2603,3 +2603,31 @@ async fn a_pending_cancel_ack_waits_for_its_own_key() {
     subscribe(&mut b2, &bob, "3.1.0").await;
     assert_eq!(recv(&mut b2).await, json!({"type":"Ok"}));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn with_cancel_off_a_3_1_0_wallet_is_served_as_3_0_0() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| c.protocol.cancel = false).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut b = connect(&n).await;
+    subscribe(&mut b, &bob, "3.1.0").await;
+    assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+    send(&mut b, json!({"type":"GetVersion"})).await;
+    assert_eq!(recv(&mut b).await, json!({"type":"GetVersion","str":"3.0.0"}));
+
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    send(&mut a, post_frame(&alice, "relay.test", &bob, "relay.test", 1)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    let slate = recv_type(&mut b, "Slate").await;
+    let id = slate["epicboxmsgid"].as_str().unwrap().to_string();
+    send(&mut b, json!({"type":"Made","address":bob.pk,"signature":bob.sign(&id),"epicboxmsgid":id,"ver":"3.1.0"})).await;
+    assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+    recv_type(&mut b, "Challenge").await;
+    assert_eq!(waiting(&n).await, 0);
+
+    // Nothing is delivered again on the next connection.
+    let mut b2 = connect(&n).await;
+    subscribe(&mut b2, &bob, "3.1.0").await;
+    assert_eq!(recv(&mut b2).await, json!({"type":"Ok"}));
+}

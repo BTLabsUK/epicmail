@@ -199,7 +199,7 @@ impl Session {
             "canceltx" if self.mux.as_ref().is_some_and(|m| m.txcancel) => self.cancel_tx(ws, msg, &r#ref).await,
             "cancelack" if self.mux.as_ref().is_some_and(|m| m.txcancel) => self.cancel_ack(ws, msg, &r#ref).await,
             "getversion" => {
-                let v = json!({"type":"GetVersion","str":self.relay.cfg.protocol.getversion});
+                let v = json!({"type":"GetVersion","str":self.relay.cfg.protocol.getversion_answer()});
                 self.send(ws, v).await;
             }
             "clientdetails" => {

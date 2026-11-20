@@ -315,6 +315,22 @@ impl Default for StoreCfg {
     }
 }
 
+impl Protocol {
+    /// The version answered to GetVersion. With `cancel` off it is capped at 3.0.0: a wallet
+    /// that builds its Made `ver` from this answer must not send 3.1.0 to a relay that does not
+    /// speak it.
+    pub fn getversion_answer(&self) -> &str {
+        fn parts(v: &str) -> Option<Vec<u64>> {
+            v.split('.').map(|p| p.parse().ok()).collect()
+        }
+        const CAP: &str = "3.0.0";
+        match (self.cancel, parts(&self.getversion), parts(CAP)) {
+            (false, Some(v), Some(cap)) if v > cap => CAP,
+            _ => &self.getversion,
+        }
+    }
+}
+
 impl Default for Protocol {
     fn default() -> Self {
         Self {
