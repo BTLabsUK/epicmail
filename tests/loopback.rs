@@ -992,13 +992,13 @@ async fn signature_checks_have_a_budget_per_prefix() {
     assert_eq!(r["type"], "Error", "{r}");
     assert!(r["description"].as_str().unwrap().contains("Rate limit"), "{r}");
 
-    // The same prefix's mux/1 Attach is refused before any check runs.
-    let mut m = connect(&n).await;
-    recv_type(&mut m, "Challenge").await;
-    send(&mut m, json!({"type":"ClientDetails","wallet_version":"t","wallet_mode":"listener","protocol_version":"3.0.0","ext":["mux/1"]})).await;
-    let ok = recv(&mut m).await;
-    let mch = ok["challenge"].as_str().unwrap().to_string();
+    // The same prefix's mux/1 socket: its first signed frame is counted and not refused, and
+    // its next Attach for a mailbox it does not hold is refused before any check runs.
+    let (mut m, mch) = mux_open(&n).await;
     send(&mut m, json!({"type":"Attach","ref":"a1","mailboxes":[{"address":k.pk,"signature":k.sign(&mch)}]})).await;
+    assert_eq!(recv(&mut m).await["type"], "Attached");
+    let k2 = Key::new();
+    send(&mut m, json!({"type":"Attach","ref":"a2","mailboxes":[{"address":k2.pk,"signature":k2.sign(&mch)}]})).await;
     let r = recv(&mut m).await;
     assert_eq!(r["code"], "rate_limited", "{r}");
 }
@@ -1267,6 +1267,13 @@ async fn a_socket_that_missed_its_detached_can_no_longer_ack() {
     assert_eq!(d, json!({"type":"Detached","mailbox":bob.pk,"reason":"replaced"}), "{d}");
     assert_eq!(recv(&mut m).await, json!({"type":"Ok","ref":"k"}));
     assert_eq!(waiting(&n).await, 1, "the ack of a mailbox this socket no longer holds deleted mail");
+    // Its in-flight lease went back with the mailbox: the next holder gets the mail at once.
+    let (mut m2, ch2) = mux_open(&n).await;
+    send(&mut m2, json!({"type":"Attach","ref":"b","mailboxes":[{"address":bob.pk,"signature":bob.sign(&ch2)}]})).await;
+    assert_eq!(recv(&mut m2).await["type"], "Attached");
+    let again = recv(&mut m2).await;
+    assert_eq!(again["type"], "Mail", "{again}");
+    assert_eq!(again["id"], mail["id"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2429,4 +2436,170 @@ async fn a_busy_peer_is_retried_and_the_row_is_delivered() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 4, "three Busy answers, then Ok");
+}
+
+// ---- per-socket signature failures ----
+
+/// The newest Challenge on `ws`: asks for one and reads up to a GetVersion sent behind it, so
+/// interval Challenges queued earlier are skipped.
+async fn latest_challenge(ws: &mut Ws) -> String {
+    send(ws, json!({"type":"Challenge"})).await;
+    send(ws, json!({"type":"GetVersion"})).await;
+    let mut last = None;
+    loop {
+        let v = recv(ws).await;
+        match v["type"].as_str() {
+            Some("Challenge") => last = v["str"].as_str().map(String::from),
+            Some("GetVersion") => return last.expect("no Challenge before GetVersion"),
+            _ => panic!("unexpected frame {v}"),
+        }
+    }
+}
+
+/// A Subscribe for `addr` signed by `signer` over a fresh challenge; returns the reply.
+async fn resubscribe(ws: &mut Ws, addr: &Key, signer: &Key, ver: &str) -> Value {
+    let ch = latest_challenge(ws).await;
+    send(ws, json!({"type":"Subscribe","address":addr.pk,"ver":ver,"signature":signer.sign(&ch)})).await;
+    recv(ws).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_clients_bad_signatures_cannot_lock_out_a_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| c.protocol.challenge_interval_s = 5).await;
+    let (k, alice) = (Key::new(), Key::new());
+    let mut b = connect(&n).await;
+    subscribe(&mut b, &k, "3.0.0").await;
+    assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+
+    // Another client on the same prefix signs wrongly: its socket is closed after 8 failures.
+    let mut failures = 0;
+    let mut first = true;
+    while failures < 130 {
+        let mut a = connect(&n).await;
+        let ch = recv_type(&mut a, "Challenge").await["str"].as_str().unwrap().to_string();
+        for _ in 0..8 {
+            let (x, wrong) = (Key::new(), Key::new());
+            send(&mut a, json!({"type":"Subscribe","address":x.pk,"ver":"3.0.0","signature":wrong.sign(&ch)})).await;
+            let r = recv(&mut a).await;
+            if r["kind"] == "InvalidSignature" {
+                failures += 1;
+            } else {
+                // Once the prefix is blocked only a socket's first signed frame is checked.
+                assert!(!first, "{r}");
+                assert!(r["description"].as_str().unwrap().contains("Rate limit"), "{r}");
+                break;
+            }
+        }
+        if first {
+            assert_eq!(failures, 8);
+            assert_eq!(recv(&mut a).await, json!({"closed": 4003}));
+            first = false;
+        }
+    }
+    assert!(n.relay.limiter.sig_blocked("127.0.0.1".parse().unwrap()).is_some(), "the prefix is blocked");
+
+    // The wallet that proved its key still passes its challenge round, ...
+    let ch = latest_challenge(&mut b).await;
+    send(&mut b, json!({"type":"Subscribe","address":k.pk,"ver":"3.0.0","signature":k.sign(&ch)})).await;
+    assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+    // ... a slate posted to it arrives, and its Made is accepted.
+    let mut p = connect(&n).await;
+    recv_type(&mut p, "Challenge").await;
+    send(&mut p, post_frame(&alice, "relay.test", &k, "relay.test", 1)).await;
+    assert_eq!(recv(&mut p).await["type"], "Ok");
+    let slate = recv_type(&mut b, "Slate").await;
+    let msgid = slate["epicboxmsgid"].as_str().unwrap().to_string();
+    send(&mut b, json!({"type":"Made","address":k.pk,"signature":k.sign(&msgid),"epicboxmsgid":msgid,"ver":"3.0.0"})).await;
+    assert_eq!(recv_type(&mut b, "Ok").await, json!({"type":"Ok"}));
+    assert_eq!(waiting(&n).await, 0);
+    // A new socket's first Subscribe is not refused either.
+    let mut c = connect(&n).await;
+    subscribe(&mut c, &Key::new(), "3.0.0").await;
+    assert_eq!(recv(&mut c).await, json!({"type":"Ok"}));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mux_socket_with_eight_bad_attach_entries_is_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (mut m, ch) = mux_open(&n).await;
+    for r in ["a", "b"] {
+        let list: Vec<Value> = (0..4)
+            .map(|_| {
+                let (x, wrong) = (Key::new(), Key::new());
+                json!({"address":x.pk,"signature":wrong.sign(&ch)})
+            })
+            .collect();
+        send(&mut m, json!({"type":"Attach","ref":r,"mailboxes":list})).await;
+    }
+    loop {
+        let v = recv(&mut m).await;
+        if v.get("closed").is_some() {
+            assert_eq!(v, json!({"closed": 4003}));
+            break;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_made_for_another_message_keeps_the_one_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut b = connect(&n).await;
+    subscribe(&mut b, &bob, "3.0.0").await;
+    assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    for i in 1..=2 {
+        send(&mut a, post_frame(&alice, "relay.test", &bob, "relay.test", i)).await;
+        assert_eq!(recv(&mut a).await["type"], "Ok");
+        if i == 1 {
+            let first = recv_type(&mut b, "Slate").await;
+            // A Made for a different message id is acknowledged and changes nothing here.
+            let other = "not-the-one";
+            send(&mut b, json!({"type":"Made","address":bob.pk,"signature":bob.sign(other),"epicboxmsgid":other,"ver":"3.0.0"})).await;
+            assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+            let c = recv_type(&mut b, "Challenge").await;
+            // The first message is still in flight: a Subscribe gets no second slate.
+            send(&mut b, json!({"type":"Subscribe","address":bob.pk,"ver":"3.0.0","signature":bob.sign(c["str"].as_str().unwrap())})).await;
+            assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+            let id = first["epicboxmsgid"].as_str().unwrap().to_string();
+            send(&mut b, json!({"type":"Made","address":bob.pk,"signature":bob.sign(&id),"epicboxmsgid":id,"ver":"3.0.0"})).await;
+            assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+        }
+    }
+    // Its own Made freed the slot: the next Subscribe is offered the second slate.
+    let c = recv_type(&mut b, "Challenge").await;
+    send(&mut b, json!({"type":"Subscribe","address":bob.pk,"ver":"3.0.0","signature":bob.sign(c["str"].as_str().unwrap())})).await;
+    assert_eq!(recv_type(&mut b, "Slate").await["type"], "Slate");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pending_cancel_ack_waits_for_its_own_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob, carol) = (Key::new(), Key::new(), Key::new());
+    let mut b = connect(&n).await;
+    subscribe(&mut b, &bob, "3.1.0").await;
+    assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    send(&mut a, post_tx_frame(&alice, "relay.test", &bob, "relay.test", TXID)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    recv_type(&mut b, "Slate").await;
+    send(&mut a, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":TXID,"signature":alice.sign(TXID)})).await;
+    assert_eq!(recv(&mut a).await["type"], "TransactionCancelled");
+    assert_eq!(recv_type(&mut b, "TransactionCancelled").await["epicboxtxid"], TXID);
+
+    // A failed Subscribe drops bob's key, and another key subscribes on the socket.
+    let r = resubscribe(&mut b, &bob, &alice, "3.1.0").await;
+    assert_eq!(r["kind"], "InvalidSignature", "{r}");
+    assert_eq!(resubscribe(&mut b, &carol, &carol, "3.1.0").await, json!({"type":"Ok"}));
+    // Bob proving his key again acknowledges the cancel, so it is not sent again.
+    assert_eq!(resubscribe(&mut b, &bob, &bob, "3.1.0").await, json!({"type":"Ok"}));
+    let mut b2 = connect(&n).await;
+    subscribe(&mut b2, &bob, "3.1.0").await;
+    assert_eq!(recv(&mut b2).await, json!({"type":"Ok"}));
 }

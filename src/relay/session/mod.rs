@@ -22,13 +22,19 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::{interval_at, MissedTickBehavior};
 
-use super::{Cmd, Relay, SockHandle};
+use super::{Cmd, Relay, SigScope, SockHandle};
 use crate::ids::rand_id;
-use crate::limits::SocketPermit;
+use crate::limits::{SigGate, SocketPermit};
 use classic::{Inflight, Ver};
 use mux::{mux_error, ref_of, Mux, MUX_PUMP_TICK};
 
 pub use mux::{HOLD_MAX_S, MAX_ACK_IDS, WAITING_PER_MIN};
+
+/// Failed signature checks a socket may make before it is closed with code 4003. The prefix
+/// counter keeps counting them too; this bounds what one connection can try.
+pub(super) const MAX_SOCKET_SIG_FAILURES: u32 = 8;
+/// The Close reason that goes with code 4003.
+const SIG_FAILURES_REASON: &str = "Too many failed signatures.";
 
 /// What the event loop does after a frame or command.
 enum Flow {
@@ -55,6 +61,10 @@ pub struct Session {
     ver: Option<Ver>,
     /// The key proved by Subscribe.
     key: Option<String>,
+    /// Failed signature checks on this socket (Subscribe, Made, Attach, PostSlate, CancelTx).
+    sig_failures: u32,
+    /// The socket has sent its first signed frame (see `SigScope`).
+    signed_once: bool,
     /// The message offered and not yet acknowledged with Made.
     inflight: Option<Inflight>,
     /// Subscribes received while `inflight` was outstanding.
@@ -64,8 +74,9 @@ pub struct Session {
     last_sub: Instant,
     /// Interval Challenges left unanswered while mail waited.
     misses: u32,
-    /// A TransactionCancelled was sent; the next Subscribe acknowledges it.
-    pending_cancel_ack: Option<String>,
+    /// A TransactionCancelled was sent for (key, txid); the next Subscribe that proves that key
+    /// acknowledges it.
+    pending_cancel_ack: Option<(String, String)>,
     /// Set once the socket has switched to mux/1.
     mux: Option<Mux>,
     /// Frame budget window: (start, frames counted in it).
@@ -107,6 +118,8 @@ pub async fn run(relay: Arc<Relay>, ws: WebSocket, ip: IpAddr, permit: SocketPer
         prev_challenge: None,
         ver: None,
         key: None,
+        sig_failures: 0,
+        signed_once: false,
         inflight: None,
         attempts: 0,
         pending_challenge: false,
@@ -361,10 +374,43 @@ impl Session {
             }
             return Flow::Continue;
         };
-        if self.mux.is_some() {
-            return self.on_mux(ws, &ty, &msg).await;
+        let flow = if self.mux.is_some() { self.on_mux(ws, &ty, &msg).await } else { self.on_classic(ws, &ty, &msg).await };
+        match flow {
+            Flow::Continue if self.sig_failures >= MAX_SOCKET_SIG_FAILURES => {
+                metrics::counter!("epicbox_sig_failure_closes_total").increment(1);
+                Flow::Close(4003, SIG_FAILURES_REASON)
+            }
+            f => f,
         }
-        match ty.as_str() {
+    }
+
+    /// The scope for a frame that carries a signature the prefix limits apply to: the first one
+    /// a socket sends counts against the prefix and is not refused.
+    fn sig_scope(&mut self) -> SigScope {
+        SigScope { first: !std::mem::replace(&mut self.signed_once, true), failed: 0 }
+    }
+
+    /// The gate for a frame of `Subscribe` or `Attach` kind, `exempt` when it only proves a key
+    /// the socket already holds.
+    fn sig_gate_for(&mut self, exempt: bool) -> SigGate {
+        if exempt {
+            SigGate::Exempt
+        } else if self.sig_scope().first {
+            SigGate::Record
+        } else {
+            SigGate::Enforce
+        }
+    }
+
+    /// A signature on this socket failed: count it for the prefix and for the socket.
+    fn sig_failed(&mut self) {
+        self.relay.limiter.sig_failed(self.ip);
+        self.sig_failures += 1;
+    }
+
+    /// Dispatch one frame on a classic socket.
+    async fn on_classic(&mut self, ws: &mut WebSocket, ty: &str, msg: &Value) -> Flow {
+        match ty {
             // Stock behaviour: answer a JSON ping with the bare text.
             "ping" => {
                 self.send_raw(ws, Message::Text(Utf8Bytes::from_static("pong"))).await;
@@ -373,11 +419,11 @@ impl Session {
                 self.send_raw(ws, Message::Text(Utf8Bytes::from_static("ping"))).await;
             }
             "challenge" => self.new_challenge(ws).await,
-            "subscribe" => return self.subscribe(ws, &msg).await,
+            "subscribe" => return self.subscribe(ws, msg).await,
             "unsubscribe" => return Flow::Close(1000, "Work complete."),
-            "postslate" => self.post(ws, &msg).await,
-            "made" => self.made(ws, &msg).await,
-            "canceltx" if self.relay.cfg.protocol.cancel => self.cancel(ws, &msg).await,
+            "postslate" => self.post(ws, msg).await,
+            "made" => self.made(ws, msg).await,
+            "canceltx" if self.relay.cfg.protocol.cancel => self.cancel(ws, msg).await,
             "getversion" => {
                 let v = json!({"type":"GetVersion","str":self.relay.cfg.protocol.getversion});
                 self.send(ws, v).await;
@@ -385,7 +431,7 @@ impl Session {
             "fastsend" => {
                 self.send(ws, ok()).await;
             }
-            "clientdetails" => self.client_details(ws, &msg).await,
+            "clientdetails" => self.client_details(ws, msg).await,
             _ => {}
         }
         Flow::Continue

@@ -126,7 +126,7 @@ Per-IP limits group clients by prefix (`ipv4_prefix` 24, `ipv6_prefix` 48). Sour
 | `per_sender_cap` | 200 | One sender filling a mailbox |
 | `sockets_per_ip` | 256 | One prefix using all sockets |
 | `sockets_per_address` | 4 | Many sockets on one address |
-| `failed_sigs_per_min_per_ip` | 120 | Signature guessing, CPU burn on verification |
+| `failed_sigs_per_min_per_ip` | 120 | Signature guessing, CPU burn on verification. A socket is closed with 4003 after 8 failed signatures; a socket's first signed frame and re-proofs of a key it already proved are not refused by the prefix limits, so one client cannot lock out the others in its prefix |
 | `sig_checks_per_min_per_ip` | 1200 | CPU burn by valid signatures: Subscribe, Made and CancelTx each cost one check, a mux/1 Attach one per mailbox. Without it a few sockets can keep a core busy with valid Subscribes. A service that attaches many mailboxes from one address belongs in `shared_sources` |
 | `mux_mailboxes_per_socket` | 256 | One mux/1 socket attaching everything |
 | `mux_attach_per_frame` | 64 | Large attach frames |

@@ -13,6 +13,7 @@ use crate::clock::now_ms;
 use crate::ids::is_txid;
 use crate::ids::{is_msgid, rand_b64url};
 use crate::logging::short;
+use crate::limits::SigRefused;
 use crate::relay::tokens::TOKEN_TTL_MS;
 use crate::relay::{CancelOutcome, ATTACH_HOST_EXT, ATTACH_SIG_PREFIX, CANCEL_SEPARATED_EXT};
 use crate::relay::{Cmd, PostOutcome, PostReq, Refusal, OFFER_LEASE_MS};
@@ -169,7 +170,9 @@ impl Session {
             "hold" => self.hold(ws, msg, &r#ref).await,
             "postslate" => {
                 let txcancel = self.mux.as_ref().is_some_and(|m| m.txcancel);
-                let out = self.relay.post_slate(self.ip, PostReq::from_json(msg), txcancel).await;
+                let mut scope = self.sig_scope();
+                let out = self.relay.post_slate_scoped(self.ip, PostReq::from_json(msg), txcancel, &mut scope).await;
+                self.sig_failures += scope.failed;
                 let frame = match out {
                     PostOutcome::Stored { txid, .. } | PostOutcome::Forwarded { txid } => {
                         let mut f = with_ref(ok(), &r#ref);
@@ -263,22 +266,41 @@ impl Session {
             self.send(ws, mux_error("rate_limited", "Too many Attach frames.", r#ref, Some(wait))).await;
             return;
         }
-        if let Some(s) = r.limiter.sig_blocked(self.ip) {
-            self.send(ws, mux_error("rate_limited", "Too many failed signatures.", r#ref, Some(s))).await;
-            return;
-        }
-        if let Err(s) = r.limiter.sig_checks(self.ip, list.len()) {
-            self.send(ws, mux_error("rate_limited", "Too many signature checks.", r#ref, Some(s))).await;
-            return;
+        // An entry for a mailbox this socket already holds is a re-proof: the prefix's limits do
+        // not apply to it (the frame budgets bound it). The socket's first signed frame is
+        // counted and not refused. Other entries are refused while the prefix is blocked or over
+        // its check budget.
+        let keys: Vec<Option<String>> = list
+            .iter()
+            .map(|e| {
+                let address = e.get("address").and_then(|a| a.as_str()).unwrap_or("");
+                parse_address(address).ok().filter(|a| a.public_key_valid()).map(|a| a.public_key)
+            })
+            .collect();
+        let charged = {
+            let attached = self.mux.as_ref().map(|m| &m.attached);
+            keys.iter().filter(|k| !k.as_ref().is_some_and(|k| attached.is_some_and(|a| a.contains(k)))).count()
+        };
+        let gate = self.sig_gate_for(charged == 0);
+        match r.limiter.sig_gate(self.ip, charged, gate) {
+            Ok(()) => {}
+            Err(SigRefused::Blocked(s)) => {
+                self.send(ws, mux_error("rate_limited", "Too many failed signatures.", r#ref, Some(s))).await;
+                return;
+            }
+            Err(SigRefused::Checks(s)) => {
+                self.send(ws, mux_error("rate_limited", "Too many signature checks.", r#ref, Some(s))).await;
+                return;
+            }
         }
         let challenge = self.mux.as_ref().map(|m| m.challenge.clone()).unwrap_or_default();
         let mut out = Vec::with_capacity(list.len());
         let mut proven = Vec::new();
         let mut any = false;
-        for e in list {
+        for (e, key) in list.iter().zip(keys) {
             let address = e.get("address").and_then(|a| a.as_str()).unwrap_or("");
             let signature = e.get("signature").and_then(|a| a.as_str()).unwrap_or("");
-            let Some(key) = parse_address(address).ok().filter(|a| a.public_key_valid()).map(|a| a.public_key) else {
+            let Some(key) = key else {
                 tracing::trace!(socket = self.id, ip = %self.ip, reason = "bad_address", "attach refused");
                 out.push(json!({"mailbox":address,"ok":false,"code":"bad_address"}));
                 continue;
@@ -305,7 +327,7 @@ impl Session {
                 if code == "wrong_host" {
                     self.note_wrong_host(host.unwrap_or(""));
                 } else {
-                    r.limiter.sig_failed(self.ip);
+                    self.sig_failed();
                 }
                 tracing::trace!(socket = self.id, ip = %self.ip, mailbox = %short(&key), reason = code, "attach refused");
                 out.push(json!({"mailbox":key,"ok":false,"code":code}));
@@ -435,7 +457,10 @@ impl Session {
     /// CancelTx over mux: the signature proves the key, as for a classic socket that never
     /// subscribed. The classic cancel logic does the rest.
     async fn cancel_tx(&mut self, ws: &mut WebSocket, msg: &Value, r#ref: &Option<String>) {
-        let frame = match self.relay.cancel_tx(self.ip, None, msg).await {
+        let mut scope = self.sig_scope();
+        let out = self.relay.cancel_tx(self.ip, None, msg, &mut scope).await;
+        self.sig_failures += scope.failed;
+        let frame = match out {
             CancelOutcome::Cancelled(t) => with_ref(json!({"type":"TransactionCancelled","epicboxtxid":t}), r#ref),
             CancelOutcome::Ok => with_ref(ok(), r#ref),
             CancelOutcome::Refused(Refusal::RateLimited(s)) => {
@@ -574,6 +599,7 @@ impl Session {
                 if let Some((_, k)) = m.inflight.remove(id) {
                     m.dirty.insert(k);
                 }
+                m.held.remove(id);
             }
         }
         self.send(ws, with_ref(ok(), r#ref)).await;
@@ -689,11 +715,12 @@ impl Session {
         if !m.attached.remove(key) {
             return;
         }
-        m.dirty.remove(key);
-        m.inflight.retain(|_, (_, k)| k != key);
         m.cancel_sent.retain(|(mb, _)| mb != key);
+        // Hand the in-flight messages back, or the new holder waits out their leases.
+        self.drop_inflight(key).await;
         self.sync_token();
         self.send(ws, json!({"type":"Detached","mailbox":key,"reason":"replaced"})).await;
+        self.relay.registry.wake(key);
     }
 
     /// Push Mail for dirty mailboxes while in-flight slots are free.

@@ -71,6 +71,16 @@ impl Buckets {
         }
     }
 
+    /// Take `cost` tokens from `key` whether or not they are there: the bucket stops at empty.
+    /// For work that is counted but never refused.
+    pub fn charge(&self, key: &str, cost: f64, mult: f64) {
+        let now = now_ms();
+        let mut map = self.map.lock();
+        let b = map.entry(key.to_string()).or_insert(Bucket { tokens: self.burst * mult, at: now, mult });
+        self.refill(b, now, mult);
+        b.tokens = (b.tokens - cost).max(0.0);
+    }
+
     /// Seconds until one token is available, without taking it.
     pub fn blocked(&self, key: &str, mult: f64) -> Option<u64> {
         let now = now_ms();
@@ -113,6 +123,26 @@ pub struct Limiter {
     total: AtomicU32,
     /// Counts for the log summary; the relay shares it.
     pub traffic: Arc<Traffic>,
+}
+
+/// How the prefix's signature limits treat one signed websocket frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigGate {
+    /// Refuse while the prefix is blocked or over its check budget.
+    Enforce,
+    /// The socket's first signed frame: counted against the prefix, never refused.
+    Record,
+    /// A re-proof of a key the socket already holds: neither refused nor charged.
+    Exempt,
+}
+
+/// Why `Limiter::sig_gate` refused a frame; the seconds to wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigRefused {
+    /// The prefix has used up its failed-signature budget.
+    Blocked(u64),
+    /// The prefix is over its signature-check budget.
+    Checks(u64),
 }
 
 /// Why a socket was refused.
@@ -194,6 +224,24 @@ impl Limiter {
     pub fn sig_checks(&self, ip: IpAddr, n: usize) -> Result<(), u64> {
         let (p, m) = self.prefix(ip);
         self.sig_check_ip.take(&p, n.max(1) as f64, m).inspect_err(|_| self.refused("sig_checks", ip))
+    }
+
+    /// The prefix's signature limits for a frame that needs `n` checks, as `gate` says.
+    pub fn sig_gate(&self, ip: IpAddr, n: usize, gate: SigGate) -> Result<(), SigRefused> {
+        match gate {
+            SigGate::Exempt => Ok(()),
+            SigGate::Record => {
+                let (p, m) = self.prefix(ip);
+                self.sig_check_ip.charge(&p, n.max(1) as f64, m);
+                Ok(())
+            }
+            SigGate::Enforce => {
+                if let Some(s) = self.sig_blocked(ip) {
+                    return Err(SigRefused::Blocked(s));
+                }
+                self.sig_checks(ip, n).map_err(SigRefused::Checks)
+            }
+        }
     }
 
     /// One mux/1 Attach or Resume frame against the prefix's budget.
@@ -316,6 +364,28 @@ mod tests {
         let wait = b.take("k", 1.0, 1.0).unwrap_err();
         assert!((1..=2).contains(&wait));
         assert!(b.take("other", 1.0, 1.0).is_ok());
+    }
+
+    #[test]
+    fn sig_gate_enforces_records_and_exempts() {
+        let cfg = Limits { sig_checks_per_min_per_ip: 4, failed_sigs_per_min_per_ip: 2, ..Limits::default() };
+        let l = Limiter::new(&cfg);
+        let ip: IpAddr = "10.1.2.3".parse().unwrap();
+        // Exempt neither refuses nor charges.
+        for _ in 0..10 {
+            assert!(l.sig_gate(ip, 2, SigGate::Exempt).is_ok());
+        }
+        // Record charges and never refuses, even past the budget.
+        for _ in 0..10 {
+            assert!(l.sig_gate(ip, 2, SigGate::Record).is_ok());
+        }
+        assert!(matches!(l.sig_gate(ip, 1, SigGate::Enforce), Err(SigRefused::Checks(_))));
+        // A blocked prefix refuses Enforce before the check budget.
+        l.sig_failed(ip);
+        l.sig_failed(ip);
+        assert!(matches!(l.sig_gate(ip, 1, SigGate::Enforce), Err(SigRefused::Blocked(_))));
+        assert!(l.sig_gate(ip, 1, SigGate::Record).is_ok());
+        assert!(l.sig_gate(ip, 1, SigGate::Exempt).is_ok());
     }
 
     #[test]
