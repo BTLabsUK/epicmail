@@ -1,6 +1,6 @@
 [Unit]
 Description=epicmail (Epicbox-compatible relay)
-Documentation=https://example.org/docs/operating.md
+Documentation=https://github.com/BTLabsUK/epicmail/blob/main/docs/operating.md
 After=network-online.target
 Wants=network-online.target
 

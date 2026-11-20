@@ -134,7 +134,7 @@ Per-IP limits group clients by prefix (`ipv4_prefix` 24, `ipv6_prefix` 48). Sour
 | `mux_attach_frames_per_min` | 30 | Attach/resume churn; a prefix gets 8 times this across its sockets |
 | `ipv4_prefix` / `ipv6_prefix` | 24 / 48 | Sets how clients are grouped for per-IP limits |
 | `max_sockets` | 150000 | Total file descriptors and memory |
-| `shared_sources` | empty | Tor exits and the onion loopback being limited as one client |
+| `shared_sources` | empty | Tor exits and onion clients being limited as one client. Behind the shipped nginx onion setup, onion clients arrive as `fc00:dead:beef:4dad::<circuit>`: use `["fc00:dead:beef:4dad::/64"]`. Use `["127.0.0.1/32"]` only when tor connects straight to the relay with nothing in between |
 | `shared_multiplier` | 16 | Factor applied for `shared_sources` |
 | `mux_sockets_per_ip` | 64 | One prefix holding many mux/1 sockets |
 | `http_per_min_per_ip` | 1200 | `/v1` floods: each pulled mailbox costs a signature check and a database write |
@@ -354,7 +354,7 @@ or day, or before it grows past `max_size_mb`, to
 `epicmail-<YYYYmmddTHHMMSS>Z.log`, gzips it in the background (`.log.gz`) when `compress` is
 on, and deletes all but the newest `keep` rotated files. A file left from an earlier hour or day
 is rotated when the relay starts. With `rotate = "daily"` and `keep = 14` the file holds about
-two weeks. Read it with `jq`, for example the life of one message:
+two weeks, fewer when size rotations add files: `keep` counts them too, so a trace log that passes `max_size_mb` each day keeps less than 14 days. Read it with `jq`, for example the life of one message:
 
 ```
 zcat -f /var/log/epicmail/epicmail*.log* | jq -c 'select(.id == "zyFkKokdcpfGjpz3TvudT8PcUmljLWez")'
