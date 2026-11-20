@@ -122,6 +122,29 @@ fn signed_challenge(challenge: &str, domain: &str, port: u16) -> String {
     format!("{challenge}@{}:{port}", domain.to_ascii_lowercase())
 }
 
+/// The names other than `server.domain:server.port` a `/v1/pull` signature may be bound to: each
+/// `server.aliases` entry, with its own port or else `server.port`. Lower case, no trailing dot,
+/// the primary name left out.
+fn alias_names(cfg: &crate::config::Config) -> Vec<(String, u16)> {
+    let primary = (crate::config::normalize_domain(&cfg.server.domain).unwrap_or_default(), cfg.server.port);
+    let mut out: Vec<(String, u16)> = Vec::new();
+    for a in &cfg.server.aliases {
+        let (host, port) = match a.rsplit_once(':') {
+            Some((h, p)) => match p.parse::<u16>() {
+                Ok(p) => (h, p),
+                Err(_) => (a.as_str(), cfg.server.port),
+            },
+            None => (a.as_str(), cfg.server.port),
+        };
+        let Some(host) = crate::config::normalize_domain(host) else { continue };
+        let name = (host, port);
+        if name != primary && !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
 /// `ebh-<digits>-<lowercase hex>`, at most 64 characters, issued no later than a minute from now
 /// and inside the window. Returns the issue time in seconds.
 fn challenge_issued(challenge: &str, now_s: i64, window_s: i64) -> Option<i64> {
@@ -175,8 +198,24 @@ async fn prove(st: &AppState, ip: IpAddr, mb: &Value) -> Result<Proven, ProveErr
     };
     let signed = signed_challenge(challenge, &relay.cfg.server.domain, relay.cfg.server.port);
     if sig::verify(&key, &signed, signature).is_err() {
-        relay.limiter.sig_failed(ip);
-        return Ok(Proven { address, key: Err("signature does not verify") });
+        // A client that dialled one of the relay's aliases signs for that name. Every extra
+        // check is charged to the same budget as a mailbox, and only a mailbox that matches
+        // none of the names counts as a failed signature.
+        let mut verified = false;
+        for (host, port) in alias_names(&relay.cfg) {
+            if relay.limiter.http_ip(ip, 1).is_err() {
+                relay.limiter.refused("http", ip);
+                return Ok(Proven { address, key: Err("rate limit exceeded; try again later") });
+            }
+            if sig::verify(&key, &signed_challenge(challenge, &host, port), signature).is_ok() {
+                verified = true;
+                break;
+            }
+        }
+        if !verified {
+            relay.limiter.sig_failed(ip);
+            return Ok(Proven { address, key: Err("signature does not verify") });
+        }
     }
     let expires = (issued + window + CHALLENGE_FUTURE_S) * 1000;
     match relay.store.use_challenge(&format!("{key}:{challenge}"), expires).await {
@@ -467,5 +506,18 @@ mod tests {
         assert!(challenge_issued(&format!("ebh-{now}-"), now, 1200).is_none());
         assert!(challenge_issued(&format!("ebh-{now}-{}", "a".repeat(60)), now, 1200).is_none());
         assert!(challenge_issued("ebh--00ff", now, 1200).is_none());
+    }
+
+    #[test]
+    fn alias_names_take_their_own_port_or_the_servers() {
+        let mut c = crate::config::Config::default();
+        c.server.domain = "Relay.Example.".into();
+        c.server.port = 443;
+        c.server.aliases = vec!["Alias.Example.".into(), "other.example:8443".into(), "relay.example".into()];
+        assert_eq!(
+            alias_names(&c),
+            vec![("alias.example".to_string(), 443), ("other.example".to_string(), 8443)],
+            "the primary name is left out"
+        );
     }
 }

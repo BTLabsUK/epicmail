@@ -799,7 +799,7 @@ impl Store for SqliteStore {
     }
 
     async fn sweep(&self, now: i64, retention_ms: i64) -> Result<SweepStats> {
-        self.write(move |c| {
+        let stats = self.write(move |c| {
             let cutoff = now - retention_ms;
             // Which peers a cancel was queued for lives as long as its tombstone.
             c.execute("DELETE FROM cancel_forwards WHERE created_at<=?1", [cutoff])?;
@@ -811,7 +811,10 @@ impl Store for SqliteStore {
                 txlinks_expired: c.execute("DELETE FROM txlinks WHERE created_at<=?1", [cutoff])? as u64,
             })
         })
-        .await
+        .await?;
+        // Forwards that were never delivered and ran out their retention: otherwise they leave no trace.
+        metrics::counter!("epicbox_forwards_expired_total").increment(stats.forwards_expired);
+        Ok(stats)
     }
 
     async fn vacuum(&self) -> Result<()> {

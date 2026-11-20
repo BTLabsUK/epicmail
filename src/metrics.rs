@@ -59,6 +59,11 @@ fn describe() {
     describe_counter!("epicbox_cancels_total", "Transactions cancelled.");
     describe_counter!("epicbox_forwards_total", "Forward attempts by result.");
     describe_counter!(
+        "epicbox_forwards_dropped_total",
+        "Forward rows given up on, by peer and reason (refused, policy, loop, unanswered)."
+    );
+    describe_counter!("epicbox_forwards_expired_total", "Forward rows removed by the retention sweep, undelivered.");
+    describe_counter!(
         "epicbox_forward_loops_total",
         "Forwards refused because they came from this relay (another name for it)."
     );

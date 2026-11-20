@@ -2376,9 +2376,13 @@ async fn the_26_11_5_client_handshake_is_unchanged() {
     assert_eq!(at["mailboxes"][0]["code"], "bad_signature", "{at}");
 }
 
-/// A peer that answers the first `busy` frames with Error `Busy` and the next with Ok.
-/// Returns its address and how many frames it has seen.
-async fn busy_peer(busy: usize) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+/// A peer that answers the first `busy` frames with an Error of the given kind and description
+/// and the next with Ok. Returns its address and how many frames it has seen.
+async fn erroring_peer(
+    busy: usize,
+    kind: &'static str,
+    description: &'static str,
+) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -2395,7 +2399,7 @@ async fn busy_peer(busy: usize) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsi
                     if matches!(m, Message::Text(_)) {
                         let n = count.fetch_add(1, Ordering::SeqCst);
                         let a = if n < busy {
-                            json!({"type":"Error","kind":"Busy","description":"busy"})
+                            json!({"type":"Error","kind":kind,"description":description})
                         } else {
                             json!({"type":"Ok"})
                         };
@@ -2413,7 +2417,7 @@ async fn busy_peer(busy: usize) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsi
 async fn a_busy_peer_is_retried_and_the_row_is_delivered() {
     let dir = tempfile::tempdir().unwrap();
     // Three Busy answers are the refusal limit: they must not drop the row.
-    let (peer, seen) = busy_peer(3).await;
+    let (peer, seen) = erroring_peer(3, "Busy", "busy").await;
     let url = format!("ws://{peer}");
     let a = start(dir.path(), "relaya.test", |c| {
         c.federation.peers.insert("busy.test:443".into(), url.clone());
@@ -2630,4 +2634,196 @@ async fn with_cancel_off_a_3_1_0_wallet_is_served_as_3_0_0() {
     let mut b2 = connect(&n).await;
     subscribe(&mut b2, &bob, "3.1.0").await;
     assert_eq!(recv(&mut b2).await, json!({"type":"Ok"}));
+}
+
+/// The process-wide Prometheus recorder, installed on first use.
+fn metrics_handle() -> &'static metrics_exporter_prometheus::PrometheusHandle {
+    static H: std::sync::OnceLock<metrics_exporter_prometheus::PrometheusHandle> = std::sync::OnceLock::new();
+    H.get_or_init(|| epicmail::metrics::install().unwrap())
+}
+
+/// Sum of the series of `name` that carry every `key="value"` pair in `labels`.
+fn metric(name: &str, labels: &[(&str, &str)]) -> f64 {
+    metrics_handle()
+        .render()
+        .lines()
+        .filter(|l| l.starts_with(&format!("{name}{{")) || l.starts_with(&format!("{name} ")))
+        .filter(|l| labels.iter().all(|(k, v)| l.contains(&format!("{k}=\"{v}\""))))
+        .filter_map(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
+        .sum()
+}
+
+/// The queued forward rows of a relay for a peer, also those waiting out a short back-off
+/// (`forwards_due` hides rows that have expired at the time it is given, so not `i64::MAX`).
+async fn queued_forwards(n: &Node, peer: &str) -> Vec<epicmail::store::ForwardRow> {
+    n.relay.store.forwards_due(peer, now_ms() + 120_000, 100).await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peers_temporary_errors_keep_the_row_queued_without_counting_attempts() {
+    metrics_handle();
+    let dir = tempfile::tempdir().unwrap();
+    // Epicmail's own answer for a full mailbox, sent as InvalidRequest, more often than the
+    // refusal limit.
+    let (peer, seen) = erroring_peer(usize::MAX, "InvalidRequest", "Recipient mailbox is full; try again later.").await;
+    let url = format!("ws://{peer}");
+    let a = start(dir.path(), "relaya.test", |c| {
+        c.federation.peers.insert("full.test:443".into(), url.clone());
+        c.test.forward_backoff_ms = 10;
+    })
+    .await;
+    let before = metric("epicbox_forwards_total", &[("result", "busy")]);
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut ws = connect(&a).await;
+    recv_type(&mut ws, "Challenge").await;
+    send(&mut ws, post_frame(&alice, "relaya.test", &bob, "full.test", 1)).await;
+    assert_eq!(recv(&mut ws).await["type"], "Ok");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while seen.load(std::sync::atomic::Ordering::SeqCst) < 5 {
+        a.relay.forward_notify.notify_one();
+        assert!(std::time::Instant::now() < deadline, "peer saw {:?} frames", seen);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let rows = queued_forwards(&a, "full.test:443").await;
+    assert_eq!(rows.len(), 1, "the row is still queued after five temporary answers");
+    assert_eq!(rows[0].attempts, 0, "no attempt was counted");
+    assert!(metric("epicbox_forwards_total", &[("result", "busy")]) >= before + 5.0);
+}
+
+/// A stock-like peer: greets with a Challenge, answers a PostSlate with Ok and stays silent to
+/// anything else (it has no `CancelTx` case). Returns its address and the PostSlate count.
+async fn silent_to_cancels_peer() -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let posts = Arc::new(AtomicUsize::new(0));
+    let count = posts.clone();
+    tokio::spawn(async move {
+        loop {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let count = count.clone();
+            tokio::spawn(async move {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else { return };
+                let _ = ws.send(Message::Text(json!({"type":"Challenge","str":"c"}).to_string().into())).await;
+                while let Some(Ok(m)) = ws.next().await {
+                    if let Message::Text(t) = m {
+                        let v: Value = serde_json::from_str(&t).unwrap_or_default();
+                        if v["type"] == "PostSlate" {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            let _ = ws.send(Message::Text(json!({"type":"Ok"}).to_string().into())).await;
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    (addr, posts)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unanswered_cancel_is_dropped_and_does_not_hold_the_peer_back() {
+    use epicmail::store::{ForwardKind, NewForward};
+    metrics_handle();
+    let dir = tempfile::tempdir().unwrap();
+    let (peer, posts) = silent_to_cancels_peer().await;
+    let url = format!("ws://{peer}");
+    let a = start(dir.path(), "relaya.test", |c| {
+        c.federation.peers.insert("stock.test:443".into(), url.clone());
+        c.federation.timeout_s = 1;
+    })
+    .await;
+    let before = metric("epicbox_forwards_total", &[("result", "unanswered")]);
+    let now = now_ms();
+    let cancel = json!({"type":"CancelTx","address":"x","epicboxtxid":"t","signature":"s"});
+    a.relay
+        .store
+        .put_forward(NewForward {
+            peer: "stock.test:443".into(),
+            kind: ForwardKind::CancelTx,
+            frame: cancel.to_string(),
+            txid: None,
+            tx_keys: vec![],
+            created_at: now,
+            expires_at: now + 3_600_000,
+            attempts: 0,
+        })
+        .await
+        .unwrap();
+    a.relay.forward_notify.notify_one();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !queued_forwards(&a, "stock.test:443").await.is_empty() {
+        assert!(std::time::Instant::now() < deadline, "the unanswered cancel is still queued");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(metric("epicbox_forwards_total", &[("result", "unanswered")]) >= before + 1.0);
+
+    // A slate for the same peer goes out at once, not after a back-off (the first is 10 s).
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut ws = connect(&a).await;
+    recv_type(&mut ws, "Challenge").await;
+    send(&mut ws, post_frame(&alice, "relaya.test", &bob, "stock.test", 1)).await;
+    assert_eq!(recv(&mut ws).await["type"], "Ok");
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    while posts.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        assert!(std::time::Instant::now() < deadline, "the slate waited behind a back-off");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_post_the_allow_list_refuses_is_counted_as_policy_with_the_usual_answer() {
+    metrics_handle();
+    let dir = tempfile::tempdir().unwrap();
+    let a = start(dir.path(), "relaya.test", |c| c.federation.allow = vec!["only.example".into()]).await;
+    let policy = || metric("epicbox_posts_total", &[("result", "policy")]);
+    let before = policy();
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut ws = connect(&a).await;
+    recv_type(&mut ws, "Challenge").await;
+    send(&mut ws, post_frame(&alice, "relaya.test", &bob, "other.example", 1)).await;
+    let r = recv(&mut ws).await;
+    assert_eq!(r["type"], "Error", "{r}");
+    assert_eq!(r["kind"], "InvalidRequest", "{r}");
+    assert_eq!(r["description"], "Forwarding to other.example:443 is not allowed.", "{r}");
+    assert!(policy() >= before + 1.0, "posts_total{{result=\"policy\"}} did not rise");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pull_signed_for_an_alias_verifies_and_other_names_do_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| {
+        c.server.aliases = vec!["alias.test".into(), "other-port.test:8443".into()];
+    })
+    .await;
+    let bob = Key::new();
+    let ch = || format!("ebh-{}-{:016x}", now_ms() / 1000, rand::random::<u64>());
+    let pull = |ch: &str, signed: String| {
+        json!({"mailboxes":[{"address":bob.pk,"challenge":ch,"signature":bob.sign(&signed)}],"wait":0})
+    };
+
+    // The alias, with the relay's port.
+    let c1 = ch();
+    let (st, v) = http(&n, "POST", "/v1/pull", Some(pull(&c1, format!("{c1}@alias.test:443")))).await;
+    assert_eq!(st, 200, "{v}");
+    assert!(v["mailboxes"][0].get("error").is_none(), "{v}");
+    // Replaying it fails: the challenge is used.
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(pull(&c1, format!("{c1}@alias.test:443")))).await;
+    assert_eq!(v["mailboxes"][0]["error"], "challenge was already used", "{v}");
+
+    // An alias with its own port signs for that port, not the relay's.
+    let c2 = ch();
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(pull(&c2, format!("{c2}@other-port.test:443")))).await;
+    assert_eq!(v["mailboxes"][0]["error"], "signature does not verify", "{v}");
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(pull(&c2, format!("{c2}@other-port.test:8443")))).await;
+    assert!(v["mailboxes"][0].get("error").is_none(), "{v}");
+
+    // A name that is neither the primary nor an alias fails, and the challenge is not burnt.
+    let c3 = ch();
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(pull(&c3, format!("{c3}@other.test:443")))).await;
+    assert_eq!(v["mailboxes"][0]["error"], "signature does not verify", "{v}");
+    // The primary name still works.
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(pull(&c3, proof(&c3, "relay.test")))).await;
+    assert!(v["mailboxes"][0].get("error").is_none(), "{v}");
 }

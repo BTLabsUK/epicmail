@@ -10,6 +10,7 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,7 +27,7 @@ use tokio_tungstenite::Connector;
 
 use crate::clock::now_ms;
 use crate::relay::Relay;
-use crate::store::ForwardRow;
+use crate::store::{ForwardKind, ForwardRow};
 
 const TICK: Duration = Duration::from_secs(5);
 const BATCH: usize = 50;
@@ -192,6 +193,7 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
         // refuses: drop them instead of connecting.
         if !relay.peer_allowed(peer) {
             metrics::counter!("epicbox_forwards_total", "result" => "policy").increment(rows.len() as u64);
+            dropped(peer, "policy", rows.len() as u64);
             crate::sampled!(warn, peer, rows = rows.len(), "dropping forwards the federation policy refuses");
             for row in rows {
                 if let Err(e) = relay.store.forward_failed(row.id, now_ms(), "refused by federation policy", true).await
@@ -204,8 +206,17 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
         }
         for row in rows {
             let timeout = Duration::from_secs(relay.cfg.federation.timeout_s.max(1));
-            let res = tokio::time::timeout(timeout, deliver(relay, peer, &row, tls.clone())).await;
-            let res = res.unwrap_or_else(|_| Err(Failure::Transport("timed out".into())));
+            let sent = AtomicBool::new(false);
+            let res = tokio::time::timeout(timeout, deliver(relay, peer, &row, tls.clone(), &sent)).await;
+            let res = res.unwrap_or_else(|_| {
+                // A cancel is best effort, and the stock relay never answers one: a timeout after
+                // the frame went out is "unanswered", not a sign that the peer is down.
+                if row.kind == ForwardKind::CancelTx && sent.load(Ordering::Relaxed) {
+                    Err(Failure::Unanswered)
+                } else {
+                    Err(Failure::Transport("timed out".into()))
+                }
+            });
             let attempts = row.attempts + 1;
             let r = match res {
                 Ok(()) => {
@@ -226,6 +237,9 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
                     relay.traffic.add(crate::traffic::Count::ForwardsFailed, 1);
                     // The text is the peer's: logged escaped, so it cannot add lines to our log.
                     crate::sampled!(warn, peer, error = ?e, attempts, dropped = drop, "peer refused forward");
+                    if drop {
+                        dropped(peer, "refused", 1);
+                    }
                     relay.store.forward_failed(row.id, now_ms() + backoff_ms(attempts), &e, drop).await
                 }
                 Err(Failure::Busy(e)) => {
@@ -242,8 +256,17 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
                 }
                 Err(Failure::Loop) => {
                     metrics::counter!("epicbox_forwards_total", "result" => "loop").increment(1);
+                    dropped(peer, "loop", 1);
                     crate::sampled!(warn, peer, "forward dropped: the peer is this relay under another name");
                     relay.store.forward_failed(row.id, now_ms(), "forward loop", true).await
+                }
+                Err(Failure::Unanswered) => {
+                    // The peer is up (it greeted us) and does not know this frame: drop the cancel
+                    // without holding the peer's other rows back.
+                    metrics::counter!("epicbox_forwards_total", "result" => "unanswered").increment(1);
+                    dropped(peer, "unanswered", 1);
+                    tracing::debug!(peer, kind = ?row.kind, result = "unanswered", attempts, "forward dropped: no answer to a cancel");
+                    relay.store.forward_failed(row.id, now_ms(), "no answer", true).await
                 }
                 Err(Failure::Transport(e)) => {
                     metrics::counter!("epicbox_forwards_total", "result" => "failed").increment(1);
@@ -269,6 +292,12 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
     }
 }
 
+/// Count forward rows the relay gave up on, by peer and why: `refused`, `policy`, `loop` or
+/// `unanswered`. Rows that expire are counted by the retention sweep.
+fn dropped(peer: &str, reason: &'static str, n: u64) {
+    metrics::counter!("epicbox_forwards_dropped_total", "peer" => peer.to_string(), "reason" => reason).increment(n);
+}
+
 enum Failure {
     /// The peer answered Error.
     Refused(String),
@@ -278,6 +307,9 @@ enum Failure {
     Transport(String),
     /// The peer is this relay under another name: never worth retrying.
     Loop,
+    /// A CancelTx was sent and the peer greeted us but never answered (the stock relay has no
+    /// such frame). Only a cancel can end this way.
+    Unanswered,
 }
 
 impl From<anyhow::Error> for Failure {
@@ -286,8 +318,9 @@ impl From<anyhow::Error> for Failure {
     }
 }
 
-/// The URL and the vetted socket address for a peer.
-async fn target(relay: &Relay, peer: &str) -> Result<(String, Option<SocketAddr>)> {
+/// The URL and the vetted socket addresses for a peer, in the resolver's order. Only addresses
+/// that pass `is_public` (or any, with `allow_private`) are returned; none left is an error.
+async fn target(relay: &Relay, peer: &str) -> Result<(String, Option<Vec<SocketAddr>>)> {
     let fed = &relay.cfg.federation;
     if let Some(url) = fed.peers.get(peer) {
         return Ok((url.clone(), None));
@@ -298,20 +331,29 @@ async fn target(relay: &Relay, peer: &str) -> Result<(String, Option<SocketAddr>
         bail!("peer is this relay");
     }
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((domain, port)).await.context("resolve")?.collect();
-    let ok = addrs.iter().find(|a| fed.allow_private || is_public(a.ip())).copied();
-    let Some(addr) = ok else {
+    let ok: Vec<SocketAddr> = addrs.iter().filter(|a| fed.allow_private || is_public(a.ip())).copied().collect();
+    if ok.is_empty() {
         if addrs.is_empty() {
             bail!("no addresses");
         }
         bail!("peer resolves only to non-public addresses");
-    };
-    Ok((format!("wss://{domain}:{port}"), Some(addr)))
+    }
+    Ok((format!("wss://{domain}:{port}"), Some(ok)))
 }
 
-/// What a peer's `Error` frame means. `Busy` (the upstream relay when overloaded) and a rate
-/// limit (the text Epicmail itself sends) are passing; any other error is a refusal.
+/// What a peer's `Error` frame means. Passing answers are `Busy` (the stock relay when
+/// overloaded), `UnknownError` (an internal failure), a rate limit, and the temporary answers
+/// Epicmail itself sends ("Recipient mailbox is full; try again later.", "Too many messages from
+/// this sender ...", "Relay storage is full; try again later."): the row stays queued. Any other
+/// error is a refusal.
 fn error_failure(kind: Option<&str>, description: String) -> Failure {
-    let busy = kind.is_some_and(|k| k.eq_ignore_ascii_case("busy")) || description.starts_with("Rate limit exceeded");
+    let kind_is = |k: &str| kind.is_some_and(|x| x.eq_ignore_ascii_case(k));
+    let lower = description.to_ascii_lowercase();
+    let busy = kind_is("busy")
+        || kind_is("unknownerror")
+        || description.starts_with("Rate limit exceeded")
+        || description.starts_with("Too many messages from this sender")
+        || lower.contains("try again");
     if busy {
         Failure::Busy(description)
     } else {
@@ -319,25 +361,46 @@ fn error_failure(kind: Option<&str>, description: String) -> Failure {
     }
 }
 
-async fn deliver(relay: &Relay, peer: &str, row: &ForwardRow, tls: Arc<rustls::ClientConfig>) -> Result<(), Failure> {
+/// `sent` is set once the frame has gone out, so a timeout can tell "no answer" from "no connection".
+async fn deliver(
+    relay: &Relay,
+    peer: &str,
+    row: &ForwardRow,
+    tls: Arc<rustls::ClientConfig>,
+    sent_flag: &AtomicBool,
+) -> Result<(), Failure> {
     let (url, addr) = target(relay, peer).await?;
     let parsed = url::Url::parse(&url).map_err(|e| Failure::Transport(format!("url: {e}")))?;
-    let addr = match addr {
+    let addrs = match addr {
         Some(a) => a,
         None => {
             let host = parsed.host_str().ok_or_else(|| Failure::Transport("url has no host".into()))?;
             let port = parsed.port_or_known_default().unwrap_or(443);
-            tokio::net::lookup_host((host, port))
+            let a: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
                 .await
                 .map_err(|e| Failure::Transport(format!("resolve: {e}")))?
-                .next()
-                .ok_or_else(|| Failure::Transport("no addresses".into()))?
+                .collect();
+            if a.is_empty() {
+                return Err(Failure::Transport("no addresses".into()));
+            }
+            a
         }
     };
-    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
-        .await
-        .map_err(|_| Failure::Transport("connect timed out".into()))?
-        .map_err(|e| Failure::Transport(format!("connect: {e}")))?;
+    // The addresses in order, until one connects; the whole attempt is bounded by the caller's
+    // `federation.timeout_s`.
+    let mut last = Failure::Transport("no addresses".into());
+    let mut conn = None;
+    for addr in addrs {
+        match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
+            Ok(Ok(t)) => {
+                conn = Some(t);
+                break;
+            }
+            Ok(Err(e)) => last = Failure::Transport(format!("connect: {e}")),
+            Err(_) => last = Failure::Transport("connect timed out".into()),
+        }
+    }
+    let Some(tcp) = conn else { return Err(last) };
     let _ = tcp.set_nodelay(true);
     let mut cfg = WebSocketConfig::default();
     cfg.max_message_size = Some(relay.cfg.limits.max_frame_bytes);
@@ -374,6 +437,7 @@ async fn deliver(relay: &Relay, peer: &str, row: &ForwardRow, tls: Arc<rustls::C
                     .await
                     .map_err(|e| Failure::Transport(format!("send: {e}")))?;
                 sent = true;
+                sent_flag.store(true, Ordering::Relaxed);
             }
             "ok" | "transactioncancelled" if sent => {
                 let _ = ws.close(None).await;
@@ -419,6 +483,24 @@ mod tests {
         assert!(matches!(f(Some("InvalidRequest"), "bad signature"), Failure::Refused(_)));
         assert!(matches!(f(None, "error"), Failure::Refused(_)));
         assert!(matches!(f(Some("InvalidRequest"), "A rate limit exceeded elsewhere"), Failure::Refused(_)));
+    }
+
+    #[test]
+    fn temporary_answers_are_busy_and_real_refusals_are_not() {
+        let f = |k: Option<&str>, d: &str| error_failure(k, d.to_string());
+        for d in [
+            "Recipient mailbox is full; try again later.",
+            "Relay storage is full; try again later.",
+            "Too many messages from this sender are waiting for the recipient.",
+            "Internal error; try again.",
+            "Please TRY AGAIN soon",
+        ] {
+            assert!(matches!(f(Some("InvalidRequest"), d), Failure::Busy(_)), "{d}");
+        }
+        assert!(matches!(f(Some("UnknownError"), "anything"), Failure::Busy(_)));
+        assert!(matches!(f(Some("unknownerror"), "x"), Failure::Busy(_)));
+        assert!(matches!(f(Some("InvalidRequest"), "Error postslate signature."), Failure::Refused(_)));
+        assert!(matches!(f(Some("InvalidSignature"), "Invalid signature."), Failure::Refused(_)));
     }
 
     #[test]

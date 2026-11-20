@@ -73,14 +73,22 @@ peer's `Challenge`, sends the frame and reads until `Ok`, `TransactionCancelled`
 Peer names are resolved by the relay, and each address is checked: private, loopback,
 link-local and other special ranges are refused unless `federation.allow_private` is set. The
 TCP connection goes to the checked address and TLS checks the certificate against the peer's
-domain. A failed attempt is retried with exponential backoff from 5 s up to 1 hour. A peer that
-answers `Error` three times for one frame has refused it, and the row is dropped. Two answers are
-not refusals: `Error` with kind `Busy` (the upstream relay when overloaded) and any `Error` whose
-description starts `Rate limit exceeded` (what Epicmail sends). They make the peer wait its
-backoff like an unreachable one, are not counted toward the three, and leave the row queued
-until it expires. Rows expire with the same retention as messages.
+domain. If a name resolves to several public addresses, they are tried in order until one
+connects. A failed attempt is retried with exponential backoff from 5 s up to 1 hour. A peer that
+answers `Error` three times for one frame has refused it, and the row is dropped. Some answers
+are not refusals: `Error` with kind `Busy` (the upstream relay when overloaded), kind
+`UnknownError`, a description starting `Rate limit exceeded` or `Too many messages from this
+sender`, and any description containing "try again" (case-insensitive), which covers Epicmail's
+own "Recipient mailbox is full; try again later.", "Relay storage is full; try again later." and
+"Internal error; try again.". They make the peer wait its backoff like an unreachable one, are not
+counted toward the three, and leave the row queued until it expires. Rows expire with the same
+retention as messages.
 
-A 3.1.0 `CancelTx` whose other party is on another relay is forwarded the same way.
+A 3.1.0 `CancelTx` whose other party is on another relay is forwarded the same way, with one
+difference: the stock relay has no `canceltx` frame and never answers it. A `CancelTx` that gets
+no answer within `federation.timeout_s` after the frame was sent is dropped (it is best effort;
+the wallet already has its answer) and does not put the peer into backoff. It is counted as
+`epicbox_forwards_total{result="unanswered"}`.
 
 ## Group commit
 

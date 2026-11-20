@@ -55,7 +55,7 @@ impl Relay {
         });
         let has_txid = allow_cancel && self.cfg.protocol.cancel && req.txid.is_some();
         let size = req.str_.as_ref().map_or(0, String::len);
-        let (out, peer) = self.post_slate_inner(ip, req, allow_cancel, scope).await;
+        let (out, peer, policy) = self.post_slate_inner(ip, req, allow_cancel, scope).await;
         let label = match &out {
             PostOutcome::Stored { .. } => "stored",
             PostOutcome::Forwarded { .. } => "forwarded",
@@ -64,6 +64,7 @@ impl Relay {
             PostOutcome::Refused(Refusal::Full(_)) => "full",
             PostOutcome::Refused(Refusal::DeniedHost(_)) => "denied_sender_host",
             PostOutcome::Refused(Refusal::Internal) => "internal",
+            PostOutcome::Refused(Refusal::Invalid(..)) if policy => "policy",
             PostOutcome::Refused(Refusal::Invalid(..)) => "invalid",
         };
         let txid_label = if has_txid { "yes" } else { "no" };
@@ -86,7 +87,8 @@ impl Relay {
             metrics::counter!("epicbox_denied_sender_host_total").increment(1);
             self.traffic.add(Count::PostsDeniedHost, 1);
         }
-        if let PostOutcome::Refused(Refusal::Invalid(..)) = out {
+        // A policy refusal is the operator's allow/deny list at work, not a client misbehaving.
+        if let (PostOutcome::Refused(Refusal::Invalid(..)), false) = (&out, policy) {
             self.limiter.invalid_post(ip);
         }
         if let PostOutcome::Refused(Refusal::RateLimited(_)) = out {
@@ -111,34 +113,49 @@ impl Relay {
         out
     }
 
-    /// The outcome, and for a forward the peer relay it is queued for.
+    /// The outcome; for a forward the peer relay it is queued for; and whether the refusal is
+    /// the federation allow/deny list's.
     async fn post_slate_inner(
         &self,
         ip: IpAddr,
         req: PostReq,
         allow_cancel: bool,
         scope: &mut SigScope,
-    ) -> (PostOutcome, Option<String>) {
+    ) -> (PostOutcome, Option<String>, bool) {
         let slate = match self.check_post(ip, req, allow_cancel, scope) {
             Ok(s) => s,
-            Err(r) => return (PostOutcome::Refused(r), None),
+            Err(r) => return (PostOutcome::Refused(r), None, false),
         };
         let local = self.cfg.is_local(&slate.dest_domain, slate.dest_port);
         if local {
             if let Some(r) = self.sender_host_refusal(&slate.from) {
-                return (PostOutcome::Refused(r), None);
+                return (PostOutcome::Refused(r), None, false);
             }
         }
         if let Some(r) = self.store_full() {
-            return (PostOutcome::Refused(r), None);
+            return (PostOutcome::Refused(r), None, false);
         }
         let now = now_ms();
         let expires_at = now + self.retention_ms();
         if local {
-            (self.store_local(slate, now, expires_at).await, None)
+            (self.store_local(slate, now, expires_at).await, None, false)
         } else {
             let peer = format!("{}:{}", slate.dest_domain, slate.dest_port);
-            (self.store_forward(slate, now, expires_at).await, Some(peer))
+            if let Some((r, policy)) = self.forward_refusal_kind(&slate.dest_domain, slate.dest_port) {
+                if policy {
+                    static POLICY: crate::logging::KeyedGate = crate::logging::KeyedGate::new();
+                    let peer = peer.to_ascii_lowercase();
+                    if POLICY.admit(&peer, now_ms()).is_some() {
+                        crate::sampled!(
+                            warn,
+                            peer = %peer,
+                            "refused a post: the federation allow/deny list does not permit forwarding to this peer"
+                        );
+                    }
+                }
+                return (PostOutcome::Refused(r), Some(peer), policy);
+            }
+            (self.store_forward(slate, now, expires_at).await, Some(peer), false)
         }
     }
 
@@ -300,9 +317,6 @@ impl Relay {
         use PostOutcome::Refused;
         let Slate { from_s, to_s, from, body, signature, txid, txidsig, dest_key, dest_domain, dest_port } = slate;
         let peer = format!("{}:{}", dest_domain.to_ascii_lowercase(), dest_port);
-        if let Some(r) = self.forward_refusal(&dest_domain, dest_port) {
-            return Refused(r);
-        }
         if let Some(t) = &txid {
             match self.store.tx_info(t).await {
                 Ok(info) if info.tombstone.is_some() => return PostOutcome::Cancelled { txid: t.clone() },
@@ -349,11 +363,21 @@ impl Relay {
     /// Policy check for a remote destination (allow/deny lists, federation switch). Addresses are
     /// vetted again when the forward manager resolves the name.
     pub fn forward_refusal(&self, domain: &str, port: u16) -> Option<Refusal> {
+        self.forward_refusal_kind(domain, port).map(|(r, _)| r)
+    }
+
+    /// `forward_refusal`, and whether the refusal comes from the allow/deny lists.
+    fn forward_refusal_kind(&self, domain: &str, port: u16) -> Option<(Refusal, bool)> {
+        let invalid = |d: &str| Refusal::Invalid("InvalidRequest", d.to_string());
         let fed = &self.cfg.federation;
         let d = crate::config::normalize_domain(domain).unwrap_or_default();
         let dp = format!("{d}:{port}");
         if !fed.enabled {
-            return Some(Refusal::Invalid("InvalidRequest", "This relay does not forward to other relays.".into()));
+            return Some((invalid("This relay does not forward to other relays."), false));
+        }
+        // Port 0 names no listener; the same text as a list refusal, but the client's mistake.
+        if port == 0 {
+            return Some((invalid(&format!("Forwarding to {dp} is not allowed.")), false));
         }
         let listed = |l: &Vec<String>| {
             l.iter().any(|x| {
@@ -362,10 +386,10 @@ impl Relay {
             })
         };
         if listed(&fed.deny) || (!fed.allow.is_empty() && !listed(&fed.allow)) {
-            return Some(Refusal::Invalid("InvalidRequest", format!("Forwarding to {dp} is not allowed.")));
+            return Some((invalid(&format!("Forwarding to {dp} is not allowed.")), true));
         }
         if d.is_empty() || d.len() > 253 || !d.contains('.') && !fed.peers.contains_key(&dp) {
-            return Some(Refusal::Invalid("InvalidRequest", "Invalid slate destination.".into()));
+            return Some((invalid("Invalid slate destination."), false));
         }
         None
     }
@@ -409,4 +433,48 @@ fn destination(payload: &Value) -> Option<(String, String, u16)> {
         return None;
     }
     Some((addr.public_key, domain, port))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::config::Config;
+    use crate::store::sqlite::SqliteStore;
+    use crate::store::Store;
+
+    fn relay(tweak: impl FnOnce(&mut Config)) -> (Arc<Relay>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.server.domain = "relay.test".into();
+        cfg.store.path = dir.path().join("t.db");
+        tweak(&mut cfg);
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&cfg.store.path, 1, 64).unwrap());
+        (Relay::new(Arc::new(cfg), store), dir)
+    }
+
+    fn text(r: Option<Refusal>) -> Option<String> {
+        match r {
+            Some(Refusal::Invalid(_, d)) => Some(d),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn destination_port_zero_is_refused_in_the_usual_form() {
+        let (r, _d) = relay(|_| {});
+        assert_eq!(text(r.forward_refusal("peer.example", 0)).as_deref(), Some("Forwarding to peer.example:0 is not allowed."));
+        assert!(r.forward_refusal("peer.example", 443).is_none());
+        assert!(!r.peer_allowed("peer.example:0"));
+        assert!(r.peer_allowed("peer.example:443"));
+    }
+
+    #[test]
+    fn only_the_allow_and_deny_lists_are_policy_refusals() {
+        let (r, _d) = relay(|c| c.federation.allow = vec!["only.example".into()]);
+        assert!(matches!(r.forward_refusal_kind("other.example", 443), Some((_, true))));
+        assert!(r.forward_refusal_kind("only.example", 443).is_none());
+        assert!(matches!(r.forward_refusal_kind("only.example", 0), Some((_, false))));
+    }
 }

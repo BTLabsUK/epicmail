@@ -212,7 +212,8 @@ each proven once with `Attach`. It gets several messages in flight, signature-fr
 For clients that cannot hold a websocket. The client makes its own challenge,
 `ebh-<unix seconds>-<random hex>`, and uses it once. It signs `<challenge>@<identity>` with the mailbox
 key, where identity is the relay's `domain:port` as `GET /v1/info` shows it, so a proof made for one
-relay is refused by any other. Plain `<challenge>` is not accepted.
+relay is refused by any other. The relay also accepts its `server.aliases` names (an alias with no port
+uses `server.port`), for a client that dialled an alias. Plain `<challenge>` is not accepted.
 
 | Endpoint | Does |
 |---|---|
@@ -305,7 +306,7 @@ as a Tor service, go in `limits.shared_sources`.
 | Data | Kept until |
 |---|---|
 | Waiting slate | Acknowledged, or `store.retention_days` after posting (default and minimum 7) |
-| Queued forward | Delivered, refused three times, or the retention period |
+| Queued forward | Delivered, refused three times, or the retention period (a `CancelTx` the peer never answers is dropped after one try) |
 | Cancel record | The retention period |
 | mux/1 resume token, rate-limit state | Memory only |
 
