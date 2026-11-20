@@ -2368,3 +2368,65 @@ async fn the_26_11_5_client_handshake_is_unchanged() {
     let at = recv_type(&mut m, "Attached").await;
     assert_eq!(at["mailboxes"][0]["code"], "bad_signature", "{at}");
 }
+
+/// A peer that answers the first `busy` frames with Error `Busy` and the next with Ok.
+/// Returns its address and how many frames it has seen.
+async fn busy_peer(busy: usize) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = Arc::new(AtomicUsize::new(0));
+    let count = seen.clone();
+    tokio::spawn(async move {
+        loop {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let count = count.clone();
+            tokio::spawn(async move {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else { return };
+                let _ = ws.send(Message::Text(json!({"type":"Challenge","str":"c"}).to_string().into())).await;
+                while let Some(Ok(m)) = ws.next().await {
+                    if matches!(m, Message::Text(_)) {
+                        let n = count.fetch_add(1, Ordering::SeqCst);
+                        let a = if n < busy {
+                            json!({"type":"Error","kind":"Busy","description":"busy"})
+                        } else {
+                            json!({"type":"Ok"})
+                        };
+                        let _ = ws.send(Message::Text(a.to_string().into())).await;
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    (addr, seen)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_busy_peer_is_retried_and_the_row_is_delivered() {
+    let dir = tempfile::tempdir().unwrap();
+    // Three Busy answers are the refusal limit: they must not drop the row.
+    let (peer, seen) = busy_peer(3).await;
+    let url = format!("ws://{peer}");
+    let a = start(dir.path(), "relaya.test", |c| {
+        c.federation.peers.insert("busy.test:443".into(), url.clone());
+        c.test.forward_backoff_ms = 10;
+    })
+    .await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut ws = connect(&a).await;
+    recv_type(&mut ws, "Challenge").await;
+    send(&mut ws, post_frame(&alice, "relaya.test", &bob, "busy.test", 1)).await;
+    assert_eq!(recv(&mut ws).await["type"], "Ok");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        a.relay.forward_notify.notify_one();
+        if a.relay.store.stats(now_ms()).await.unwrap().forwards_waiting == 0 {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "row not delivered; peer saw {:?}", seen);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 4, "three Busy answers, then Ok");
+}

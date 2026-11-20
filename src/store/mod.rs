@@ -207,6 +207,9 @@ pub trait Store: Send + Sync + 'static {
     async fn forward_done(&self, id: i64) -> Result<()>;
     /// Record a failed attempt. `drop` removes the row (peer refused it for good).
     async fn forward_failed(&self, id: i64, next_at: i64, error: &str, drop: bool) -> Result<()>;
+    /// The peer is busy: try again at `next_at` without counting an attempt, so it never
+    /// brings the row nearer to being dropped.
+    async fn forward_deferred(&self, id: i64, next_at: i64, error: &str) -> Result<()>;
 
     async fn tx_info(&self, txid: &str) -> Result<TxInfo>;
     /// In one transaction: write the tombstone (if there is none yet), delete every waiting

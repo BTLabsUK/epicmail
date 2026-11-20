@@ -74,8 +74,11 @@ Peer names are resolved by the relay, and each address is checked: private, loop
 link-local and other special ranges are refused unless `federation.allow_private` is set. The
 TCP connection goes to the checked address and TLS checks the certificate against the peer's
 domain. A failed attempt is retried with exponential backoff from 5 s up to 1 hour. A peer that
-answers `Error` three times for one frame has refused it, and the row is dropped. Rows expire with
-the same retention as messages.
+answers `Error` three times for one frame has refused it, and the row is dropped. Two answers are
+not refusals: `Error` with kind `Busy` (the upstream relay when overloaded) and any `Error` whose
+description starts `Rate limit exceeded` (what Epicmail sends). They make the peer wait its
+backoff like an unreachable one, are not counted toward the three, and leave the row queued
+until it expires. Rows expire with the same retention as messages.
 
 A 3.1.0 `CancelTx` whose other party is on another relay is forwarded the same way.
 

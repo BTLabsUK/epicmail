@@ -666,6 +666,16 @@ impl Store for SqliteStore {
         .await
     }
 
+    async fn forward_deferred(&self, id: i64, next_at: i64, error: &str) -> Result<()> {
+        let error: String = error.chars().take(200).collect();
+        self.write(move |c| {
+            c.prepare_cached("UPDATE forwards SET next_at=?2, last_error=?3 WHERE id=?1")?
+                .execute(params![id, next_at, error])?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn tx_info(&self, txid: &str) -> Result<TxInfo> {
         let txid = txid.to_string();
         self.read(move |c| {

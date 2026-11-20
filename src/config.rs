@@ -280,6 +280,9 @@ pub struct TestCfg {
     /// for a while, to test how wallets handle a relay that stops delivering. Never enable on a
     /// public relay.
     pub stall_endpoint: bool,
+    /// Base of the per-peer back-off in milliseconds (0: the default, 5000). Lets a test see a
+    /// busy peer retried without waiting half a minute.
+    pub forward_backoff_ms: i64,
 }
 
 impl Default for Server {

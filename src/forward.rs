@@ -43,10 +43,15 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// one per queued row, so it cannot keep every lane busy.
 #[derive(Default)]
 pub struct PeerBackoff {
+    base_ms: i64,
     map: Mutex<std::collections::HashMap<String, (i64, i64)>>,
 }
 
 impl PeerBackoff {
+    /// A back-off that starts at `base_ms` (0: the default).
+    pub fn with_base(base_ms: i64) -> Self {
+        Self { base_ms, map: Mutex::default() }
+    }
     /// True when `peer` may be tried at `now`.
     pub fn ready(&self, peer: &str, now: i64) -> bool {
         self.map.lock().get(peer).is_none_or(|(until, _)| *until <= now)
@@ -56,7 +61,7 @@ impl PeerBackoff {
         let mut m = self.map.lock();
         let e = m.entry(peer.to_string()).or_insert((0, 0));
         e.1 += 1;
-        e.0 = now + backoff_ms(e.1);
+        e.0 = now + if self.base_ms > 0 { backoff_from(self.base_ms, e.1) } else { backoff_ms(e.1) };
         e.0
     }
     pub fn ok(&self, peer: &str) {
@@ -70,8 +75,12 @@ impl PeerBackoff {
 
 /// Delay before the next try after `attempts` failures: 5 s, doubling, at most an hour.
 pub fn backoff_ms(attempts: i64) -> i64 {
+    backoff_from(BACKOFF_BASE_MS, attempts)
+}
+
+fn backoff_from(base: i64, attempts: i64) -> i64 {
     let n = attempts.clamp(0, 20) as u32;
-    BACKOFF_BASE_MS.saturating_mul(1i64 << n).min(BACKOFF_MAX_MS)
+    base.saturating_mul(1i64 << n).min(BACKOFF_MAX_MS)
 }
 
 /// Addresses a relay may connect to without `allow_private`.
@@ -125,7 +134,7 @@ pub fn is_public(ip: IpAddr) -> bool {
 /// Runs until shutdown.
 pub async fn run(relay: Arc<Relay>) {
     let lanes: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-    let backoff = Arc::new(PeerBackoff::default());
+    let backoff = Arc::new(PeerBackoff::with_base(relay.cfg.test.forward_backoff_ms));
     let tls = Arc::new(tls_config());
     let mut shutdown = relay.shutdown.subscribe();
     loop {
@@ -219,6 +228,18 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
                     crate::sampled!(warn, peer, error = ?e, attempts, dropped = drop, "peer refused forward");
                     relay.store.forward_failed(row.id, now_ms() + backoff_ms(attempts), &e, drop).await
                 }
+                Err(Failure::Busy(e)) => {
+                    // Overloaded, not unwilling: the whole peer waits its back-off and the row
+                    // stays queued, with no attempt counted, until it expires.
+                    metrics::counter!("epicbox_forwards_total", "result" => "busy").increment(1);
+                    tracing::debug!(peer, kind = ?row.kind, result = "busy", attempts = row.attempts, "forward");
+                    let next = backoff.failed(peer, now_ms());
+                    crate::sampled!(warn, peer, error = ?e, retry_in_s = (next - now_ms()) / 1000, "peer busy, forward kept");
+                    if let Err(e) = relay.store.forward_deferred(row.id, next, &e).await {
+                        crate::sampled!(error, error = %e, "forward bookkeeping failed");
+                    }
+                    return;
+                }
                 Err(Failure::Loop) => {
                     metrics::counter!("epicbox_forwards_total", "result" => "loop").increment(1);
                     crate::sampled!(warn, peer, "forward dropped: the peer is this relay under another name");
@@ -251,6 +272,8 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
 enum Failure {
     /// The peer answered Error.
     Refused(String),
+    /// The peer answered Error `Busy`, or a rate limit: try again later, never a refusal.
+    Busy(String),
     /// No answer: DNS, TCP, TLS, timeout, closed.
     Transport(String),
     /// The peer is this relay under another name: never worth retrying.
@@ -283,6 +306,17 @@ async fn target(relay: &Relay, peer: &str) -> Result<(String, Option<SocketAddr>
         bail!("peer resolves only to non-public addresses");
     };
     Ok((format!("wss://{domain}:{port}"), Some(addr)))
+}
+
+/// What a peer's `Error` frame means. `Busy` (the upstream relay when overloaded) and a rate
+/// limit (the text Epicmail itself sends) are passing; any other error is a refusal.
+fn error_failure(kind: Option<&str>, description: String) -> Failure {
+    let busy = kind.is_some_and(|k| k.eq_ignore_ascii_case("busy")) || description.starts_with("Rate limit exceeded");
+    if busy {
+        Failure::Busy(description)
+    } else {
+        Failure::Refused(description)
+    }
 }
 
 async fn deliver(relay: &Relay, peer: &str, row: &ForwardRow, tls: Arc<rustls::ClientConfig>) -> Result<(), Failure> {
@@ -348,7 +382,8 @@ async fn deliver(relay: &Relay, peer: &str, row: &ForwardRow, tls: Arc<rustls::C
             "error" if sent => {
                 let _ = ws.close(None).await;
                 let d = v.get("description").and_then(|d| d.as_str()).unwrap_or("error");
-                return Err(Failure::Refused(crate::logging::clean(d)));
+                let kind = v.get("kind").and_then(|k| k.as_str());
+                return Err(error_failure(kind, crate::logging::clean(d)));
             }
             _ => {}
         }
@@ -372,6 +407,25 @@ mod tests {
         assert!(!p("2001:0:4136:e378::1"), "Teredo");
         assert!(!p("fec0::1"), "site local");
         assert!(p("2606:4700::1111"), "ordinary public address");
+    }
+
+    #[test]
+    fn busy_and_rate_limit_errors_are_not_refusals() {
+        let f = |k: Option<&str>, d: &str| error_failure(k, d.to_string());
+        assert!(matches!(f(Some("Busy"), "relay busy"), Failure::Busy(_)));
+        assert!(matches!(f(Some("Busy"), "error"), Failure::Busy(_)));
+        assert!(matches!(f(Some("InvalidRequest"), "Rate limit exceeded; retry in 3 s."), Failure::Busy(_)));
+        assert!(matches!(f(None, "Rate limit exceeded."), Failure::Busy(_)));
+        assert!(matches!(f(Some("InvalidRequest"), "bad signature"), Failure::Refused(_)));
+        assert!(matches!(f(None, "error"), Failure::Refused(_)));
+        assert!(matches!(f(Some("InvalidRequest"), "A rate limit exceeded elsewhere"), Failure::Refused(_)));
+    }
+
+    #[test]
+    fn a_configured_backoff_base_scales_the_wait() {
+        let b = PeerBackoff::with_base(10);
+        assert_eq!(b.failed("p:443", 0), 20);
+        assert_eq!(b.failed("p:443", 0), 40);
     }
 
     #[test]

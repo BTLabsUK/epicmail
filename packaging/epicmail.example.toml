@@ -108,3 +108,4 @@ compress = true                  # gzip rotated files
 
 [test]
 stall_endpoint = false           # POST /test/stall on loopback; never enable on a public relay
+# forward_backoff_ms = 0         # test rigs only: base of the per-peer forward back-off (0 = 5000)
