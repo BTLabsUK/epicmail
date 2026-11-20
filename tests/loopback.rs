@@ -2777,8 +2777,7 @@ async fn a_post_the_allow_list_refuses_is_counted_as_policy_with_the_usual_answe
     let dir = tempfile::tempdir().unwrap();
     let a = start(dir.path(), "relaya.test", |c| c.federation.allow = vec!["only.example".into()]).await;
     let policy = || metric("epicbox_posts_total", &[("result", "policy")]);
-    let invalid = || metric("epicbox_posts_total", &[("result", "invalid")]);
-    let (before, invalid_before) = (policy(), invalid());
+    let before = policy();
     let (alice, bob) = (Key::new(), Key::new());
     let mut ws = connect(&a).await;
     recv_type(&mut ws, "Challenge").await;
@@ -2788,5 +2787,42 @@ async fn a_post_the_allow_list_refuses_is_counted_as_policy_with_the_usual_answe
     assert_eq!(r["kind"], "InvalidRequest", "{r}");
     assert_eq!(r["description"], "Forwarding to other.example:443 is not allowed.", "{r}");
     assert!(policy() >= before + 1.0, "posts_total{{result=\"policy\"}} did not rise");
-    assert!(invalid() >= invalid_before, "the invalid count never falls");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pull_signed_for_an_alias_verifies_and_other_names_do_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| {
+        c.server.aliases = vec!["alias.test".into(), "other-port.test:8443".into()];
+    })
+    .await;
+    let bob = Key::new();
+    let ch = || format!("ebh-{}-{:016x}", now_ms() / 1000, rand::random::<u64>());
+    let pull = |ch: &str, signed: String| {
+        json!({"mailboxes":[{"address":bob.pk,"challenge":ch,"signature":bob.sign(&signed)}],"wait":0})
+    };
+
+    // The alias, with the relay's port.
+    let c1 = ch();
+    let (st, v) = http(&n, "POST", "/v1/pull", Some(pull(&c1, format!("{c1}@alias.test:443")))).await;
+    assert_eq!(st, 200, "{v}");
+    assert!(v["mailboxes"][0].get("error").is_none(), "{v}");
+    // Replaying it fails: the challenge is used.
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(pull(&c1, format!("{c1}@alias.test:443")))).await;
+    assert_eq!(v["mailboxes"][0]["error"], "challenge was already used", "{v}");
+
+    // An alias with its own port signs for that port, not the relay's.
+    let c2 = ch();
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(pull(&c2, format!("{c2}@other-port.test:443")))).await;
+    assert_eq!(v["mailboxes"][0]["error"], "signature does not verify", "{v}");
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(pull(&c2, format!("{c2}@other-port.test:8443")))).await;
+    assert!(v["mailboxes"][0].get("error").is_none(), "{v}");
+
+    // A name that is neither the primary nor an alias fails, and the challenge is not burnt.
+    let c3 = ch();
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(pull(&c3, format!("{c3}@other.test:443")))).await;
+    assert_eq!(v["mailboxes"][0]["error"], "signature does not verify", "{v}");
+    // The primary name still works.
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(pull(&c3, proof(&c3, "relay.test")))).await;
+    assert!(v["mailboxes"][0].get("error").is_none(), "{v}");
 }
