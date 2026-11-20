@@ -2653,9 +2653,10 @@ fn metric(name: &str, labels: &[(&str, &str)]) -> f64 {
         .sum()
 }
 
-/// The queued forward rows of a relay, whenever due.
+/// The queued forward rows of a relay for a peer, also those waiting out a short back-off
+/// (`forwards_due` hides rows that have expired at the time it is given, so not `i64::MAX`).
 async fn queued_forwards(n: &Node, peer: &str) -> Vec<epicmail::store::ForwardRow> {
-    n.relay.store.forwards_due(peer, i64::MAX, 100).await.unwrap()
+    n.relay.store.forwards_due(peer, now_ms() + 120_000, 100).await.unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
