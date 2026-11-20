@@ -2770,3 +2770,23 @@ async fn an_unanswered_cancel_is_dropped_and_does_not_hold_the_peer_back() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_post_the_allow_list_refuses_is_counted_as_policy_with_the_usual_answer() {
+    metrics_handle();
+    let dir = tempfile::tempdir().unwrap();
+    let a = start(dir.path(), "relaya.test", |c| c.federation.allow = vec!["only.example".into()]).await;
+    let policy = || metric("epicbox_posts_total", &[("result", "policy")]);
+    let invalid = || metric("epicbox_posts_total", &[("result", "invalid")]);
+    let (before, invalid_before) = (policy(), invalid());
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut ws = connect(&a).await;
+    recv_type(&mut ws, "Challenge").await;
+    send(&mut ws, post_frame(&alice, "relaya.test", &bob, "other.example", 1)).await;
+    let r = recv(&mut ws).await;
+    assert_eq!(r["type"], "Error", "{r}");
+    assert_eq!(r["kind"], "InvalidRequest", "{r}");
+    assert_eq!(r["description"], "Forwarding to other.example:443 is not allowed.", "{r}");
+    assert!(policy() >= before + 1.0, "posts_total{{result=\"policy\"}} did not rise");
+    assert!(invalid() >= invalid_before, "the invalid count never falls");
+}
