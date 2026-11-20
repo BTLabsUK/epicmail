@@ -114,6 +114,8 @@ The defaults fit an exchange. The file is a copy of [packaging/epicmail.example.
 - `limits.sockets_per_address` (4): a fifth listener on the same address closes the oldest.
 - `store.retention_days` (7): the minimum, and the same as the old Mongo expiry.
 - `protocol.cancel` (true): see section 3 before changing it.
+- `federation.allow` (empty): leave it empty. The relay forwards to any public relay, and any entry refuses every relay not listed.
+- `limits.shared_sources` (empty): a relay that forwards mail to you is limited like any client (`limits.posts_per_min_per_ip`, 240 a minute per /24). A busy peer relay can be listed here. Since 0.1.13 a rate-limited forward from an Epicmail peer stays queued and is retried, so it is delayed, not lost.
 
 After an edit, run `check-config` again and `sudo systemctl restart epicmail`.
 </details>

@@ -109,7 +109,7 @@ tools/install.sh --bin epicmail-$v-linux-$a --domain relay.example.org
 A `get.sh` saved to disk runs with `sh get.sh ...`, no `chmod` needed.
 
 [packaging/production/](packaging/production/) shows a real deployment on top of that: an old
-relay name kept as an alias, an optional federation allow list, a Tor onion service, and a fixed
+relay name kept as an alias, optional federation allow and deny lists, a Tor onion service, and a fixed
 service user.
 
 Docker: `docker build -t epicmail .` makes an image on an empty base;
@@ -276,7 +276,8 @@ A slate for another relay's domain is queued and forwarded over `wss://`, as a w
 it. The relay resolves the peer itself, refuses private and special addresses, and checks the
 certificate against the peer's domain, so a crafted destination cannot reach internal services.
 Failed deliveries back off from 5 s to 1 hour per peer. `federation.allow`, `deny` and `peers`
-control where slates go; `federation.enabled = false` turns forwarding off.
+control where slates go; leave `allow` empty to forward to any public relay, because a non-empty
+`allow` refuses every relay not on it. `federation.enabled = false` turns forwarding off.
 
 ## Configuration
 

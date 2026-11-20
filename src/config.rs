@@ -407,7 +407,29 @@ impl Default for Log {
     }
 }
 
+/// True when `e` is a host name (letters, digits, dots, hyphens; one trailing dot allowed),
+/// optionally followed by `:port`: the forms `forward_refusal` can match.
+fn federation_entry_ok(e: &str) -> bool {
+    let host = match e.rsplit_once(':') {
+        Some((h, p)) if p.parse::<u16>().is_ok() => h,
+        Some(_) => return false,
+        None => e,
+    };
+    let host = host.strip_suffix('.').unwrap_or(host);
+    !host.is_empty() && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
 impl Config {
+    /// A note for the operator when `federation.allow` limits forwarding, else None.
+    pub fn allow_list_note(&self) -> Option<String> {
+        let n = self.federation.allow.len();
+        (n > 0).then(|| {
+            format!(
+                "federation.allow limits forwarding to the {n} listed relays; posts for every other relay are refused (leave it empty to forward to any public relay)"
+            )
+        })
+    }
+
     /// Reads, parses and validates a config file.
     pub fn load(path: &std::path::Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -476,6 +498,13 @@ impl Config {
         }
         if f.enabled && f.path.file_name().is_none() {
             bail!("log.file.path must name a file");
+        }
+        for (name, list) in [("allow", &self.federation.allow), ("deny", &self.federation.deny)] {
+            for e in list {
+                if !federation_entry_ok(e) {
+                    bail!("federation.{name}: \"{e}\" must be a host name such as \"epicbox.example.org\", optionally with a port (\"epicbox.example.org:443\"), without a scheme or path");
+                }
+            }
         }
         for h in &self.federation.deny_sender_hosts {
             let ok = !h.contains(':')
@@ -643,6 +672,35 @@ mod tests {
             let mut c = base();
             c.federation.deny_sender_hosts = vec![bad.into()];
             assert!(c.validate().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn federation_allow_and_deny_entries_must_be_matchable() {
+        for good in ["epicbox.example.org", "Epicbox.Example.org.", "epicbox.example.org:443", "a-b.example.org:65535"]
+        {
+            let mut c = base();
+            c.federation.allow = vec![good.into()];
+            c.federation.deny = vec![good.into()];
+            c.validate().unwrap_or_else(|e| panic!("{good}: {e}"));
+        }
+        for bad in [
+            "",
+            "wss://epicbox.example.org",
+            "epicbox.example.org/",
+            "has space.org",
+            "x.org:",
+            "x.org:70000",
+            ":443",
+            "x.org:a",
+        ] {
+            let mut c = base();
+            c.federation.allow = vec![bad.into()];
+            let e = c.validate().unwrap_err().to_string();
+            assert!(e.contains("federation.allow") && e.contains(bad), "{bad}: {e}");
+            let mut c = base();
+            c.federation.deny = vec![bad.into()];
+            assert!(c.validate().unwrap_err().to_string().contains("federation.deny"), "{bad}");
         }
     }
 
