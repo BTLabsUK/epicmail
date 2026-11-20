@@ -375,6 +375,10 @@ impl Relay {
         if !fed.enabled {
             return Some((invalid("This relay does not forward to other relays."), false));
         }
+        // Port 0 names no listener; the same text as a list refusal, but the client's mistake.
+        if port == 0 {
+            return Some((invalid(&format!("Forwarding to {dp} is not allowed.")), false));
+        }
         let listed = |l: &Vec<String>| {
             l.iter().any(|x| {
                 let x = x.strip_suffix('.').unwrap_or(x);
@@ -429,4 +433,48 @@ fn destination(payload: &Value) -> Option<(String, String, u16)> {
         return None;
     }
     Some((addr.public_key, domain, port))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::config::Config;
+    use crate::store::sqlite::SqliteStore;
+    use crate::store::Store;
+
+    fn relay(tweak: impl FnOnce(&mut Config)) -> (Arc<Relay>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.server.domain = "relay.test".into();
+        cfg.store.path = dir.path().join("t.db");
+        tweak(&mut cfg);
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&cfg.store.path, 1, 64).unwrap());
+        (Relay::new(Arc::new(cfg), store), dir)
+    }
+
+    fn text(r: Option<Refusal>) -> Option<String> {
+        match r {
+            Some(Refusal::Invalid(_, d)) => Some(d),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn destination_port_zero_is_refused_in_the_usual_form() {
+        let (r, _d) = relay(|_| {});
+        assert_eq!(text(r.forward_refusal("peer.example", 0)).as_deref(), Some("Forwarding to peer.example:0 is not allowed."));
+        assert!(r.forward_refusal("peer.example", 443).is_none());
+        assert!(!r.peer_allowed("peer.example:0"));
+        assert!(r.peer_allowed("peer.example:443"));
+    }
+
+    #[test]
+    fn only_the_allow_and_deny_lists_are_policy_refusals() {
+        let (r, _d) = relay(|c| c.federation.allow = vec!["only.example".into()]);
+        assert!(matches!(r.forward_refusal_kind("other.example", 443), Some((_, true))));
+        assert!(r.forward_refusal_kind("only.example", 443).is_none());
+        assert!(matches!(r.forward_refusal_kind("only.example", 0), Some((_, false))));
+    }
 }
