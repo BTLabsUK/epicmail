@@ -17,8 +17,7 @@ path = "/var/lib/epicmail/epicmail.db"
 
 [federation]
 enabled = true
-# Optional: forward only to these relays, e.g. ["epicbox.epiccash.com", "epicbox.epicnet.us"].
-# A post for any other domain is then refused when it arrives. Empty = any public relay.
+# Leave empty: the relay forwards to any public relay. Any entry refuses every relay not listed.
 allow = []
 
 [protocol]

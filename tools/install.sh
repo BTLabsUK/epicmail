@@ -77,9 +77,9 @@ if [ $UNINSTALL = 1 ]; then
   if grep -qs "^ExecStart=$DEST " /etc/systemd/system/*.service; then
     say "kept $DEST: another service runs it"
   else
-    $SUDO rm -f "$DEST"
+    $SUDO rm -f "$DEST" "$DEST.prev"
   fi
-  say "kept $ETC (config), /var/lib/private/$NAME (data) and /var/backups/$NAME;"
+  say "kept $ETC (config), the state directory (/var/lib/private/$NAME, or /var/lib/$NAME with a fixed user) and /var/backups/$NAME;"
   say "remove them by hand when no longer needed"
   exit 0
 fi
@@ -125,8 +125,10 @@ fi
 "$BIN" check-config --config "$TMP/epicmail.toml" >"$TMP/check.out" 2>&1 ||
   { cat "$TMP/check.out" >&2; die "the config does not pass check-config with the new binary"; }
 
-val() { sed -n "s/^$1 = \"\([^\"]*\)\".*/\1/p" "$TMP/epicmail.toml" | head -n 1; }
+val() { sed -n "s/^[[:space:]]*$1 = \"\([^\"]*\)\".*/\1/p" "$TMP/epicmail.toml" | head -n 1; }
 LISTEN_AT=$(val listen)
+# No listen line: the relay's own default.
+: "${LISTEN_AT:=127.0.0.1:3423}"
 STORE=$(sed -n '/^\[store\]/,/^\[/ s/^path = "\([^"]*\)".*/\1/p' "$TMP/epicmail.toml" | head -n 1)
 
 sed -e "s|^ExecStart=.*|ExecStart=$DEST serve --config $CONF|" \
@@ -171,6 +173,8 @@ fi
 $SUDO install -d -m 0755 "$PREFIX/bin" "$ETC"
 [ $NEWCONF = 0 ] || $SUDO install -m 0644 "$TMP/epicmail.toml" "$CONF"
 $SUDO install -m 0755 "$BIN" "$DEST.new"
+# Keep the old binary as $DEST.prev, for a rollback.
+if $SUDO test -f "$DEST"; then $SUDO cp -p "$DEST" "$DEST.prev"; fi
 $SUDO mv -f "$DEST.new" "$DEST"
 
 if $SUDO test -f "$UNIT" && ! $SUDO cmp -s "$TMP/unit" "$UNIT"; then

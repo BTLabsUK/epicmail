@@ -109,6 +109,14 @@ enum Cmd {
         #[arg(long, default_value_t = 30)]
         seconds: u64,
     },
+    /// Post one slate from a fresh key here to a fresh key on another relay, so this relay
+    /// forwards it. Nobody holds the recipient key: no wallet ever reads it. Check the relay's
+    /// log or metrics for the forward result.
+    Forward {
+        /// The other relay's domain, e.g. epicbox.epiccash.com
+        #[arg(long)]
+        to: String,
+    },
     /// Hold many /v1 long polls (wait 25) at once.
     Longpolls {
         #[arg(long, default_value_t = 100)]
@@ -153,9 +161,11 @@ fn post_frame(from: &Key, from_d: &str, to: &Key, to_d: &str, msg: &str) -> Valu
     json!({"type":"PostSlate","from":from.at(from_d),"to":to.at(to_d),"str":body,"signature":from.sign(&body)})
 }
 
-fn ebh(k: &Key) -> Value {
+/// A /v1 mailbox proof: a fresh challenge signed as `<challenge>@<domain>:443`, bound to the relay.
+fn ebh(k: &Key, d: &str) -> Value {
     let ch = format!("ebh-{}-{:016x}", now_s(), rand::random::<u64>());
-    json!({"address":k.pk,"challenge":ch,"signature":k.sign(&ch)})
+    let signed = format!("{ch}@{}:443", d.to_ascii_lowercase());
+    json!({"address":k.pk,"challenge":ch,"signature":k.sign(&signed)})
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -621,15 +631,6 @@ async fn probe(ws_url: &str, http: &Http, d: &str) -> anyhow::Result<bool> {
         c.check("Made for waiting mail", matches!(&r, Frame::Json(v) if v["type"] == "Ok"), r.label());
     }
 
-    // A domain outside the federation allow list.
-    let dave = Key::new();
-    send(&mut a, &post_frame(&alice, d, &dave, "example.org", "probe-3")).await.map_err(|e| anyhow!(e))?;
-    let r = answer(&mut a, long).await;
-    c.check(
-        "PostSlate to a domain outside federation.allow is refused",
-        !matches!(&r, Frame::Json(v) if v["type"] == "Ok"),
-        r.label(),
-    );
 
     // Bad JSON closes the socket.
     let mut j = ws_connect(ws_url).await.map_err(|e| anyhow!(e))?;
@@ -686,6 +687,41 @@ async fn probe(ws_url: &str, http: &Http, d: &str) -> anyhow::Result<bool> {
     let r = answer(&mut m2, long).await.json();
     c.check("Resume with the token", r["type"] == "Attached", short(&r.to_string()));
 
+    // mux/1 with epicbox-attach/1: an entry with `host` is signed over the host-bound text; an
+    // entry without it, over the bare challenge, on the same socket.
+    let mut h = ws_connect(ws_url).await.map_err(|e| anyhow!(e))?;
+    challenge(&mut h).await?;
+    let hdetails = json!({"type":"ClientDetails","wallet_version":"livetest","wallet_mode":"listener","protocol_version":"3.0.0","ext":["mux/1","epicbox-attach/1"]});
+    send(&mut h, &hdetails).await.map_err(|e| anyhow!(e))?;
+    let ok = answer(&mut h, long).await.json();
+    c.check(
+        "epicbox-attach/1 echoed on ClientDetails",
+        ok["ext"].as_array().is_some_and(|e| e.iter().any(|x| x == "epicbox-attach/1")),
+        short(&ok.to_string()),
+    );
+    let hch = ok["challenge"].as_str().unwrap_or("").to_string();
+    let (gina, hank, ivan) = (Key::new(), Key::new(), Key::new());
+    let bound = format!("epicbox-attach/1:{d}:{hch}");
+    let other = format!("epicbox-attach/1:other.example:{hch}");
+    send(
+        &mut h,
+        &json!({"type":"Attach","ref":"h1","mailboxes":[
+            {"address":gina.pk,"host":d,"signature":gina.sign(&bound)},
+            {"address":hank.pk,"signature":hank.sign(&hch)},
+            {"address":ivan.pk,"host":"other.example","signature":ivan.sign(&other)}]}),
+    )
+    .await
+    .map_err(|e| anyhow!(e))?;
+    let at = answer(&mut h, long).await.json();
+    c.check(
+        "Attach: host-bound form ok, bare form ok, another host refused",
+        at["type"] == "Attached"
+            && at["mailboxes"][0]["ok"] == true
+            && at["mailboxes"][1]["ok"] == true
+            && at["mailboxes"][2]["ok"] == false,
+        short(&at.to_string()),
+    );
+
     // /v1.
     let frank = Key::new();
     let mut f = post_frame(&alice, d, &frank, d, "probe-5");
@@ -693,7 +729,7 @@ async fn probe(ws_url: &str, http: &Http, d: &str) -> anyhow::Result<bool> {
     let r = http.once("POST", "/v1/post", Some(&f)).await?;
     let id = r.json()["id"].as_str().unwrap_or("").to_string();
     c.check("/v1/post", r.status == 200 && !id.is_empty(), format!("{} {}", r.status, short(&r.json().to_string())));
-    let pull = json!({"mailboxes":[ebh(&frank)],"wait":0});
+    let pull = json!({"mailboxes":[ebh(&frank, d)],"wait":0});
     let r = http.once("POST", "/v1/pull", Some(&pull)).await?;
     let v = r.json();
     c.check(
@@ -711,7 +747,7 @@ async fn probe(ws_url: &str, http: &Http, d: &str) -> anyhow::Result<bool> {
     let r = http.once("POST", "/v1/made", Some(&made)).await?;
     c.check("/v1/made removes it", r.status == 200 && r.json()["removed"] == 1, short(&r.json().to_string()));
 
-    let pull = json!({"mailboxes":[ebh(&frank)],"wait":20});
+    let pull = json!({"mailboxes":[ebh(&frank, d)],"wait":20});
     let http2 = Http { host: http.host.clone(), port: http.port, tls: http.tls.clone() };
     let t0 = Instant::now();
     let poll = tokio::spawn(async move { http2.once("POST", "/v1/pull", Some(&pull)).await });
@@ -1155,7 +1191,7 @@ async fn pulls(http: Arc<Http>, conc: usize, seconds: u64) -> anyhow::Result<()>
                     }
                 }
                 let k = Key::new();
-                let body = json!({"mailboxes":[ebh(&k)],"wait":0});
+                let body = json!({"mailboxes":[ebh(&k, &http.host)],"wait":0});
                 let t1 = Instant::now();
                 match http
                     .request(conn.as_mut().unwrap(), "POST", "/v1/pull", Some(&body), Duration::from_secs(15))
@@ -1195,7 +1231,7 @@ async fn longpolls(http: Arc<Http>, n: usize) -> anyhow::Result<()> {
         let (t, http) = (t.clone(), http.clone());
         hs.push(tokio::spawn(async move {
             let k = Key::new();
-            let body = json!({"mailboxes":[ebh(&k)],"wait":25});
+            let body = json!({"mailboxes":[ebh(&k, &http.host)],"wait":25});
             let t1 = Instant::now();
             match http.once("POST", "/v1/pull", Some(&body)).await {
                 Ok(r) => {
@@ -1246,6 +1282,17 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Pulls { concurrency, seconds } => pulls(http, concurrency, seconds).await?,
         Cmd::Longpolls { n } => longpolls(http, n).await?,
+        Cmd::Forward { to } => {
+            let (from, rcpt) = (Key::new(), Key::new());
+            let mut s = ws_connect(&ws_url).await.map_err(|e| anyhow!(e))?;
+            challenge(&mut s).await?;
+            send(&mut s, &post_frame(&from, d, &rcpt, &to, "livetest-forward")).await.map_err(|e| anyhow!(e))?;
+            let r = answer(&mut s, Duration::from_secs(15)).await;
+            println!("to {} -> {}", rcpt.at(&to), r.label());
+            if !matches!(&r, Frame::Json(v) if v["type"] == "Ok") {
+                std::process::exit(1);
+            }
+        }
     }
     Ok(())
 }

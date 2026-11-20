@@ -131,6 +131,17 @@ pub enum Refusal {
     Internal,
 }
 
+/// How a websocket frame's signature checks meet the prefix limits, and what they found. The
+/// session sets `first` for the first signed frame of a socket; `post_slate` and `cancel_tx` add
+/// to `failed` for each failed signature, so the session can count them against the socket.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SigScope {
+    /// The first signed frame of the socket: the prefix's block does not refuse it.
+    pub first: bool,
+    /// Failed signatures found in this frame.
+    pub failed: u32,
+}
+
 /// What `post_slate` did with a slate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PostOutcome {

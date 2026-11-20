@@ -11,6 +11,7 @@ use crate::address::parse_address;
 use crate::clock::now_ms;
 use crate::ids::{is_msgid, rand_id};
 use crate::logging::short;
+use crate::limits::SigRefused;
 use crate::relay::{
     CancelOutcome, Cmd, PostOutcome, PostReq, Refusal, ATTACH_HOST_EXT, CANCEL_SEPARATED_EXT, OFFER_LEASE_MS,
 };
@@ -44,6 +45,8 @@ impl Ver {
 pub(super) struct Inflight {
     /// Store row id.
     pub(super) id: i64,
+    /// The message id the wallet acknowledges it with.
+    pub(super) msgid: String,
 }
 
 impl Session {
@@ -133,25 +136,27 @@ impl Session {
             _ => Ver::V3,
         });
         let invalid = json!({"type":"Error","kind":"InvalidSignature","description":"Invalid signature."});
-        if let Some(s) = r.limiter.sig_blocked(self.ip) {
-            let e = Refusal::RateLimited(s).classic_frame();
-            self.send(ws, e).await;
-            return Flow::Continue;
-        }
-        // Over the current challenge and, failing that, the previous one: up to two checks.
-        if let Err(s) = r.limiter.sig_checks(self.ip, 1 + usize::from(self.prev_challenge.is_some())) {
-            self.send(ws, Refusal::RateLimited(s).classic_frame()).await;
-            return Flow::Continue;
-        }
         let address = msg.get("address").and_then(|a| a.as_str()).unwrap_or("");
         let signature = msg.get("signature").and_then(|a| a.as_str()).unwrap_or("");
         let key = parse_address(address).ok().filter(|a| a.public_key_valid()).map(|a| a.public_key);
+        // A Subscribe for the key this socket already holds is a re-proof (the challenge round):
+        // the socket's frame budget bounds it, and the prefix's limits do not apply, so another
+        // socket's bad signatures cannot make it fail. The socket's first signed frame is counted
+        // and not refused. Anything else is refused while the prefix is blocked or over budget.
+        let reproof = key.is_some() && key == self.key;
+        let gate = self.sig_gate_for(reproof);
+        // Over the current challenge and, failing that, the previous one: up to two checks.
+        let checks = 1 + usize::from(self.prev_challenge.is_some());
+        if let Err(SigRefused::Blocked(s) | SigRefused::Checks(s)) = r.limiter.sig_gate(self.ip, checks, gate) {
+            self.send(ws, Refusal::RateLimited(s).classic_frame()).await;
+            return Flow::Continue;
+        }
         let verified = key.as_ref().is_some_and(|k| {
             sig::verify(k, &self.challenge, signature).is_ok()
                 || self.prev_challenge.as_ref().is_some_and(|p| sig::verify(k, p, signature).is_ok())
         });
         let Some(key) = key.filter(|_| verified) else {
-            r.limiter.sig_failed(self.ip);
+            self.sig_failed();
             metrics::counter!("epicbox_subscribe_total", "result" => "bad_signature").increment(1);
             tracing::trace!(socket = self.id, ip = %self.ip, reason = "bad_signature", "subscribe refused");
             if let Some(k) = self.key.take() {
@@ -175,14 +180,17 @@ impl Session {
         tracing::trace!(socket = self.id, mailbox = %short(&key), ver = self.ver.map_or("none", Ver::as_str), "subscribed");
         self.prev_challenge = None;
 
-        // 3.1.0: a successful Subscribe acknowledges the TransactionCancelled sent before it.
-        if let (Some(t), Some(k)) = (self.pending_cancel_ack.take(), self.key.as_ref()) {
-            if r.store.ack_cancel(k, &t).await.is_err() {
+        // 3.1.0: a successful Subscribe for the key the TransactionCancelled was sent to
+        // acknowledges it. The ack stays pending until that key proves itself, and when the store
+        // fails.
+        if let Some(t) = self.pending_cancel_ack.as_ref().filter(|(k, _)| *k == key).map(|(_, t)| t.clone()) {
+            if r.store.ack_cancel(&key, &t).await.is_err() {
                 let e =
                     json!({"type":"Error","kind":"InvalidRequest","description":"Unable to acknowledge cancellation."});
                 self.send(ws, e).await;
                 return Flow::Continue;
             }
+            self.pending_cancel_ack = None;
         }
 
         if self.key.as_deref() != Some(key.as_str()) {
@@ -190,6 +198,7 @@ impl Session {
                 r.registry.unsubscribe_classic(&old, self.id);
                 if let Some(i) = self.inflight.take() {
                     let _ = r.store.release(vec![i.id]).await;
+                    r.registry.wake(&old);
                 }
             }
             self.handle.cancel = self.ver == Some(Ver::V31);
@@ -263,7 +272,7 @@ impl Session {
                 let m = v.remove(0);
                 let frame = self.slate_frame(&m, ver);
                 if ver != Ver::Legacy {
-                    self.inflight = Some(Inflight { id: m.id });
+                    self.inflight = Some(Inflight { id: m.id, msgid: m.msgid.clone() });
                 }
                 metrics::counter!("epicbox_deliveries_total", "mode" => "classic").increment(1);
                 r.traffic.add(crate::traffic::Count::Delivered, 1);
@@ -288,6 +297,7 @@ impl Session {
     /// flight, if any, steps aside with its lease released, so it is offered again on that
     /// Subscribe instead of after the lease runs out.
     pub(super) async fn send_cancelled(&mut self, ws: &mut WebSocket, txid: String) {
+        let Some(key) = self.key.clone() else { return };
         if let Some(i) = self.inflight.take() {
             if let Err(e) = self.relay.store.release(vec![i.id]).await {
                 crate::sampled!(warn, error = %e, "store release failed");
@@ -296,7 +306,7 @@ impl Session {
         self.attempts = 0;
         tracing::trace!(socket = self.id, txid = %short(&txid), "cancel pushed");
         self.send(ws, json!({"type":"TransactionCancelled","epicboxtxid":txid})).await;
-        self.pending_cancel_ack = Some(txid);
+        self.pending_cancel_ack = Some((key, txid));
     }
 
     /// The Slate frame for `m` in the form `ver` expects.
@@ -333,21 +343,21 @@ impl Session {
             Some("2.0.0") => Ver::V2,
             Some("3.0.0") => Ver::V3,
             Some("3.1.0") if r.cfg.protocol.cancel => Ver::V31,
+            // With cancel off a wallet that announces 3.1.0 is served as 3.0.0, as the stock
+            // cancel relay does; ignoring its Made would redeliver the message on every connect.
+            Some("3.1.0") => Ver::V3,
             // The stock relay ignores other Made frames without an answer.
             _ => return,
         };
-        let checks = 1 + usize::from(ver == Ver::V2 && self.prev_challenge.is_some());
-        if let Err(s) = r.limiter.sig_checks(self.ip, checks) {
-            self.send(ws, Refusal::RateLimited(s).classic_frame()).await;
-            return;
-        }
+        // Made is signed by the key this socket holds, a re-proof: the socket's frame budget
+        // bounds the checks, and the prefix's limits do not apply to it.
         let signature = msg.get("signature").and_then(|s| s.as_str()).unwrap_or("");
         let signed = if ver == Ver::V2 { self.challenge.as_str() } else { msgid };
         let ok_sig = sig::verify(&key, signed, signature).is_ok()
             || (ver == Ver::V2
                 && self.prev_challenge.as_ref().is_some_and(|p| sig::verify(&key, p, signature).is_ok()));
         if !ok_sig {
-            r.limiter.sig_failed(self.ip);
+            self.sig_failed();
             tracing::trace!(socket = self.id, ip = %self.ip, reason = "bad_signature", "made refused");
             self.send(ws, json!({"type":"Error","kind":"InvalidSignature","description":"Invalid signature."})).await;
             return;
@@ -366,15 +376,20 @@ impl Session {
         r.traffic.add(crate::traffic::Count::Acked, 1);
         tracing::debug!(socket = self.id, mailbox = %short(&key), id = %msgid, transport = "classic", "acked");
         self.send(ws, ok()).await;
-        self.inflight = None;
-        self.attempts = 0;
+        // Only the acknowledgement of the message in flight frees the slot.
+        if self.inflight.as_ref().is_some_and(|i| i.msgid == msgid) {
+            self.inflight = None;
+            self.attempts = 0;
+        }
         self.new_challenge(ws).await;
     }
 
     /// PostSlate on a classic socket.
     pub(super) async fn post(&mut self, ws: &mut WebSocket, msg: &Value) {
         let req = PostReq::from_json(msg);
-        let out = self.relay.post_slate(self.ip, req, true).await;
+        let mut scope = self.sig_scope();
+        let out = self.relay.post_slate_scoped(self.ip, req, true, &mut scope).await;
+        self.sig_failures += scope.failed;
         let frame = match out {
             PostOutcome::Stored { msgid, txid } => match txid {
                 Some(t) => json!({"type":"Ok","epicboxmsgid":msgid,"epicboxtxid":t}),
@@ -393,7 +408,9 @@ impl Session {
     /// CancelTx (3.1.0).
     pub(super) async fn cancel(&mut self, ws: &mut WebSocket, msg: &Value) {
         let key = self.key.clone();
-        let out = self.relay.cancel_tx(self.ip, key.as_deref(), msg).await;
+        let mut scope = self.sig_scope();
+        let out = self.relay.cancel_tx(self.ip, key.as_deref(), msg, &mut scope).await;
+        self.sig_failures += scope.failed;
         let frame = match out {
             CancelOutcome::Cancelled(t) => json!({"type":"TransactionCancelled","epicboxtxid":t}),
             CancelOutcome::Ok => ok(),

@@ -126,7 +126,7 @@ Per-IP limits group clients by prefix (`ipv4_prefix` 24, `ipv6_prefix` 48). Sour
 | `per_sender_cap` | 200 | One sender filling a mailbox |
 | `sockets_per_ip` | 256 | One prefix using all sockets |
 | `sockets_per_address` | 4 | Many sockets on one address |
-| `failed_sigs_per_min_per_ip` | 120 | Signature guessing, CPU burn on verification |
+| `failed_sigs_per_min_per_ip` | 120 | Signature guessing, CPU burn on verification. A socket is closed with 4003 after 8 failed signatures; a socket's first signed frame and re-proofs of a key it already proved are not refused by the prefix limits, so one client cannot lock out the others in its prefix |
 | `sig_checks_per_min_per_ip` | 1200 | CPU burn by valid signatures: Subscribe, Made and CancelTx each cost one check, a mux/1 Attach one per mailbox. Without it a few sockets can keep a core busy with valid Subscribes. A service that attaches many mailboxes from one address belongs in `shared_sources` |
 | `mux_mailboxes_per_socket` | 256 | One mux/1 socket attaching everything |
 | `mux_attach_per_frame` | 64 | Large attach frames |
@@ -134,7 +134,7 @@ Per-IP limits group clients by prefix (`ipv4_prefix` 24, `ipv6_prefix` 48). Sour
 | `mux_attach_frames_per_min` | 30 | Attach/resume churn; a prefix gets 8 times this across its sockets |
 | `ipv4_prefix` / `ipv6_prefix` | 24 / 48 | Sets how clients are grouped for per-IP limits |
 | `max_sockets` | 150000 | Total file descriptors and memory |
-| `shared_sources` | empty | Tor exits and the onion loopback being limited as one client |
+| `shared_sources` | empty | Tor exits and onion clients being limited as one client. Behind the shipped nginx onion setup, onion clients arrive as `fc00:dead:beef:4dad::<circuit>`: use `["fc00:dead:beef:4dad::/64"]`. Use `["127.0.0.1/32"]` only when tor connects straight to the relay with nothing in between |
 | `shared_multiplier` | 16 | Factor applied for `shared_sources` |
 | `mux_sockets_per_ip` | 64 | One prefix holding many mux/1 sockets |
 | `http_per_min_per_ip` | 1200 | `/v1` floods: each pulled mailbox costs a signature check and a database write |
@@ -153,7 +153,7 @@ new connections avoids that.
 
 - `/health`: the process is up and answering. Use it for liveness. It does not look at the store.
 - `/ready`: the store is writable. Use it for load balancer and orchestrator checks. It writes to the store at most once every 5 s and answers probes in between from that result. A failure means the disk is full or read-only, or the DB file is damaged. During a SIGTERM drain it may also report not ready.
-- `/metrics`: Prometheus text, metric names start with `epicbox_`. Look first at open sockets (against `max_sockets`), posts accepted and rejected (`epicbox_limit_refusals_total` by limit name shows which limit fires), store commit latency and batch size (`epicbox_store_commit_seconds`, `epicbox_store_commit_batch`), live data against `store.max_bytes` (`epicbox_store_used_bytes`), and federation deliveries and failures (`epicbox_forwards_total`). When `server.metrics_listen` is unset, it is served on `server.listen` to loopback peers whose request carries no `X-Forwarded-For`, so requests that came through the reverse proxy get 404. Set `server.metrics_listen` to serve it on a separate address instead, for example a private one a scraper on another host can reach.
+- `/metrics`: Prometheus text, metric names start with `epicbox_`. Look first at open sockets (against `max_sockets`), posts accepted and rejected (`epicbox_limit_refusals_total` by limit name shows which limit fires), store commit latency and batch size (`epicbox_store_commit_seconds`, `epicbox_store_commit_batch`), live data against `store.max_bytes` (`epicbox_store_used_bytes`), federation deliveries and failures (`epicbox_forwards_total`, with `result="unanswered"` for cancels a peer never answered), forwards given up on (`epicbox_forwards_dropped_total{peer,reason}`, reason `refused`, `policy`, `loop` or `unanswered`) and forwards that ran out their retention (`epicbox_forwards_expired_total`). Posts the federation allow/deny list refused show as `epicbox_posts_total{result="policy"}`. When `server.metrics_listen` is unset, it is served on `server.listen` to loopback peers whose request carries no `X-Forwarded-For`, so requests that came through the reverse proxy get 404. Set `server.metrics_listen` to serve it on a separate address instead, for example a private one a scraper on another host can reach.
 - `/status.json`: a small JSON summary for people and status pages: name, sockets, queue totals, uptime. It is public; it holds no per-address data. Queue totals are refreshed every 15 s, not per request.
 - `/.well-known/epicbox.json`: the info document wallets and peers read: software (no exact version), `server.name`, identity (`domain:port`), protocol versions, whether federation is on, the mux/1 and HTTPS features with the limits a client needs (the per-IP abuse limits are not published), `txcancel/1` when mux/1 and the 3.1.0 cancel are both on, and `epicbox-cancel/1` (the text its cancels may be signed over) when the 3.1.0 cancel is on.
 - `/` in a browser: a page for people who open the relay's address. It says what the relay is, shows the domain and port to enter in a wallet, and runs three checks from the visitor's browser every 30 s: `/health`, `/ready` and a websocket that must receive its first `Challenge`. It shows nothing beyond those routes and the info document, loads nothing from other hosts, and is sent only for `GET /` with `Accept: text/html`; every other plain GET still gets the one-line text. `server.landing_page = false` turns it off.
@@ -354,7 +354,7 @@ or day, or before it grows past `max_size_mb`, to
 `epicmail-<YYYYmmddTHHMMSS>Z.log`, gzips it in the background (`.log.gz`) when `compress` is
 on, and deletes all but the newest `keep` rotated files. A file left from an earlier hour or day
 is rotated when the relay starts. With `rotate = "daily"` and `keep = 14` the file holds about
-two weeks. Read it with `jq`, for example the life of one message:
+two weeks, fewer when size rotations add files: `keep` counts them too, so a trace log that passes `max_size_mb` each day keeps less than 14 days. Read it with `jq`, for example the life of one message:
 
 ```
 zcat -f /var/log/epicmail/epicmail*.log* | jq -c 'select(.id == "zyFkKokdcpfGjpz3TvudT8PcUmljLWez")'
@@ -404,7 +404,7 @@ Upgrade:
    mux/1 clients attach again with signatures.
 4. Check the startup line in the log and `/ready`.
 
-Roll back: stop the relay and put the old binary back. When the schema version did not change
+Roll back: stop the relay and put the old binary back. `tools/install.sh` keeps it as `/usr/local/bin/epicmail.prev` (next to the installed binary) when it replaces one: copy that file over `/usr/local/bin/epicmail`. When the schema version did not change
 (the release notes say when it does), start it on the same database. When it did, restore the
 backup from step 1 (messages posted since are lost), or `export` with the new binary and
 `import` with the old one: import ignores fields it does not know.

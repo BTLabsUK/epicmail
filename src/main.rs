@@ -56,6 +56,9 @@ fn main() -> Result<()> {
         Command::Serve => rt.block_on(serve(cfg)),
         Command::CheckConfig => {
             println!("{cfg:#?}");
+            if let Some(note) = cfg.allow_list_note() {
+                eprintln!("note: {note}");
+            }
             eprintln!("configuration ok");
             Ok(())
         }
@@ -103,10 +106,16 @@ async fn serve(cfg: Config) -> Result<()> {
         mux = cfg.protocol.mux,
         http_api = cfg.http_api.enabled,
         federation = cfg.federation.enabled,
+        allow = cfg.federation.allow.len(),
+        deny = cfg.federation.deny.len(),
+        deny_sender_hosts = cfg.federation.deny_sender_hosts.len(),
         retention_days = cfg.store.retention_days,
         max_bytes = cfg.store.max_bytes,
         "relay listening"
     );
+    if let Some(note) = cfg.allow_list_note() {
+        tracing::warn!("{note}");
+    }
     let mut listener = tokio::spawn(async move { axum::serve(main_listener, app).await });
     if let Some(addr) = cfg.server.metrics_listen {
         let l = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;

@@ -992,13 +992,13 @@ async fn signature_checks_have_a_budget_per_prefix() {
     assert_eq!(r["type"], "Error", "{r}");
     assert!(r["description"].as_str().unwrap().contains("Rate limit"), "{r}");
 
-    // The same prefix's mux/1 Attach is refused before any check runs.
-    let mut m = connect(&n).await;
-    recv_type(&mut m, "Challenge").await;
-    send(&mut m, json!({"type":"ClientDetails","wallet_version":"t","wallet_mode":"listener","protocol_version":"3.0.0","ext":["mux/1"]})).await;
-    let ok = recv(&mut m).await;
-    let mch = ok["challenge"].as_str().unwrap().to_string();
+    // The same prefix's mux/1 socket: its first signed frame is counted and not refused, and
+    // its next Attach for a mailbox it does not hold is refused before any check runs.
+    let (mut m, mch) = mux_open(&n).await;
     send(&mut m, json!({"type":"Attach","ref":"a1","mailboxes":[{"address":k.pk,"signature":k.sign(&mch)}]})).await;
+    assert_eq!(recv(&mut m).await["type"], "Attached");
+    let k2 = Key::new();
+    send(&mut m, json!({"type":"Attach","ref":"a2","mailboxes":[{"address":k2.pk,"signature":k2.sign(&mch)}]})).await;
     let r = recv(&mut m).await;
     assert_eq!(r["code"], "rate_limited", "{r}");
 }
@@ -1267,6 +1267,13 @@ async fn a_socket_that_missed_its_detached_can_no_longer_ack() {
     assert_eq!(d, json!({"type":"Detached","mailbox":bob.pk,"reason":"replaced"}), "{d}");
     assert_eq!(recv(&mut m).await, json!({"type":"Ok","ref":"k"}));
     assert_eq!(waiting(&n).await, 1, "the ack of a mailbox this socket no longer holds deleted mail");
+    // Its in-flight lease went back with the mailbox: the next holder gets the mail at once.
+    let (mut m2, ch2) = mux_open(&n).await;
+    send(&mut m2, json!({"type":"Attach","ref":"b","mailboxes":[{"address":bob.pk,"signature":bob.sign(&ch2)}]})).await;
+    assert_eq!(recv(&mut m2).await["type"], "Attached");
+    let again = recv(&mut m2).await;
+    assert_eq!(again["type"], "Mail", "{again}");
+    assert_eq!(again["id"], mail["id"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2369,9 +2376,13 @@ async fn the_26_11_5_client_handshake_is_unchanged() {
     assert_eq!(at["mailboxes"][0]["code"], "bad_signature", "{at}");
 }
 
-/// A peer that answers the first `busy` frames with Error `Busy` and the next with Ok.
-/// Returns its address and how many frames it has seen.
-async fn busy_peer(busy: usize) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+/// A peer that answers the first `busy` frames with an Error of the given kind and description
+/// and the next with Ok. Returns its address and how many frames it has seen.
+async fn erroring_peer(
+    busy: usize,
+    kind: &'static str,
+    description: &'static str,
+) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -2388,7 +2399,7 @@ async fn busy_peer(busy: usize) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsi
                     if matches!(m, Message::Text(_)) {
                         let n = count.fetch_add(1, Ordering::SeqCst);
                         let a = if n < busy {
-                            json!({"type":"Error","kind":"Busy","description":"busy"})
+                            json!({"type":"Error","kind":kind,"description":description})
                         } else {
                             json!({"type":"Ok"})
                         };
@@ -2406,7 +2417,7 @@ async fn busy_peer(busy: usize) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsi
 async fn a_busy_peer_is_retried_and_the_row_is_delivered() {
     let dir = tempfile::tempdir().unwrap();
     // Three Busy answers are the refusal limit: they must not drop the row.
-    let (peer, seen) = busy_peer(3).await;
+    let (peer, seen) = erroring_peer(3, "Busy", "busy").await;
     let url = format!("ws://{peer}");
     let a = start(dir.path(), "relaya.test", |c| {
         c.federation.peers.insert("busy.test:443".into(), url.clone());
@@ -2429,4 +2440,390 @@ async fn a_busy_peer_is_retried_and_the_row_is_delivered() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 4, "three Busy answers, then Ok");
+}
+
+// ---- per-socket signature failures ----
+
+/// The newest Challenge on `ws`: asks for one and reads up to a GetVersion sent behind it, so
+/// interval Challenges queued earlier are skipped.
+async fn latest_challenge(ws: &mut Ws) -> String {
+    send(ws, json!({"type":"Challenge"})).await;
+    send(ws, json!({"type":"GetVersion"})).await;
+    let mut last = None;
+    loop {
+        let v = recv(ws).await;
+        match v["type"].as_str() {
+            Some("Challenge") => last = v["str"].as_str().map(String::from),
+            Some("GetVersion") => return last.expect("no Challenge before GetVersion"),
+            _ => panic!("unexpected frame {v}"),
+        }
+    }
+}
+
+/// A Subscribe for `addr` signed by `signer` over a fresh challenge; returns the reply.
+async fn resubscribe(ws: &mut Ws, addr: &Key, signer: &Key, ver: &str) -> Value {
+    let ch = latest_challenge(ws).await;
+    send(ws, json!({"type":"Subscribe","address":addr.pk,"ver":ver,"signature":signer.sign(&ch)})).await;
+    recv(ws).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_clients_bad_signatures_cannot_lock_out_a_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| c.protocol.challenge_interval_s = 5).await;
+    let (k, alice) = (Key::new(), Key::new());
+    let mut b = connect(&n).await;
+    subscribe(&mut b, &k, "3.0.0").await;
+    assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+
+    // Another client on the same prefix signs wrongly: its socket is closed after 8 failures.
+    let mut failures = 0;
+    let mut first = true;
+    while failures < 130 {
+        let mut a = connect(&n).await;
+        let ch = recv_type(&mut a, "Challenge").await["str"].as_str().unwrap().to_string();
+        for _ in 0..8 {
+            let (x, wrong) = (Key::new(), Key::new());
+            send(&mut a, json!({"type":"Subscribe","address":x.pk,"ver":"3.0.0","signature":wrong.sign(&ch)})).await;
+            let r = recv(&mut a).await;
+            if r["kind"] == "InvalidSignature" {
+                failures += 1;
+            } else {
+                // Once the prefix is blocked only a socket's first signed frame is checked.
+                assert!(!first, "{r}");
+                assert!(r["description"].as_str().unwrap().contains("Rate limit"), "{r}");
+                break;
+            }
+        }
+        if first {
+            assert_eq!(failures, 8);
+            assert_eq!(recv(&mut a).await, json!({"closed": 4003}));
+            first = false;
+        }
+    }
+    assert!(n.relay.limiter.sig_blocked("127.0.0.1".parse().unwrap()).is_some(), "the prefix is blocked");
+
+    // The wallet that proved its key still passes its challenge round, ...
+    let ch = latest_challenge(&mut b).await;
+    send(&mut b, json!({"type":"Subscribe","address":k.pk,"ver":"3.0.0","signature":k.sign(&ch)})).await;
+    assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+    // ... a slate posted to it arrives, and its Made is accepted.
+    let mut p = connect(&n).await;
+    recv_type(&mut p, "Challenge").await;
+    send(&mut p, post_frame(&alice, "relay.test", &k, "relay.test", 1)).await;
+    assert_eq!(recv(&mut p).await["type"], "Ok");
+    let slate = recv_type(&mut b, "Slate").await;
+    let msgid = slate["epicboxmsgid"].as_str().unwrap().to_string();
+    send(&mut b, json!({"type":"Made","address":k.pk,"signature":k.sign(&msgid),"epicboxmsgid":msgid,"ver":"3.0.0"})).await;
+    assert_eq!(recv_type(&mut b, "Ok").await, json!({"type":"Ok"}));
+    assert_eq!(waiting(&n).await, 0);
+    // A new socket's first Subscribe is not refused either.
+    let mut c = connect(&n).await;
+    subscribe(&mut c, &Key::new(), "3.0.0").await;
+    assert_eq!(recv(&mut c).await, json!({"type":"Ok"}));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mux_socket_with_eight_bad_attach_entries_is_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (mut m, ch) = mux_open(&n).await;
+    for r in ["a", "b"] {
+        let list: Vec<Value> = (0..4)
+            .map(|_| {
+                let (x, wrong) = (Key::new(), Key::new());
+                json!({"address":x.pk,"signature":wrong.sign(&ch)})
+            })
+            .collect();
+        send(&mut m, json!({"type":"Attach","ref":r,"mailboxes":list})).await;
+    }
+    loop {
+        let v = recv(&mut m).await;
+        if v.get("closed").is_some() {
+            assert_eq!(v, json!({"closed": 4003}));
+            break;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_made_for_another_message_keeps_the_one_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut b = connect(&n).await;
+    subscribe(&mut b, &bob, "3.0.0").await;
+    assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    for i in 1..=2 {
+        send(&mut a, post_frame(&alice, "relay.test", &bob, "relay.test", i)).await;
+        assert_eq!(recv(&mut a).await["type"], "Ok");
+        if i == 1 {
+            let first = recv_type(&mut b, "Slate").await;
+            // A Made for a different message id is acknowledged and changes nothing here.
+            let other = "not-the-one";
+            send(&mut b, json!({"type":"Made","address":bob.pk,"signature":bob.sign(other),"epicboxmsgid":other,"ver":"3.0.0"})).await;
+            assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+            let c = recv_type(&mut b, "Challenge").await;
+            // The first message is still in flight: a Subscribe gets no second slate.
+            send(&mut b, json!({"type":"Subscribe","address":bob.pk,"ver":"3.0.0","signature":bob.sign(c["str"].as_str().unwrap())})).await;
+            assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+            let id = first["epicboxmsgid"].as_str().unwrap().to_string();
+            send(&mut b, json!({"type":"Made","address":bob.pk,"signature":bob.sign(&id),"epicboxmsgid":id,"ver":"3.0.0"})).await;
+            assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+        }
+    }
+    // Its own Made freed the slot: the next Subscribe is offered the second slate.
+    let c = recv_type(&mut b, "Challenge").await;
+    send(&mut b, json!({"type":"Subscribe","address":bob.pk,"ver":"3.0.0","signature":bob.sign(c["str"].as_str().unwrap())})).await;
+    assert_eq!(recv_type(&mut b, "Slate").await["type"], "Slate");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pending_cancel_ack_waits_for_its_own_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob, carol) = (Key::new(), Key::new(), Key::new());
+    let mut b = connect(&n).await;
+    subscribe(&mut b, &bob, "3.1.0").await;
+    assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    send(&mut a, post_tx_frame(&alice, "relay.test", &bob, "relay.test", TXID)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    recv_type(&mut b, "Slate").await;
+    send(&mut a, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":TXID,"signature":alice.sign(TXID)})).await;
+    assert_eq!(recv(&mut a).await["type"], "TransactionCancelled");
+    assert_eq!(recv_type(&mut b, "TransactionCancelled").await["epicboxtxid"], TXID);
+
+    // A failed Subscribe drops bob's key, and another key subscribes on the socket.
+    let r = resubscribe(&mut b, &bob, &alice, "3.1.0").await;
+    assert_eq!(r["kind"], "InvalidSignature", "{r}");
+    assert_eq!(resubscribe(&mut b, &carol, &carol, "3.1.0").await, json!({"type":"Ok"}));
+    // Bob proving his key again acknowledges the cancel, so it is not sent again.
+    assert_eq!(resubscribe(&mut b, &bob, &bob, "3.1.0").await, json!({"type":"Ok"}));
+    let mut b2 = connect(&n).await;
+    subscribe(&mut b2, &bob, "3.1.0").await;
+    assert_eq!(recv(&mut b2).await, json!({"type":"Ok"}));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn with_cancel_off_a_3_1_0_wallet_is_served_as_3_0_0() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| c.protocol.cancel = false).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut b = connect(&n).await;
+    subscribe(&mut b, &bob, "3.1.0").await;
+    assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+    send(&mut b, json!({"type":"GetVersion"})).await;
+    assert_eq!(recv(&mut b).await, json!({"type":"GetVersion","str":"3.0.0"}));
+
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    send(&mut a, post_frame(&alice, "relay.test", &bob, "relay.test", 1)).await;
+    assert_eq!(recv(&mut a).await["type"], "Ok");
+    let slate = recv_type(&mut b, "Slate").await;
+    let id = slate["epicboxmsgid"].as_str().unwrap().to_string();
+    send(&mut b, json!({"type":"Made","address":bob.pk,"signature":bob.sign(&id),"epicboxmsgid":id,"ver":"3.1.0"})).await;
+    assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
+    recv_type(&mut b, "Challenge").await;
+    assert_eq!(waiting(&n).await, 0);
+
+    // Nothing is delivered again on the next connection.
+    let mut b2 = connect(&n).await;
+    subscribe(&mut b2, &bob, "3.1.0").await;
+    assert_eq!(recv(&mut b2).await, json!({"type":"Ok"}));
+}
+
+/// The process-wide Prometheus recorder, installed on first use.
+fn metrics_handle() -> &'static metrics_exporter_prometheus::PrometheusHandle {
+    static H: std::sync::OnceLock<metrics_exporter_prometheus::PrometheusHandle> = std::sync::OnceLock::new();
+    H.get_or_init(|| epicmail::metrics::install().unwrap())
+}
+
+/// Sum of the series of `name` that carry every `key="value"` pair in `labels`.
+fn metric(name: &str, labels: &[(&str, &str)]) -> f64 {
+    metrics_handle()
+        .render()
+        .lines()
+        .filter(|l| l.starts_with(&format!("{name}{{")) || l.starts_with(&format!("{name} ")))
+        .filter(|l| labels.iter().all(|(k, v)| l.contains(&format!("{k}=\"{v}\""))))
+        .filter_map(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
+        .sum()
+}
+
+/// The queued forward rows of a relay for a peer, also those waiting out a short back-off
+/// (`forwards_due` hides rows that have expired at the time it is given, so not `i64::MAX`).
+async fn queued_forwards(n: &Node, peer: &str) -> Vec<epicmail::store::ForwardRow> {
+    n.relay.store.forwards_due(peer, now_ms() + 120_000, 100).await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peers_temporary_errors_keep_the_row_queued_without_counting_attempts() {
+    metrics_handle();
+    let dir = tempfile::tempdir().unwrap();
+    // Epicmail's own answer for a full mailbox, sent as InvalidRequest, more often than the
+    // refusal limit.
+    let (peer, seen) = erroring_peer(usize::MAX, "InvalidRequest", "Recipient mailbox is full; try again later.").await;
+    let url = format!("ws://{peer}");
+    let a = start(dir.path(), "relaya.test", |c| {
+        c.federation.peers.insert("full.test:443".into(), url.clone());
+        c.test.forward_backoff_ms = 10;
+    })
+    .await;
+    let before = metric("epicbox_forwards_total", &[("result", "busy")]);
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut ws = connect(&a).await;
+    recv_type(&mut ws, "Challenge").await;
+    send(&mut ws, post_frame(&alice, "relaya.test", &bob, "full.test", 1)).await;
+    assert_eq!(recv(&mut ws).await["type"], "Ok");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while seen.load(std::sync::atomic::Ordering::SeqCst) < 5 {
+        a.relay.forward_notify.notify_one();
+        assert!(std::time::Instant::now() < deadline, "peer saw {:?} frames", seen);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let rows = queued_forwards(&a, "full.test:443").await;
+    assert_eq!(rows.len(), 1, "the row is still queued after five temporary answers");
+    assert_eq!(rows[0].attempts, 0, "no attempt was counted");
+    assert!(metric("epicbox_forwards_total", &[("result", "busy")]) >= before + 5.0);
+}
+
+/// A stock-like peer: greets with a Challenge, answers a PostSlate with Ok and stays silent to
+/// anything else (it has no `CancelTx` case). Returns its address and the PostSlate count.
+async fn silent_to_cancels_peer() -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let posts = Arc::new(AtomicUsize::new(0));
+    let count = posts.clone();
+    tokio::spawn(async move {
+        loop {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let count = count.clone();
+            tokio::spawn(async move {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else { return };
+                let _ = ws.send(Message::Text(json!({"type":"Challenge","str":"c"}).to_string().into())).await;
+                while let Some(Ok(m)) = ws.next().await {
+                    if let Message::Text(t) = m {
+                        let v: Value = serde_json::from_str(&t).unwrap_or_default();
+                        if v["type"] == "PostSlate" {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            let _ = ws.send(Message::Text(json!({"type":"Ok"}).to_string().into())).await;
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    (addr, posts)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unanswered_cancel_is_dropped_and_does_not_hold_the_peer_back() {
+    use epicmail::store::{ForwardKind, NewForward};
+    metrics_handle();
+    let dir = tempfile::tempdir().unwrap();
+    let (peer, posts) = silent_to_cancels_peer().await;
+    let url = format!("ws://{peer}");
+    let a = start(dir.path(), "relaya.test", |c| {
+        c.federation.peers.insert("stock.test:443".into(), url.clone());
+        c.federation.timeout_s = 1;
+    })
+    .await;
+    let before = metric("epicbox_forwards_total", &[("result", "unanswered")]);
+    let now = now_ms();
+    let cancel = json!({"type":"CancelTx","address":"x","epicboxtxid":"t","signature":"s"});
+    a.relay
+        .store
+        .put_forward(NewForward {
+            peer: "stock.test:443".into(),
+            kind: ForwardKind::CancelTx,
+            frame: cancel.to_string(),
+            txid: None,
+            tx_keys: vec![],
+            created_at: now,
+            expires_at: now + 3_600_000,
+            attempts: 0,
+        })
+        .await
+        .unwrap();
+    a.relay.forward_notify.notify_one();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !queued_forwards(&a, "stock.test:443").await.is_empty() {
+        assert!(std::time::Instant::now() < deadline, "the unanswered cancel is still queued");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(metric("epicbox_forwards_total", &[("result", "unanswered")]) >= before + 1.0);
+
+    // A slate for the same peer goes out at once, not after a back-off (the first is 10 s).
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut ws = connect(&a).await;
+    recv_type(&mut ws, "Challenge").await;
+    send(&mut ws, post_frame(&alice, "relaya.test", &bob, "stock.test", 1)).await;
+    assert_eq!(recv(&mut ws).await["type"], "Ok");
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    while posts.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        assert!(std::time::Instant::now() < deadline, "the slate waited behind a back-off");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_post_the_allow_list_refuses_is_counted_as_policy_with_the_usual_answer() {
+    metrics_handle();
+    let dir = tempfile::tempdir().unwrap();
+    let a = start(dir.path(), "relaya.test", |c| c.federation.allow = vec!["only.example".into()]).await;
+    let policy = || metric("epicbox_posts_total", &[("result", "policy")]);
+    let before = policy();
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut ws = connect(&a).await;
+    recv_type(&mut ws, "Challenge").await;
+    send(&mut ws, post_frame(&alice, "relaya.test", &bob, "other.example", 1)).await;
+    let r = recv(&mut ws).await;
+    assert_eq!(r["type"], "Error", "{r}");
+    assert_eq!(r["kind"], "InvalidRequest", "{r}");
+    assert_eq!(r["description"], "Forwarding to other.example:443 is not allowed.", "{r}");
+    assert!(policy() >= before + 1.0, "posts_total{{result=\"policy\"}} did not rise");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pull_signed_for_an_alias_verifies_and_other_names_do_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |c| {
+        c.server.aliases = vec!["alias.test".into(), "other-port.test:8443".into()];
+    })
+    .await;
+    let bob = Key::new();
+    let ch = || format!("ebh-{}-{:016x}", now_ms() / 1000, rand::random::<u64>());
+    let pull = |ch: &str, signed: String| {
+        json!({"mailboxes":[{"address":bob.pk,"challenge":ch,"signature":bob.sign(&signed)}],"wait":0})
+    };
+
+    // The alias, with the relay's port.
+    let c1 = ch();
+    let (st, v) = http(&n, "POST", "/v1/pull", Some(pull(&c1, format!("{c1}@alias.test:443")))).await;
+    assert_eq!(st, 200, "{v}");
+    assert!(v["mailboxes"][0].get("error").is_none(), "{v}");
+    // Replaying it fails: the challenge is used.
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(pull(&c1, format!("{c1}@alias.test:443")))).await;
+    assert_eq!(v["mailboxes"][0]["error"], "challenge was already used", "{v}");
+
+    // An alias with its own port signs for that port, not the relay's.
+    let c2 = ch();
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(pull(&c2, format!("{c2}@other-port.test:443")))).await;
+    assert_eq!(v["mailboxes"][0]["error"], "signature does not verify", "{v}");
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(pull(&c2, format!("{c2}@other-port.test:8443")))).await;
+    assert!(v["mailboxes"][0].get("error").is_none(), "{v}");
+
+    // A name that is neither the primary nor an alias fails, and the challenge is not burnt.
+    let c3 = ch();
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(pull(&c3, format!("{c3}@other.test:443")))).await;
+    assert_eq!(v["mailboxes"][0]["error"], "signature does not verify", "{v}");
+    // The primary name still works.
+    let (_, v) = http(&n, "POST", "/v1/pull", Some(pull(&c3, proof(&c3, "relay.test")))).await;
+    assert!(v["mailboxes"][0].get("error").is_none(), "{v}");
 }

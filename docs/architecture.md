@@ -73,14 +73,22 @@ peer's `Challenge`, sends the frame and reads until `Ok`, `TransactionCancelled`
 Peer names are resolved by the relay, and each address is checked: private, loopback,
 link-local and other special ranges are refused unless `federation.allow_private` is set. The
 TCP connection goes to the checked address and TLS checks the certificate against the peer's
-domain. A failed attempt is retried with exponential backoff from 5 s up to 1 hour. A peer that
-answers `Error` three times for one frame has refused it, and the row is dropped. Two answers are
-not refusals: `Error` with kind `Busy` (the upstream relay when overloaded) and any `Error` whose
-description starts `Rate limit exceeded` (what Epicmail sends). They make the peer wait its
-backoff like an unreachable one, are not counted toward the three, and leave the row queued
-until it expires. Rows expire with the same retention as messages.
+domain. If a name resolves to several public addresses, they are tried in order until one
+connects. A failed attempt is retried with exponential backoff from 5 s up to 1 hour. A peer that
+answers `Error` three times for one frame has refused it, and the row is dropped. Some answers
+are not refusals: `Error` with kind `Busy` (the upstream relay when overloaded), kind
+`UnknownError`, a description starting `Rate limit exceeded` or `Too many messages from this
+sender`, and any description containing "try again" (case-insensitive), which covers Epicmail's
+own "Recipient mailbox is full; try again later.", "Relay storage is full; try again later." and
+"Internal error; try again.". They make the peer wait its backoff like an unreachable one, are not
+counted toward the three, and leave the row queued until it expires. Rows expire with the same
+retention as messages.
 
-A 3.1.0 `CancelTx` whose other party is on another relay is forwarded the same way.
+A 3.1.0 `CancelTx` whose other party is on another relay is forwarded the same way, with one
+difference: the stock relay has no `canceltx` frame and never answers it. A `CancelTx` that gets
+no answer within `federation.timeout_s` after the frame was sent is dropped (it is best effort;
+the wallet already has its answer) and does not put the peer into backoff. It is counted as
+`epicbox_forwards_total{result="unanswered"}`.
 
 ## Group commit
 
@@ -111,6 +119,21 @@ writer's latency and batch size.
 - Memory: mux/1 resume tokens outlive their sockets, so the mailboxes they hold are capped
   (`mux_token_mailboxes`); the oldest tokens go first.
 - In the store: `queue_cap` and `per_sender_cap`.
+
+Signature limits are per prefix, so one client's bad signatures must not lock out the wallets
+that share its prefix (a /24, a /48 or a Tor exit):
+
+- A socket is closed with code 4003 ("Too many failed signatures.") after 8 failed signature
+  checks on it (`MAX_SOCKET_SIG_FAILURES`): classic Subscribe, Made, PostSlate and CancelTx, and
+  mux/1 Attach entries, PostSlate and CancelTx. A `wrong_host` Attach entry and a PostSlate
+  with no `str` or `signature` are not failures. The prefix counters keep counting them.
+- A re-proof is exempt from the prefix's `failed_sigs` block and `sig_checks` budget: a classic
+  Subscribe for the key the socket already proved, a Made (always signed by that key), and a
+  mux/1 Attach entry for a mailbox the socket already holds. The socket's frame budget bounds
+  them.
+- A socket's first signed frame (Subscribe, Attach, PostSlate or CancelTx) is not refused by
+  the block or the budget, but its checks and failures are counted. Later frames for a new key
+  are refused while the prefix is blocked. `/v1` keeps the old behaviour.
 
 A refusal increments `epicbox_limit_refusals_total{limit=...}` and writes a sampled `info`
 line with the limit and the client's network prefix (`Limiter::refused`). Rate refusals tell the client

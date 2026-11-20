@@ -114,6 +114,8 @@ The defaults fit an exchange. The file is a copy of [packaging/epicmail.example.
 - `limits.sockets_per_address` (4): a fifth listener on the same address closes the oldest.
 - `store.retention_days` (7): the minimum, and the same as the old Mongo expiry.
 - `protocol.cancel` (true): see section 3 before changing it.
+- `federation.allow` (empty): leave it empty. The relay forwards to any public relay, and any entry refuses every relay not listed.
+- `limits.shared_sources` (empty): a relay that forwards mail to you is limited like any client (`limits.posts_per_min_per_ip`, 240 a minute per /24). A busy peer relay can be listed here. Since 0.1.13 a rate-limited forward from an Epicmail peer stays queued and is retried, so it is delayed, not lost.
 
 After an edit, run `check-config` again and `sudo systemctl restart epicmail`.
 </details>
@@ -371,7 +373,7 @@ The first command prints a number above 0 when the kernel is in the pool. The se
 
 The relay sends a cancel to a wallet only when the wallet subscribed as protocol 3.1.0. epic-wallet 4.1.0 subscribes as 3.0.0 and has no handler for relay cancels, so moving to Epicmail does not change how its cancels behave. Epicmail accepts `protocol.cancel = true` (the default) for wallets that do not use it.
 
-If the exchange wallet is ever replaced by a build that subscribes as 3.1.0, check what it does on receiving a cancel first. A relay cancel on a deposit is only safe when the wallet checks the chain before it acts on it. The trace log (`/var/log/epicmail/epicmail.log`) records the protocol version of each subscribing wallet. To switch relay cancels off, set `cancel = false` under `[protocol]` in `/etc/epicmail/epicmail.toml` and restart.
+If the exchange wallet is ever replaced by a build that subscribes as 3.1.0, check what it does on receiving a cancel first. A relay cancel on a deposit is only safe when the wallet checks the chain before it acts on it. The trace log (`/var/log/epicmail/epicmail.log`) records the protocol version of each subscribing wallet. To switch relay cancels off, set `cancel = false` under `[protocol]` in `/etc/epicmail/epicmail.toml` and restart. With `cancel = false` the relay answers GetVersion with 3.0.0 whatever `getversion` says, and treats a Made or Subscribe announcing 3.1.0 as 3.0.0.
 
 ## 4. What improves with LEPIC and BT Wallet
 
