@@ -8,7 +8,7 @@ release reads the data of every earlier one.
 Forwarding:
 - A peer relay's temporary answers keep a forwarded slate queued and retried: Busy, a rate
   limit, a full mailbox or store, too many waiting messages from one sender, and an internal
-  error. Before, all but Busy and the rate limit dropped the slate after three attempts.
+  error. In 0.1.11 each of these answers dropped the slate after three attempts.
 - A CancelTx forwarded to a relay that does not answer it (the stock Node relay) is dropped
   after one attempt and no longer holds back slates queued for that relay.
 - A forward tries each public address of the peer in turn, not only the first.
