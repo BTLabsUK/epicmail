@@ -112,6 +112,21 @@ writer's latency and batch size.
   (`mux_token_mailboxes`); the oldest tokens go first.
 - In the store: `queue_cap` and `per_sender_cap`.
 
+Signature limits are per prefix, so one client's bad signatures must not lock out the wallets
+that share its prefix (a /24, a /48 or a Tor exit):
+
+- A socket is closed with code 4003 ("Too many failed signatures.") after 8 failed signature
+  checks on it (`MAX_SOCKET_SIG_FAILURES`): classic Subscribe, Made, PostSlate and CancelTx, and
+  mux/1 Attach entries, PostSlate and CancelTx. A `wrong_host` Attach entry and a PostSlate
+  with no `str` or `signature` are not failures. The prefix counters keep counting them.
+- A re-proof is exempt from the prefix's `failed_sigs` block and `sig_checks` budget: a classic
+  Subscribe for the key the socket already proved, a Made (always signed by that key), and a
+  mux/1 Attach entry for a mailbox the socket already holds. The socket's frame budget bounds
+  them.
+- A socket's first signed frame (Subscribe, Attach, PostSlate or CancelTx) is not refused by
+  the block or the budget, but its checks and failures are counted. Later frames for a new key
+  are refused while the prefix is blocked. `/v1` keeps the old behaviour.
+
 A refusal increments `epicbox_limit_refusals_total{limit=...}` and writes a sampled `info`
 line with the limit and the client's network prefix (`Limiter::refused`). Rate refusals tell the client
 when to retry: in the error text on websockets, in `Retry-After` on `/v1`.

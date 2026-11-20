@@ -10,17 +10,24 @@ use std::net::IpAddr;
 
 use serde_json::{json, Value};
 
-use super::{CancelOutcome, Cmd, Refusal, Relay, CANCEL_SIG_PREFIX};
+use super::{CancelOutcome, Cmd, Refusal, Relay, SigScope, CANCEL_SIG_PREFIX};
 use crate::address::parse_address;
 use crate::clock::now_ms;
 use crate::ids::{is_txid, rand_id};
+use crate::limits::{SigGate, SigRefused};
 use crate::logging::short;
 use crate::sig;
 use crate::store::{ForwardKind, NewForward};
 
 impl Relay {
     /// CancelTx. `socket_key` is the key this socket proved with Subscribe, if any.
-    pub async fn cancel_tx(&self, ip: IpAddr, socket_key: Option<&str>, msg: &Value) -> CancelOutcome {
+    pub async fn cancel_tx(
+        &self,
+        ip: IpAddr,
+        socket_key: Option<&str>,
+        msg: &Value,
+        scope: &mut SigScope,
+    ) -> CancelOutcome {
         use CancelOutcome::Refused as R;
         let requester = match socket_key {
             Some(k) => Some(k.to_string()),
@@ -38,11 +45,10 @@ impl Relay {
         let Some(signature) = msg.get("signature").and_then(|s| s.as_str()) else {
             return R(Refusal::Invalid("InvalidRequest", "Missing signature.".into()));
         };
-        if let Some(s) = self.limiter.sig_blocked(ip) {
-            return R(Refusal::RateLimited(s));
-        }
-        // The domain-separated form, then the bare one: up to two checks.
-        if let Err(s) = self.limiter.sig_checks(ip, 2) {
+        // The domain-separated form, then the bare one: up to two checks. The socket's first
+        // signed frame is counted and not refused.
+        let gate = if scope.first { SigGate::Record } else { SigGate::Enforce };
+        if let Err(SigRefused::Blocked(s) | SigRefused::Checks(s)) = self.limiter.sig_gate(ip, 2, gate) {
             return R(Refusal::RateLimited(s));
         }
         // Wallets and the reference relay sign the bare txid, and relays forward that signature
@@ -56,6 +62,7 @@ impl Relay {
             !separated && self.cfg.protocol.accept_bare_cancel && sig::verify(&requester, &txid, signature).is_ok();
         if !separated && !bare_ok {
             self.limiter.sig_failed(ip);
+            scope.failed += 1;
             return R(Refusal::Invalid("InvalidSignature", "Invalid signature.".into()));
         }
         let info = match self.store.tx_info(&txid).await {

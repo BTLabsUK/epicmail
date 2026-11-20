@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 
-use super::{PostOutcome, PostReq, Refusal, Relay};
+use super::{PostOutcome, PostReq, Refusal, Relay, SigScope};
 use crate::address::{parse_address, EpicboxAddress};
 use crate::clock::now_ms;
 use crate::ids::{is_txid, rand_id};
@@ -37,13 +37,25 @@ struct Slate {
 impl Relay {
     /// Validate, store or queue a slate. `allow_cancel` accepts the 3.1.0 fields.
     pub async fn post_slate(&self, ip: IpAddr, req: PostReq, allow_cancel: bool) -> PostOutcome {
+        self.post_slate_scoped(ip, req, allow_cancel, &mut SigScope::default()).await
+    }
+
+    /// `post_slate` for a websocket frame: `scope` says whether this is the socket's first signed
+    /// frame and collects the failed signatures.
+    pub async fn post_slate_scoped(
+        &self,
+        ip: IpAddr,
+        req: PostReq,
+        allow_cancel: bool,
+        scope: &mut SigScope,
+    ) -> PostOutcome {
         let who = (tracing::level_filters::LevelFilter::current() >= tracing::Level::DEBUG).then(|| {
             let addr = |a: &Option<String>| a.as_deref().map(short_addr).unwrap_or_default();
             (addr(&req.from), addr(&req.to), req.str_.as_ref().map_or(0, String::len))
         });
         let has_txid = allow_cancel && self.cfg.protocol.cancel && req.txid.is_some();
         let size = req.str_.as_ref().map_or(0, String::len);
-        let (out, peer) = self.post_slate_inner(ip, req, allow_cancel).await;
+        let (out, peer) = self.post_slate_inner(ip, req, allow_cancel, scope).await;
         let label = match &out {
             PostOutcome::Stored { .. } => "stored",
             PostOutcome::Forwarded { .. } => "forwarded",
@@ -100,8 +112,14 @@ impl Relay {
     }
 
     /// The outcome, and for a forward the peer relay it is queued for.
-    async fn post_slate_inner(&self, ip: IpAddr, req: PostReq, allow_cancel: bool) -> (PostOutcome, Option<String>) {
-        let slate = match self.check_post(ip, req, allow_cancel) {
+    async fn post_slate_inner(
+        &self,
+        ip: IpAddr,
+        req: PostReq,
+        allow_cancel: bool,
+        scope: &mut SigScope,
+    ) -> (PostOutcome, Option<String>) {
+        let slate = match self.check_post(ip, req, allow_cancel, scope) {
             Ok(s) => s,
             Err(r) => return (PostOutcome::Refused(r), None),
         };
@@ -126,12 +144,22 @@ impl Relay {
 
     /// Every check that needs no store: limits, sizes, addresses, signatures and the
     /// destination inside the slate.
-    fn check_post(&self, ip: IpAddr, req: PostReq, allow_cancel: bool) -> Result<Slate, Refusal> {
+    fn check_post(
+        &self,
+        ip: IpAddr,
+        req: PostReq,
+        allow_cancel: bool,
+        scope: &mut SigScope,
+    ) -> Result<Slate, Refusal> {
         let lim = &self.cfg.limits;
         let body_len = req.str_.as_ref().map(|s| s.len()).unwrap_or(0);
         self.limiter.post_ip(ip, body_len).map_err(Refusal::RateLimited)?;
-        if let Some(s) = self.limiter.sig_blocked(ip) {
-            return Err(Refusal::RateLimited(s));
+        // The socket's first signed frame is not refused for failures other sockets of the prefix
+        // made: that costs the sender a connection of its own.
+        if !scope.first {
+            if let Some(s) = self.limiter.sig_blocked(ip) {
+                return Err(Refusal::RateLimited(s));
+            }
         }
         if body_len > lim.max_str_bytes {
             return Err(Refusal::Invalid(
@@ -164,17 +192,19 @@ impl Relay {
         if !from.public_key_valid() || !to.public_key_valid() {
             return Err(wrong());
         }
+        // No signature to check, so no failed one: the same answer, not counted.
         let (Some(body), Some(signature)) = (req.str_.clone(), req.signature.clone()) else {
-            self.limiter.sig_failed(ip);
             return Err(Refusal::Invalid("InvalidRequest", "Error postslate signature.".into()));
         };
         if sig::verify(&from.public_key, &body, &signature).is_err() {
             self.limiter.sig_failed(ip);
+            scope.failed += 1;
             return Err(Refusal::Invalid("InvalidRequest", "Error postslate signature.".into()));
         }
         if let (Some(t), Some(ts)) = (&txid, &txidsig) {
             if sig::verify(&from.public_key, t, ts).is_err() {
                 self.limiter.sig_failed(ip);
+                scope.failed += 1;
                 return Err(Refusal::Invalid("InvalidSignature", "Invalid epicboxtxid signature.".into()));
             }
         }

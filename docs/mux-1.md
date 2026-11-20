@@ -40,7 +40,7 @@ A client that does not ask for mux/1 sees plain 3.0.0. A relay that does not off
 | `cancel_failed` | UnknownError | store error during `CancelTx`; nothing was recorded and it can be retried (txcancel/1) |
 | `internal` | UnknownError | store error; the frame had no effect and can be retried |
 
-A mux/1 frame type sent on a socket that did not negotiate mux/1 is ignored, as the classic protocol ignores unknown types. A frame larger than the frame limit closes the socket.
+A mux/1 frame type sent on a socket that did not negotiate mux/1 is ignored, as the classic protocol ignores unknown types. A frame larger than the frame limit closes the socket. A socket that sends 8 signatures that do not verify (Attach entries, PostSlate, CancelTx) is closed with code 4003, "Too many failed signatures.". A `wrong_host` entry does not count. An Attach entry for a mailbox the socket already holds, and the socket's first signed frame, are not refused by the per-prefix signature limits.
 
 ## 2. Negotiation
 
