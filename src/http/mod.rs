@@ -74,12 +74,21 @@ fn canon(ip: IpAddr) -> IpAddr {
     }
 }
 
+/// Set once the untrusted X-Forwarded-For warning has been logged.
+static XFF_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The client address. X-Forwarded-For is read only when the connection comes from a trusted
 /// proxy, and then from the right: the first address that is not a trusted proxy is the client.
 pub fn client_ip(peer: SocketAddr, headers: &HeaderMap, trusted: &[IpNet]) -> IpAddr {
     let mut ip = canon(peer.ip());
     let is_trusted = |ip: &IpAddr| trusted.iter().any(|n| n.contains(ip));
     if !is_trusted(&ip) {
+        if headers.contains_key("x-forwarded-for") && !XFF_WARNED.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                peer_net = %crate::limits::ip_prefix(ip, 24, 48),
+                "X-Forwarded-For ignored from an untrusted peer; add the proxy to server.trusted_proxies if it is yours (logged once)"
+            );
+        }
         return ip;
     }
     let hops: Vec<&str> =
