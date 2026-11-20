@@ -306,8 +306,9 @@ impl From<anyhow::Error> for Failure {
     }
 }
 
-/// The URL and the vetted socket address for a peer.
-async fn target(relay: &Relay, peer: &str) -> Result<(String, Option<SocketAddr>)> {
+/// The URL and the vetted socket addresses for a peer, in the resolver's order. Only addresses
+/// that pass `is_public` (or any, with `allow_private`) are returned; none left is an error.
+async fn target(relay: &Relay, peer: &str) -> Result<(String, Option<Vec<SocketAddr>>)> {
     let fed = &relay.cfg.federation;
     if let Some(url) = fed.peers.get(peer) {
         return Ok((url.clone(), None));
@@ -318,14 +319,14 @@ async fn target(relay: &Relay, peer: &str) -> Result<(String, Option<SocketAddr>
         bail!("peer is this relay");
     }
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((domain, port)).await.context("resolve")?.collect();
-    let ok = addrs.iter().find(|a| fed.allow_private || is_public(a.ip())).copied();
-    let Some(addr) = ok else {
+    let ok: Vec<SocketAddr> = addrs.iter().filter(|a| fed.allow_private || is_public(a.ip())).copied().collect();
+    if ok.is_empty() {
         if addrs.is_empty() {
             bail!("no addresses");
         }
         bail!("peer resolves only to non-public addresses");
-    };
-    Ok((format!("wss://{domain}:{port}"), Some(addr)))
+    }
+    Ok((format!("wss://{domain}:{port}"), Some(ok)))
 }
 
 /// What a peer's `Error` frame means. Passing answers are `Busy` (the stock relay when
@@ -358,22 +359,36 @@ async fn deliver(
 ) -> Result<(), Failure> {
     let (url, addr) = target(relay, peer).await?;
     let parsed = url::Url::parse(&url).map_err(|e| Failure::Transport(format!("url: {e}")))?;
-    let addr = match addr {
+    let addrs = match addr {
         Some(a) => a,
         None => {
             let host = parsed.host_str().ok_or_else(|| Failure::Transport("url has no host".into()))?;
             let port = parsed.port_or_known_default().unwrap_or(443);
-            tokio::net::lookup_host((host, port))
+            let a: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
                 .await
                 .map_err(|e| Failure::Transport(format!("resolve: {e}")))?
-                .next()
-                .ok_or_else(|| Failure::Transport("no addresses".into()))?
+                .collect();
+            if a.is_empty() {
+                return Err(Failure::Transport("no addresses".into()));
+            }
+            a
         }
     };
-    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
-        .await
-        .map_err(|_| Failure::Transport("connect timed out".into()))?
-        .map_err(|e| Failure::Transport(format!("connect: {e}")))?;
+    // The addresses in order, until one connects; the whole attempt is bounded by the caller's
+    // `federation.timeout_s`.
+    let mut last = Failure::Transport("no addresses".into());
+    let mut conn = None;
+    for addr in addrs {
+        match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
+            Ok(Ok(t)) => {
+                conn = Some(t);
+                break;
+            }
+            Ok(Err(e)) => last = Failure::Transport(format!("connect: {e}")),
+            Err(_) => last = Failure::Transport("connect timed out".into()),
+        }
+    }
+    let Some(tcp) = conn else { return Err(last) };
     let _ = tcp.set_nodelay(true);
     let mut cfg = WebSocketConfig::default();
     cfg.max_message_size = Some(relay.cfg.limits.max_frame_bytes);
