@@ -193,6 +193,7 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
         // refuses: drop them instead of connecting.
         if !relay.peer_allowed(peer) {
             metrics::counter!("epicbox_forwards_total", "result" => "policy").increment(rows.len() as u64);
+            dropped(peer, "policy", rows.len() as u64);
             crate::sampled!(warn, peer, rows = rows.len(), "dropping forwards the federation policy refuses");
             for row in rows {
                 if let Err(e) = relay.store.forward_failed(row.id, now_ms(), "refused by federation policy", true).await
@@ -236,6 +237,9 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
                     relay.traffic.add(crate::traffic::Count::ForwardsFailed, 1);
                     // The text is the peer's: logged escaped, so it cannot add lines to our log.
                     crate::sampled!(warn, peer, error = ?e, attempts, dropped = drop, "peer refused forward");
+                    if drop {
+                        dropped(peer, "refused", 1);
+                    }
                     relay.store.forward_failed(row.id, now_ms() + backoff_ms(attempts), &e, drop).await
                 }
                 Err(Failure::Busy(e)) => {
@@ -252,6 +256,7 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
                 }
                 Err(Failure::Loop) => {
                     metrics::counter!("epicbox_forwards_total", "result" => "loop").increment(1);
+                    dropped(peer, "loop", 1);
                     crate::sampled!(warn, peer, "forward dropped: the peer is this relay under another name");
                     relay.store.forward_failed(row.id, now_ms(), "forward loop", true).await
                 }
@@ -259,6 +264,7 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
                     // The peer is up (it greeted us) and does not know this frame: drop the cancel
                     // without holding the peer's other rows back.
                     metrics::counter!("epicbox_forwards_total", "result" => "unanswered").increment(1);
+                    dropped(peer, "unanswered", 1);
                     tracing::debug!(peer, kind = ?row.kind, result = "unanswered", attempts, "forward dropped: no answer to a cancel");
                     relay.store.forward_failed(row.id, now_ms(), "no answer", true).await
                 }
@@ -284,6 +290,12 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
             }
         }
     }
+}
+
+/// Count forward rows the relay gave up on, by peer and why: `refused`, `policy`, `loop` or
+/// `unanswered`. Rows that expire are counted by the retention sweep.
+fn dropped(peer: &str, reason: &'static str, n: u64) {
+    metrics::counter!("epicbox_forwards_dropped_total", "peer" => peer.to_string(), "reason" => reason).increment(n);
 }
 
 enum Failure {

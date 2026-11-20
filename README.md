@@ -305,7 +305,7 @@ as a Tor service, go in `limits.shared_sources`.
 | Data | Kept until |
 |---|---|
 | Waiting slate | Acknowledged, or `store.retention_days` after posting (default and minimum 7) |
-| Queued forward | Delivered, refused three times, or the retention period |
+| Queued forward | Delivered, refused three times, or the retention period (a `CancelTx` the peer never answers is dropped after one try) |
 | Cancel record | The retention period |
 | mux/1 resume token, rate-limit state | Memory only |
 
