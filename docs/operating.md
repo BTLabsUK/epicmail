@@ -404,7 +404,7 @@ Upgrade:
    mux/1 clients attach again with signatures.
 4. Check the startup line in the log and `/ready`.
 
-Roll back: stop the relay and put the old binary back. When the schema version did not change
+Roll back: stop the relay and put the old binary back. `tools/install.sh` keeps it as `/usr/local/bin/epicmail.prev` (next to the installed binary) when it replaces one: copy that file over `/usr/local/bin/epicmail`. When the schema version did not change
 (the release notes say when it does), start it on the same database. When it did, restore the
 backup from step 1 (messages posted since are lost), or `export` with the new binary and
 `import` with the old one: import ignores fields it does not know.

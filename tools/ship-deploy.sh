@@ -29,7 +29,7 @@ say() { echo "[host] $*"; }
 sha() { sudo sha256sum "$1" | cut -c1-12; }
 
 LISTEN=$(sudo awk -F'"' '/^[[:space:]]*listen[[:space:]]*=/{print $2; exit}' "$CONF")
-URL=http://${LISTEN:-127.0.0.1:13481}
+URL=http://${LISTEN:-127.0.0.1:3423}
 
 # health SINCE_EPOCH EXPECT_SHA: 0 healthy, 1 not
 health() {
