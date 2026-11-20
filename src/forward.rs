@@ -308,10 +308,19 @@ async fn target(relay: &Relay, peer: &str) -> Result<(String, Option<SocketAddr>
     Ok((format!("wss://{domain}:{port}"), Some(addr)))
 }
 
-/// What a peer's `Error` frame means. `Busy` (the upstream relay when overloaded) and a rate
-/// limit (the text Epicmail itself sends) are passing; any other error is a refusal.
+/// What a peer's `Error` frame means. Passing answers are `Busy` (the stock relay when
+/// overloaded), `UnknownError` (an internal failure), a rate limit, and the temporary answers
+/// Epicmail itself sends ("Recipient mailbox is full; try again later.", "Too many messages from
+/// this sender ...", "Relay storage is full; try again later."): the row stays queued. Any other
+/// error is a refusal.
 fn error_failure(kind: Option<&str>, description: String) -> Failure {
-    let busy = kind.is_some_and(|k| k.eq_ignore_ascii_case("busy")) || description.starts_with("Rate limit exceeded");
+    let kind_is = |k: &str| kind.is_some_and(|x| x.eq_ignore_ascii_case(k));
+    let lower = description.to_ascii_lowercase();
+    let busy = kind_is("busy")
+        || kind_is("unknownerror")
+        || description.starts_with("Rate limit exceeded")
+        || description.starts_with("Too many messages from this sender")
+        || lower.contains("try again");
     if busy {
         Failure::Busy(description)
     } else {
@@ -419,6 +428,24 @@ mod tests {
         assert!(matches!(f(Some("InvalidRequest"), "bad signature"), Failure::Refused(_)));
         assert!(matches!(f(None, "error"), Failure::Refused(_)));
         assert!(matches!(f(Some("InvalidRequest"), "A rate limit exceeded elsewhere"), Failure::Refused(_)));
+    }
+
+    #[test]
+    fn temporary_answers_are_busy_and_real_refusals_are_not() {
+        let f = |k: Option<&str>, d: &str| error_failure(k, d.to_string());
+        for d in [
+            "Recipient mailbox is full; try again later.",
+            "Relay storage is full; try again later.",
+            "Too many messages from this sender are waiting for the recipient.",
+            "Internal error; try again.",
+            "Please TRY AGAIN soon",
+        ] {
+            assert!(matches!(f(Some("InvalidRequest"), d), Failure::Busy(_)), "{d}");
+        }
+        assert!(matches!(f(Some("UnknownError"), "anything"), Failure::Busy(_)));
+        assert!(matches!(f(Some("unknownerror"), "x"), Failure::Busy(_)));
+        assert!(matches!(f(Some("InvalidRequest"), "Error postslate signature."), Failure::Refused(_)));
+        assert!(matches!(f(Some("InvalidSignature"), "Invalid signature."), Failure::Refused(_)));
     }
 
     #[test]

@@ -2376,9 +2376,13 @@ async fn the_26_11_5_client_handshake_is_unchanged() {
     assert_eq!(at["mailboxes"][0]["code"], "bad_signature", "{at}");
 }
 
-/// A peer that answers the first `busy` frames with Error `Busy` and the next with Ok.
-/// Returns its address and how many frames it has seen.
-async fn busy_peer(busy: usize) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+/// A peer that answers the first `busy` frames with an Error of the given kind and description
+/// and the next with Ok. Returns its address and how many frames it has seen.
+async fn erroring_peer(
+    busy: usize,
+    kind: &'static str,
+    description: &'static str,
+) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -2395,7 +2399,7 @@ async fn busy_peer(busy: usize) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsi
                     if matches!(m, Message::Text(_)) {
                         let n = count.fetch_add(1, Ordering::SeqCst);
                         let a = if n < busy {
-                            json!({"type":"Error","kind":"Busy","description":"busy"})
+                            json!({"type":"Error","kind":kind,"description":description})
                         } else {
                             json!({"type":"Ok"})
                         };
@@ -2413,7 +2417,7 @@ async fn busy_peer(busy: usize) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsi
 async fn a_busy_peer_is_retried_and_the_row_is_delivered() {
     let dir = tempfile::tempdir().unwrap();
     // Three Busy answers are the refusal limit: they must not drop the row.
-    let (peer, seen) = busy_peer(3).await;
+    let (peer, seen) = erroring_peer(3, "Busy", "busy").await;
     let url = format!("ws://{peer}");
     let a = start(dir.path(), "relaya.test", |c| {
         c.federation.peers.insert("busy.test:443".into(), url.clone());
@@ -2630,4 +2634,58 @@ async fn with_cancel_off_a_3_1_0_wallet_is_served_as_3_0_0() {
     let mut b2 = connect(&n).await;
     subscribe(&mut b2, &bob, "3.1.0").await;
     assert_eq!(recv(&mut b2).await, json!({"type":"Ok"}));
+}
+
+/// The process-wide Prometheus recorder, installed on first use.
+fn metrics_handle() -> &'static metrics_exporter_prometheus::PrometheusHandle {
+    static H: std::sync::OnceLock<metrics_exporter_prometheus::PrometheusHandle> = std::sync::OnceLock::new();
+    H.get_or_init(|| epicmail::metrics::install().unwrap())
+}
+
+/// Sum of the series of `name` that carry every `key="value"` pair in `labels`.
+fn metric(name: &str, labels: &[(&str, &str)]) -> f64 {
+    metrics_handle()
+        .render()
+        .lines()
+        .filter(|l| l.starts_with(&format!("{name}{{")) || l.starts_with(&format!("{name} ")))
+        .filter(|l| labels.iter().all(|(k, v)| l.contains(&format!("{k}=\"{v}\""))))
+        .filter_map(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
+        .sum()
+}
+
+/// The queued forward rows of a relay, whenever due.
+async fn queued_forwards(n: &Node, peer: &str) -> Vec<epicmail::store::ForwardRow> {
+    n.relay.store.forwards_due(peer, i64::MAX, 100).await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peers_temporary_errors_keep_the_row_queued_without_counting_attempts() {
+    metrics_handle();
+    let dir = tempfile::tempdir().unwrap();
+    // Epicmail's own answer for a full mailbox, sent as InvalidRequest, more often than the
+    // refusal limit.
+    let (peer, seen) = erroring_peer(usize::MAX, "InvalidRequest", "Recipient mailbox is full; try again later.").await;
+    let url = format!("ws://{peer}");
+    let a = start(dir.path(), "relaya.test", |c| {
+        c.federation.peers.insert("full.test:443".into(), url.clone());
+        c.test.forward_backoff_ms = 10;
+    })
+    .await;
+    let before = metric("epicbox_forwards_total", &[("result", "busy")]);
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut ws = connect(&a).await;
+    recv_type(&mut ws, "Challenge").await;
+    send(&mut ws, post_frame(&alice, "relaya.test", &bob, "full.test", 1)).await;
+    assert_eq!(recv(&mut ws).await["type"], "Ok");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while seen.load(std::sync::atomic::Ordering::SeqCst) < 5 {
+        a.relay.forward_notify.notify_one();
+        assert!(std::time::Instant::now() < deadline, "peer saw {:?} frames", seen);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let rows = queued_forwards(&a, "full.test:443").await;
+    assert_eq!(rows.len(), 1, "the row is still queued after five temporary answers");
+    assert_eq!(rows[0].attempts, 0, "no attempt was counted");
+    assert!(metric("epicbox_forwards_total", &[("result", "busy")]) >= before + 5.0);
 }
