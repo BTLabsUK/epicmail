@@ -874,13 +874,13 @@ impl Store for SqliteStore {
 
     async fn unanswered(&self, before: i64) -> Result<i64> {
         self.read(move |c| {
-            Ok(c.query_row(
+            c.query_row(
                 "SELECT count(*) FROM txlinks o WHERE o.kind=?2 AND o.created_at<=?1 \
                  AND NOT EXISTS (SELECT 1 FROM txlinks a WHERE a.txid=o.txid AND a.kind=?3) \
                  AND NOT EXISTS (SELECT 1 FROM cancels k WHERE k.txid=o.txid)",
                 params![before, LINK_ORIGIN, LINK_ANSWER],
                 |r| r.get(0),
-            )?)
+            )
         })
         .await
     }
