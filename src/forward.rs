@@ -10,6 +10,7 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,7 +27,7 @@ use tokio_tungstenite::Connector;
 
 use crate::clock::now_ms;
 use crate::relay::Relay;
-use crate::store::ForwardRow;
+use crate::store::{ForwardKind, ForwardRow};
 
 const TICK: Duration = Duration::from_secs(5);
 const BATCH: usize = 50;
@@ -204,8 +205,17 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
         }
         for row in rows {
             let timeout = Duration::from_secs(relay.cfg.federation.timeout_s.max(1));
-            let res = tokio::time::timeout(timeout, deliver(relay, peer, &row, tls.clone())).await;
-            let res = res.unwrap_or_else(|_| Err(Failure::Transport("timed out".into())));
+            let sent = AtomicBool::new(false);
+            let res = tokio::time::timeout(timeout, deliver(relay, peer, &row, tls.clone(), &sent)).await;
+            let res = res.unwrap_or_else(|_| {
+                // A cancel is best effort, and the stock relay never answers one: a timeout after
+                // the frame went out is "unanswered", not a sign that the peer is down.
+                if row.kind == ForwardKind::CancelTx && sent.load(Ordering::Relaxed) {
+                    Err(Failure::Unanswered)
+                } else {
+                    Err(Failure::Transport("timed out".into()))
+                }
+            });
             let attempts = row.attempts + 1;
             let r = match res {
                 Ok(()) => {
@@ -245,6 +255,13 @@ async fn lane(relay: &Arc<Relay>, peer: &str, tls: Arc<rustls::ClientConfig>, ba
                     crate::sampled!(warn, peer, "forward dropped: the peer is this relay under another name");
                     relay.store.forward_failed(row.id, now_ms(), "forward loop", true).await
                 }
+                Err(Failure::Unanswered) => {
+                    // The peer is up (it greeted us) and does not know this frame: drop the cancel
+                    // without holding the peer's other rows back.
+                    metrics::counter!("epicbox_forwards_total", "result" => "unanswered").increment(1);
+                    tracing::debug!(peer, kind = ?row.kind, result = "unanswered", attempts, "forward dropped: no answer to a cancel");
+                    relay.store.forward_failed(row.id, now_ms(), "no answer", true).await
+                }
                 Err(Failure::Transport(e)) => {
                     metrics::counter!("epicbox_forwards_total", "result" => "failed").increment(1);
                     relay.traffic.add(crate::traffic::Count::ForwardsFailed, 1);
@@ -278,6 +295,9 @@ enum Failure {
     Transport(String),
     /// The peer is this relay under another name: never worth retrying.
     Loop,
+    /// A CancelTx was sent and the peer greeted us but never answered (the stock relay has no
+    /// such frame). Only a cancel can end this way.
+    Unanswered,
 }
 
 impl From<anyhow::Error> for Failure {
@@ -328,7 +348,14 @@ fn error_failure(kind: Option<&str>, description: String) -> Failure {
     }
 }
 
-async fn deliver(relay: &Relay, peer: &str, row: &ForwardRow, tls: Arc<rustls::ClientConfig>) -> Result<(), Failure> {
+/// `sent` is set once the frame has gone out, so a timeout can tell "no answer" from "no connection".
+async fn deliver(
+    relay: &Relay,
+    peer: &str,
+    row: &ForwardRow,
+    tls: Arc<rustls::ClientConfig>,
+    sent_flag: &AtomicBool,
+) -> Result<(), Failure> {
     let (url, addr) = target(relay, peer).await?;
     let parsed = url::Url::parse(&url).map_err(|e| Failure::Transport(format!("url: {e}")))?;
     let addr = match addr {
@@ -383,6 +410,7 @@ async fn deliver(relay: &Relay, peer: &str, row: &ForwardRow, tls: Arc<rustls::C
                     .await
                     .map_err(|e| Failure::Transport(format!("send: {e}")))?;
                 sent = true;
+                sent_flag.store(true, Ordering::Relaxed);
             }
             "ok" | "transactioncancelled" if sent => {
                 let _ = ws.close(None).await;

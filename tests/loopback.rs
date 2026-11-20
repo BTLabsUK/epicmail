@@ -2689,3 +2689,84 @@ async fn a_peers_temporary_errors_keep_the_row_queued_without_counting_attempts(
     assert_eq!(rows[0].attempts, 0, "no attempt was counted");
     assert!(metric("epicbox_forwards_total", &[("result", "busy")]) >= before + 5.0);
 }
+
+/// A stock-like peer: greets with a Challenge, answers a PostSlate with Ok and stays silent to
+/// anything else (it has no `CancelTx` case). Returns its address and the PostSlate count.
+async fn silent_to_cancels_peer() -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let posts = Arc::new(AtomicUsize::new(0));
+    let count = posts.clone();
+    tokio::spawn(async move {
+        loop {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let count = count.clone();
+            tokio::spawn(async move {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else { return };
+                let _ = ws.send(Message::Text(json!({"type":"Challenge","str":"c"}).to_string().into())).await;
+                while let Some(Ok(m)) = ws.next().await {
+                    if let Message::Text(t) = m {
+                        let v: Value = serde_json::from_str(&t).unwrap_or_default();
+                        if v["type"] == "PostSlate" {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            let _ = ws.send(Message::Text(json!({"type":"Ok"}).to_string().into())).await;
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    (addr, posts)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unanswered_cancel_is_dropped_and_does_not_hold_the_peer_back() {
+    use epicmail::store::{ForwardKind, NewForward};
+    metrics_handle();
+    let dir = tempfile::tempdir().unwrap();
+    let (peer, posts) = silent_to_cancels_peer().await;
+    let url = format!("ws://{peer}");
+    let a = start(dir.path(), "relaya.test", |c| {
+        c.federation.peers.insert("stock.test:443".into(), url.clone());
+        c.federation.timeout_s = 1;
+    })
+    .await;
+    let before = metric("epicbox_forwards_total", &[("result", "unanswered")]);
+    let now = now_ms();
+    let cancel = json!({"type":"CancelTx","address":"x","epicboxtxid":"t","signature":"s"});
+    a.relay
+        .store
+        .put_forward(NewForward {
+            peer: "stock.test:443".into(),
+            kind: ForwardKind::CancelTx,
+            frame: cancel.to_string(),
+            txid: None,
+            tx_keys: vec![],
+            created_at: now,
+            expires_at: now + 3_600_000,
+            attempts: 0,
+        })
+        .await
+        .unwrap();
+    a.relay.forward_notify.notify_one();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !queued_forwards(&a, "stock.test:443").await.is_empty() {
+        assert!(std::time::Instant::now() < deadline, "the unanswered cancel is still queued");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(metric("epicbox_forwards_total", &[("result", "unanswered")]) >= before + 1.0);
+
+    // A slate for the same peer goes out at once, not after a back-off (the first is 10 s).
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut ws = connect(&a).await;
+    recv_type(&mut ws, "Challenge").await;
+    send(&mut ws, post_frame(&alice, "relaya.test", &bob, "stock.test", 1)).await;
+    assert_eq!(recv(&mut ws).await["type"], "Ok");
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    while posts.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        assert!(std::time::Instant::now() < deadline, "the slate waited behind a back-off");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
