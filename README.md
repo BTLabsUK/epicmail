@@ -63,8 +63,7 @@ curl -fsSL https://raw.githubusercontent.com/BTLabsUK/epicmail/main/tools/get.sh
 It downloads the latest release binary for the machine, checks it with `minisign` (required) against the release's signed
 `SHA256SUMS`, installs the relay as a hardened systemd service with its config in
 `/etc/epicmail/epicmail.toml`, and installs Caddy for TLS. Wallets then use Epicbox domain
-`relay.example.org`, port 443. Run the same command again to upgrade (without `--domain`: `curl -fsSL .../tools/get.sh | sh`): it backs up the store,
-checks the config with the new binary and restarts only when something changed.
+`relay.example.org`, port 443. To move to a newer release later, see [Updating](#updating).
 
 - `--version X.Y.Z` installs a given release instead of the latest.
 - `--no-tls` skips Caddy, for a server with its own proxy. An nginx, Caddy or Apache already on
@@ -80,6 +79,52 @@ against the signed `SHA256SUMS`, and refuses anything that fails. To check a dow
 minisign -Vm SHA256SUMS -P RWQ+swweZiIFJfbre/aOhYqQ1+82BHFnw8gF6ETbhCp5b7RB6RuMEVtP
 sha256sum -c --ignore-missing SHA256SUMS
 ```
+
+### Updating
+
+On a relay installed with `get.sh` or `tools/install.sh`, run:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/BTLabsUK/epicmail/main/tools/get.sh | sh
+```
+
+It needs `minisign`, like the install. The script:
+
+1. downloads the latest release and checks its signature and checksums; on a mismatch it stops
+   and installs nothing;
+2. checks `/etc/epicmail/epicmail.toml` with the new binary, and stops if the config does not pass;
+3. backs up the store to `/var/backups/epicmail/`;
+4. replaces `/usr/local/bin/epicmail` and keeps the old binary as `/usr/local/bin/epicmail.prev`;
+5. restarts the `epicmail` service and waits until `/ready` answers.
+
+The config and the data are kept. There is nothing to restart by hand. When the installed
+release is already the latest, the script says so and changes nothing.
+
+Pass the options the install used, except `--domain`: `--no-tls`, `--name`, `--prefix`. For
+example, on a server with its own TLS proxy:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/BTLabsUK/epicmail/main/tools/get.sh | sh -s -- --no-tls
+```
+
+Check the result:
+
+```sh
+epicmail --version
+systemctl status epicmail
+```
+
+To update by hand instead, download and check the release binary as in [By hand](#by-hand)
+below, then:
+
+```sh
+./epicmail-$v-linux-$a check-config --config /etc/epicmail/epicmail.toml
+sudo install -m 0755 epicmail-$v-linux-$a /usr/local/bin/epicmail
+sudo systemctl restart epicmail
+```
+
+Back up the store first; [docs/operating.md](docs/operating.md#9-upgrade-and-roll-back) covers
+the backup and rolling back.
 
 ### By hand
 
