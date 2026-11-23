@@ -411,7 +411,7 @@ backup from step 1 (messages posted since are lost), or `export` with the new bi
 
 ## 10. Shipping a change (maintainers)
 
-`tools/ship` takes the working tree to the live relay on epicbox.btlabs.uk and checks the result.
+`tools/ship` takes the working tree to the live relay, `epicmail.btlabs.uk` (it also answers as its alias `epicbox.btlabs.uk`, which the script checks), and checks the result.
 
 ```
 tools/ship                       # ship this checkout
