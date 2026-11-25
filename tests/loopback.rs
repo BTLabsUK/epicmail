@@ -2827,3 +2827,32 @@ async fn a_pull_signed_for_an_alias_verifies_and_other_names_do_not() {
     let (_, v) = http(&n, "POST", "/v1/pull", Some(pull(&c3, proof(&c3, "relay.test")))).await;
     assert!(v["mailboxes"][0].get("error").is_none(), "{v}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_offered_three_times_across_sockets_steps_aside() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = start(dir.path(), "relay.test", |_| {}).await;
+    let (alice, bob) = (Key::new(), Key::new());
+    let mut a = connect(&n).await;
+    recv_type(&mut a, "Challenge").await;
+    for i in 1..=2 {
+        send(&mut a, post_frame(&alice, "relay.test", &bob, "relay.test", i)).await;
+        assert_eq!(recv(&mut a).await["type"], "Ok");
+    }
+    // A wallet that cannot decrypt the oldest slate drops the socket without Made and reconnects.
+    let mut first = String::new();
+    for _ in 0..3 {
+        let mut s = connect(&n).await;
+        subscribe(&mut s, &bob, "3.0.0").await;
+        let v = recv_type(&mut s, "Slate").await;
+        let id = v["epicboxmsgid"].as_str().unwrap().to_string();
+        assert!(first.is_empty() || first == id, "the oldest slate comes back each time");
+        first = id;
+        s.close(None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let mut s = connect(&n).await;
+    subscribe(&mut s, &bob, "3.0.0").await;
+    let v = recv_type(&mut s, "Slate").await;
+    assert_ne!(v["epicboxmsgid"].as_str().unwrap(), first, "the next message is delivered");
+}
