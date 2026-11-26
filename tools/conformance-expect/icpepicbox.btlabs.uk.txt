@@ -1,0 +1,3 @@
+# Cases expected to fail on icpepicbox.btlabs.uk: none. The host runs Epicmail with IcpStore
+# (cargo feature icp), and every case passes. One case id per line, # starts a comment;
+# a listed case that passes fails the run.
