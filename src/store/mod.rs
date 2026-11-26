@@ -1,6 +1,13 @@
-//! Durable state behind one trait, so a second backend (Postgres) can be added without touching
-//! the protocol code. Every write call returns after its transaction has committed: callers send
-//! `Ok` to a wallet only after that.
+//! Durable state behind one trait, so a second backend (a remote store such as the ICP canister)
+//! can be added without touching the protocol code. Every write call returns after its
+//! transaction has committed: callers send `Ok` to a wallet only after that. The exceptions are
+//! the delivery bookkeeping calls (`made`, `made_in`, `release`, `hold` and the `forward_*`
+//! results), which answer nobody with a promise of durability: a remote store may apply them to
+//! its own view at once and commit them in batches, and `flush` commits what is held back. A
+//! batch lost in a crash only means a message is offered again.
+//!
+//! A store that other writers share (mail that arrives without passing through this process)
+//! reports the mailboxes that got mail through `take_arrivals`, so their listeners are woken.
 //!
 //! Times are unix milliseconds. Ids:
 //! - `id` is the row id, internal only.
@@ -248,4 +255,16 @@ pub trait Store: Send + Sync + 'static {
     }
     /// A write round trip, for /ready.
     async fn check_writable(&self) -> Result<()>;
+
+    /// Commit writes the store holds back (batched acknowledgements). Called once at shutdown,
+    /// after the sockets have closed.
+    async fn flush(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// The feed of mailboxes that got mail from another writer. The relay takes it once at
+    /// start (`relay::arrivals`); None for a store this process alone writes to.
+    fn take_arrivals(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<String>> {
+        None
+    }
 }

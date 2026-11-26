@@ -216,6 +216,12 @@ impl Relay {
         })
     }
 
+    /// Wake every listener of `key`: the socket that gets its pushes and the waiting pulls.
+    pub fn mail_arrived(&self, key: &str) {
+        self.registry.wake(key);
+        self.pull_waiters.wake(key);
+    }
+
     /// A process-unique id for a new socket.
     pub fn next_socket_id(&self) -> u64 {
         self.next_socket.fetch_add(1, Ordering::Relaxed)
@@ -255,5 +261,14 @@ impl Relay {
             }
             None => false,
         }
+    }
+}
+
+/// Wake the listeners of each mailbox the store reports mail for from another writer. Returns
+/// at once for a store with no other writers, and when the store drops the feed.
+pub async fn arrivals(relay: Arc<Relay>) {
+    let Some(mut rx) = relay.store.take_arrivals() else { return };
+    while let Some(key) = rx.recv().await {
+        relay.mail_arrived(&key);
     }
 }

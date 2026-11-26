@@ -64,6 +64,7 @@ async fn start_on(
         .into_make_service_with_connect_info::<SocketAddr>();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     tokio::spawn(epicmail::forward::run(relay.clone()));
+    tokio::spawn(epicmail::relay::arrivals(relay.clone()));
     Node { addr, relay }
 }
 
@@ -1118,8 +1119,7 @@ async fn a_pull_reply_has_a_byte_budget_and_says_when_there_is_more() {
     }
     let pull = |n: &Node| {
         let ch = format!("ebh-{}-{:016x}", now_ms() / 1000, rand::random::<u64>());
-        let body =
-            json!({"mailboxes":[{"address":bob.pk,"challenge":ch,"signature":bob.sign(&proof(&ch, "relay.test"))}],"limit":20,"wait":0});
+        let body = json!({"mailboxes":[{"address":bob.pk,"challenge":ch,"signature":bob.sign(&proof(&ch, "relay.test"))}],"limit":20,"wait":0});
         let addr = n.addr;
         let relay = n.relay.clone();
         async move { http(&Node { addr, relay }, "POST", "/v1/pull", Some(body)).await }
@@ -1853,7 +1853,11 @@ async fn the_separated_cancel_form_is_advertised_and_echoed_only_when_offered() 
     assert_eq!(recv(&mut c).await, json!({"type":"Ok","ext":[SEPARATED]}));
     let mut c = connect(&n).await;
     recv_type(&mut c, "Challenge").await;
-    send(&mut c, json!({"type":"ClientDetails","wallet_version":"t","wallet_mode":"listener","protocol_version":"3.1.0"})).await;
+    send(
+        &mut c,
+        json!({"type":"ClientDetails","wallet_version":"t","wallet_mode":"listener","protocol_version":"3.1.0"}),
+    )
+    .await;
     assert_eq!(recv(&mut c).await, json!({"type":"Ok"}));
 
     // On a mux/1 socket it joins the other tokens, but only when asked.
@@ -1924,7 +1928,8 @@ async fn a_separated_cancel_is_accepted_and_a_replayed_slate_signature_is_not_on
     assert_eq!(waiting(&n).await, 1);
 
     // A stock wallet signs the bare txid: still accepted.
-    send(&mut c, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":tx_bare,"signature":alice.sign(tx_bare)})).await;
+    send(&mut c, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":tx_bare,"signature":alice.sign(tx_bare)}))
+        .await;
     assert_eq!(recv(&mut c).await, json!({"type":"TransactionCancelled","epicboxtxid":tx_bare}));
     assert_eq!(waiting(&n).await, 0);
 }
@@ -1962,7 +1967,8 @@ async fn only_a_separated_cancel_is_forwarded_when_bare_forwarding_is_off() {
     let mut c = connect(&n).await;
     recv_type(&mut c, "Challenge").await;
 
-    send(&mut c, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":tx_bare,"signature":alice.sign(tx_bare)})).await;
+    send(&mut c, json!({"type":"CancelTx","address":alice.pk,"epicboxtxid":tx_bare,"signature":alice.sign(tx_bare)}))
+        .await;
     assert_eq!(recv(&mut c).await["type"], "TransactionCancelled");
     assert!(cancels().await.is_empty(), "a bare cancel was forwarded");
 
@@ -2514,7 +2520,8 @@ async fn one_clients_bad_signatures_cannot_lock_out_a_prefix() {
     assert_eq!(recv(&mut p).await["type"], "Ok");
     let slate = recv_type(&mut b, "Slate").await;
     let msgid = slate["epicboxmsgid"].as_str().unwrap().to_string();
-    send(&mut b, json!({"type":"Made","address":k.pk,"signature":k.sign(&msgid),"epicboxmsgid":msgid,"ver":"3.0.0"})).await;
+    send(&mut b, json!({"type":"Made","address":k.pk,"signature":k.sign(&msgid),"epicboxmsgid":msgid,"ver":"3.0.0"}))
+        .await;
     assert_eq!(recv_type(&mut b, "Ok").await, json!({"type":"Ok"}));
     assert_eq!(waiting(&n).await, 0);
     // A new socket's first Subscribe is not refused either.
@@ -2563,20 +2570,32 @@ async fn a_made_for_another_message_keeps_the_one_in_flight() {
             let first = recv_type(&mut b, "Slate").await;
             // A Made for a different message id is acknowledged and changes nothing here.
             let other = "not-the-one";
-            send(&mut b, json!({"type":"Made","address":bob.pk,"signature":bob.sign(other),"epicboxmsgid":other,"ver":"3.0.0"})).await;
+            send(
+                &mut b,
+                json!({"type":"Made","address":bob.pk,"signature":bob.sign(other),"epicboxmsgid":other,"ver":"3.0.0"}),
+            )
+            .await;
             assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
             let c = recv_type(&mut b, "Challenge").await;
             // The first message is still in flight: a Subscribe gets no second slate.
             send(&mut b, json!({"type":"Subscribe","address":bob.pk,"ver":"3.0.0","signature":bob.sign(c["str"].as_str().unwrap())})).await;
             assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
             let id = first["epicboxmsgid"].as_str().unwrap().to_string();
-            send(&mut b, json!({"type":"Made","address":bob.pk,"signature":bob.sign(&id),"epicboxmsgid":id,"ver":"3.0.0"})).await;
+            send(
+                &mut b,
+                json!({"type":"Made","address":bob.pk,"signature":bob.sign(&id),"epicboxmsgid":id,"ver":"3.0.0"}),
+            )
+            .await;
             assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
         }
     }
     // Its own Made freed the slot: the next Subscribe is offered the second slate.
     let c = recv_type(&mut b, "Challenge").await;
-    send(&mut b, json!({"type":"Subscribe","address":bob.pk,"ver":"3.0.0","signature":bob.sign(c["str"].as_str().unwrap())})).await;
+    send(
+        &mut b,
+        json!({"type":"Subscribe","address":bob.pk,"ver":"3.0.0","signature":bob.sign(c["str"].as_str().unwrap())}),
+    )
+    .await;
     assert_eq!(recv_type(&mut b, "Slate").await["type"], "Slate");
 }
 
@@ -2625,7 +2644,8 @@ async fn with_cancel_off_a_3_1_0_wallet_is_served_as_3_0_0() {
     assert_eq!(recv(&mut a).await["type"], "Ok");
     let slate = recv_type(&mut b, "Slate").await;
     let id = slate["epicboxmsgid"].as_str().unwrap().to_string();
-    send(&mut b, json!({"type":"Made","address":bob.pk,"signature":bob.sign(&id),"epicboxmsgid":id,"ver":"3.1.0"})).await;
+    send(&mut b, json!({"type":"Made","address":bob.pk,"signature":bob.sign(&id),"epicboxmsgid":id,"ver":"3.1.0"}))
+        .await;
     assert_eq!(recv(&mut b).await, json!({"type":"Ok"}));
     recv_type(&mut b, "Challenge").await;
     assert_eq!(waiting(&n).await, 0);
@@ -2799,9 +2819,7 @@ async fn a_pull_signed_for_an_alias_verifies_and_other_names_do_not() {
     .await;
     let bob = Key::new();
     let ch = || format!("ebh-{}-{:016x}", now_ms() / 1000, rand::random::<u64>());
-    let pull = |ch: &str, signed: String| {
-        json!({"mailboxes":[{"address":bob.pk,"challenge":ch,"signature":bob.sign(&signed)}],"wait":0})
-    };
+    let pull = |ch: &str, signed: String| json!({"mailboxes":[{"address":bob.pk,"challenge":ch,"signature":bob.sign(&signed)}],"wait":0});
 
     // The alias, with the relay's port.
     let c1 = ch();

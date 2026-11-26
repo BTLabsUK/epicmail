@@ -161,13 +161,7 @@ impl Relay {
 
     /// Every check that needs no store: limits, sizes, addresses, signatures and the
     /// destination inside the slate.
-    fn check_post(
-        &self,
-        ip: IpAddr,
-        req: PostReq,
-        allow_cancel: bool,
-        scope: &mut SigScope,
-    ) -> Result<Slate, Refusal> {
+    fn check_post(&self, ip: IpAddr, req: PostReq, allow_cancel: bool, scope: &mut SigScope) -> Result<Slate, Refusal> {
         let lim = &self.cfg.limits;
         let body_len = req.str_.as_ref().map(|s| s.len()).unwrap_or(0);
         self.limiter.post_ip(ip, body_len).map_err(Refusal::RateLimited)?;
@@ -286,8 +280,7 @@ impl Relay {
         };
         match self.store.put_message(m).await {
             Ok(PutOutcome::Stored { msgid }) => {
-                self.registry.wake(&dest_key);
-                self.pull_waiters.wake(&dest_key);
+                self.mail_arrived(&dest_key);
                 PostOutcome::Stored { msgid, txid }
             }
             Ok(PutOutcome::Duplicate { msgid }) => {
@@ -464,7 +457,10 @@ mod tests {
     #[test]
     fn destination_port_zero_is_refused_in_the_usual_form() {
         let (r, _d) = relay(|_| {});
-        assert_eq!(text(r.forward_refusal("peer.example", 0)).as_deref(), Some("Forwarding to peer.example:0 is not allowed."));
+        assert_eq!(
+            text(r.forward_refusal("peer.example", 0)).as_deref(),
+            Some("Forwarding to peer.example:0 is not allowed.")
+        );
         assert!(r.forward_refusal("peer.example", 443).is_none());
         assert!(!r.peer_allowed("peer.example:0"));
         assert!(r.peer_allowed("peer.example:443"));

@@ -128,6 +128,7 @@ async fn serve(cfg: Config) -> Result<()> {
         });
     }
     tokio::spawn(forward::run(relay.clone()));
+    tokio::spawn(epicmail::relay::arrivals(relay.clone()));
     tokio::spawn(housekeeping(relay.clone()));
     tokio::spawn(epicmail::traffic::run(relay.clone()));
 
@@ -151,6 +152,9 @@ async fn serve(cfg: Config) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.server.drain_seconds);
     while relay.limiter.sockets_open() > 0 && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if let Err(e) = relay.store.flush().await {
+        tracing::error!(error = %e, "store flush failed");
     }
     tracing::info!(open = relay.limiter.sockets_open(), "stopped");
     Ok(())

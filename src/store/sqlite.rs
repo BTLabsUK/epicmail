@@ -799,19 +799,20 @@ impl Store for SqliteStore {
     }
 
     async fn sweep(&self, now: i64, retention_ms: i64) -> Result<SweepStats> {
-        let stats = self.write(move |c| {
-            let cutoff = now - retention_ms;
-            // Which peers a cancel was queued for lives as long as its tombstone.
-            c.execute("DELETE FROM cancel_forwards WHERE created_at<=?1", [cutoff])?;
-            Ok(SweepStats {
-                messages_expired: c.execute("DELETE FROM messages WHERE expires_at<=?1", [now])? as u64,
-                forwards_expired: c.execute("DELETE FROM forwards WHERE expires_at<=?1", [now])? as u64,
-                tombstones_expired: c.execute("DELETE FROM cancels WHERE created_at<=?1", [cutoff])? as u64,
-                challenges_expired: c.execute("DELETE FROM used_challenges WHERE expires_at<=?1", [now])? as u64,
-                txlinks_expired: c.execute("DELETE FROM txlinks WHERE created_at<=?1", [cutoff])? as u64,
+        let stats = self
+            .write(move |c| {
+                let cutoff = now - retention_ms;
+                // Which peers a cancel was queued for lives as long as its tombstone.
+                c.execute("DELETE FROM cancel_forwards WHERE created_at<=?1", [cutoff])?;
+                Ok(SweepStats {
+                    messages_expired: c.execute("DELETE FROM messages WHERE expires_at<=?1", [now])? as u64,
+                    forwards_expired: c.execute("DELETE FROM forwards WHERE expires_at<=?1", [now])? as u64,
+                    tombstones_expired: c.execute("DELETE FROM cancels WHERE created_at<=?1", [cutoff])? as u64,
+                    challenges_expired: c.execute("DELETE FROM used_challenges WHERE expires_at<=?1", [now])? as u64,
+                    txlinks_expired: c.execute("DELETE FROM txlinks WHERE created_at<=?1", [cutoff])? as u64,
+                })
             })
-        })
-        .await?;
+            .await?;
         // Forwards that were never delivered and ran out their retention: otherwise they leave no trace.
         metrics::counter!("epicbox_forwards_expired_total").increment(stats.forwards_expired);
         Ok(stats)
@@ -1088,10 +1089,8 @@ mod tests {
         assert_eq!(s.unanswered(1000).await.unwrap(), 1, "only t2: t1 is answered, t3 is cancelled");
         // A second answer is not a second round trip.
         s.put_message(tx(msg("a", "b", "s2b", 6000), "t1")).await.unwrap();
-        let answers: i64 = s
-            .read(|c| c.query_row("SELECT count(*) FROM txlinks WHERE kind=3", [], |r| r.get(0)))
-            .await
-            .unwrap();
+        let answers: i64 =
+            s.read(|c| c.query_row("SELECT count(*) FROM txlinks WHERE kind=3", [], |r| r.get(0))).await.unwrap();
         assert_eq!(answers, 1);
         // The other party answering t2 closes it.
         s.put_message(tx(msg("c", "e2", "x2", 7000), "t2")).await.unwrap();
