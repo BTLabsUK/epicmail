@@ -33,6 +33,7 @@ type FePut = record {
   signature : text;
   txid : opt text;
   txidsig : opt text;
+  remote_endpoint : opt text;   // the sender's mailbox `domain:port` when it is not this relay
 };
 
 type FePutResult = variant {
