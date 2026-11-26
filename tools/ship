@@ -21,14 +21,14 @@ set -uo pipefail
 
 SELF=$(readlink -f "$0")
 TOOLS=$(dirname "$SELF")
-HOST=${SHIP_HOST:-hostinger-2}
-PUBLIC_URL=${SHIP_URL:-https://epicbox.btlabs.uk}
+HOST=${SHIP_HOST:-}                             # ssh alias of the relay host (required)
+PUBLIC_URL=${SHIP_URL:-}                        # public https URL of the relay (required), e.g. https://relay.example.org
 RDIR=${SHIP_REMOTE_DIR:-epicmail-fast}          # fast-path build dir on HOST, relative to $HOME
 RELDIR=${SHIP_RELEASE_DIR:-epicmail-build/src}  # slow-path build dir on HOST (its own target dir)
 STATE=${SHIP_STATE:-$HOME/.cache/epicmail-ship}
 TARGET=x86_64-unknown-linux-musl
 GH_REPO=${SHIP_GH_REPO:-BTLabsUK/epicmail}
-REMOTE_PATH='$HOME/.local/opt/zig-x86_64-linux-0.15.2:$HOME/.local/bin:$HOME/.cargo/bin:$PATH'
+REMOTE_PATH=${SHIP_REMOTE_PATH:-'$HOME/.cargo/bin:$PATH'}   # PATH on HOST: needs cargo, cargo-zigbuild and zig
 
 mkdir -p "$STATE"
 SSHO=(-o BatchMode=yes -o ConnectTimeout=10 -o ControlMaster=auto -o "ControlPath=$STATE/cm-%C" -o ControlPersist=600)
@@ -69,6 +69,8 @@ while [ $# -gt 0 ]; do
   shift
 done
 if [ -z "$SRC" ]; then SRC=$(git rev-parse --show-toplevel 2>/dev/null || dirname "$TOOLS"); fi
+[ -n "$HOST" ] || die "set SHIP_HOST to the relay host (an ssh alias)"
+[ -n "$PUBLIC_URL" ] || die "set SHIP_URL to the relay's public URL, e.g. https://relay.example.org"
 SRC=$(cd "$SRC" && pwd) || die "no such directory: $SRC"
 [ -f "$SRC/Cargo.toml" ] || die "$SRC has no Cargo.toml"
 LANDING=""; [ -f "$SRC/src/http/landing.rs" ] && LANDING=--landing
@@ -152,7 +154,7 @@ fast() {
   if [ "$TESTS" != none ]; then
     (
       s=$(tnow)
-      heavy=""; command -v hagen-heavy >/dev/null 2>&1 && heavy=hagen-heavy
+      heavy=${EPICMAIL_HEAVY:-}
       cd "$SRC" && CARGO_TARGET_DIR="$STATE/target-test" $heavy cargo test --locked > "$run/b.log" 2>&1
       rc=$?
       echo "tests $(secs "$s" "$(tnow)")" > "$run/b.times"

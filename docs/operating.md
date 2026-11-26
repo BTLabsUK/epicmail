@@ -411,7 +411,12 @@ backup from step 1 (messages posted since are lost), or `export` with the new bi
 
 ## 10. Shipping a change (maintainers)
 
-`tools/ship` takes the working tree to the live relay, `epicmail.btlabs.uk` (it also answers as its alias `epicbox.btlabs.uk`, which the script checks), and checks the result.
+`tools/ship` takes the working tree to a relay host you operate over ssh and checks the result. Two settings are required, in the environment:
+
+- `SHIP_HOST`: the ssh alias of the relay host.
+- `SHIP_URL`: the relay's public URL, for example `https://relay.example.org`.
+
+Optional: `SHIP_REMOTE_DIR` (the fast-path build dir on the host, relative to `$HOME`; default `epicmail-fast`), `SHIP_REMOTE_PATH` (the `PATH` on the host; it needs `cargo`, `cargo-zigbuild` and `zig`), `SHIP_SIGN_KEY` (the release signing key), `EPICMAIL_HEAVY` (a wrapper command for heavy local builds, such as a job queue).
 
 ```
 tools/ship                       # ship this checkout
@@ -421,8 +426,8 @@ tools/ship --rollback            # swap back to epicmail.prev
 
 Steps, with timings printed at the end:
 
-1. Lane A: rsync the tree to hostinger-2, build x86_64 musl with `cargo zigbuild --release` into a persistent target dir (`~/epicmail-fast/src/target`), check that the binary is static.
-2. Lane B, in parallel: `cargo test --locked` on this machine, under `hagen-heavy`.
+1. Lane A: rsync the tree to the host, build x86_64 musl with `cargo zigbuild --release` into a persistent target dir under the remote dir, check that the binary is static.
+2. Lane B, in parallel: `cargo test --locked` on this machine.
 3. Deploy: `tools/ship-deploy.sh` on the relay installs the binary as `/usr/local/bin/epicmail.new`, runs `--version` and `check-config` against the live config, keeps the old binary as `epicmail.prev` (a hard link), renames the new one over `epicmail` and restarts the unit.
 4. Verify: `tools/ship-probe.py` checks `/health`, `/ready`, `/status.json`, the landing page and a websocket Challenge and GetVersion, on the host and again through the public URL. The host check also needs no self-restarts, the running binary's hash (read from `/proc/PID/exe`) to equal the new one, and no journal errors or panics after the restart.
 
@@ -437,16 +442,15 @@ tools/ship --release X.Y.Z       # background; the fast path stays usable
 tools/ship --publish X.Y.Z       # sign and create the GitHub release
 ```
 
-`--release` needs a clean tree, `Cargo.toml` at X.Y.Z and tag `vX.Y.Z` at HEAD. It builds in a separate dir on the relay host (`~/epicmail-build/src`, niced), runs the full test suite, builds the three binaries (linux x86_64, linux aarch64, windows x86_64) and writes `SHA256SUMS`, all under `~/.cache/epicmail-ship/release-X.Y.Z/`. Follow `job.log` there. `--dry-run` stops before staging.
+`--release` needs a clean tree, `Cargo.toml` at X.Y.Z and tag `vX.Y.Z` at HEAD. It builds in a separate dir on the relay host (niced), runs the full test suite, builds the three binaries (linux x86_64, linux aarch64, windows x86_64) and writes `SHA256SUMS`, all under `~/.cache/epicmail-ship/release-X.Y.Z/`. Follow `job.log` there. `--dry-run` stops before staging.
 
 `--release` also copies `tools/install.sh` and the two packaging files `get.sh` uses into the staged files and lists them in `SHA256SUMS`, so `get.sh` can check them.
 
-`--publish` signs `SHA256SUMS` with the BT Labs key (`~/.config/btlabs/signing/btlabs-2026-a.key`, or `SHIP_SIGN_KEY`) through `tools/ship-sign.py`, checks the signature against the public key pinned in `tools/get.sh`, checks every hash and runs `gh release create`. Nothing is published by `--release`.
+`--publish` signs `SHA256SUMS` with the release signing key (`~/.config/epicmail/release-signing.key`, or `SHIP_SIGN_KEY`) through `tools/ship-sign.py`, checks the signature against the public key pinned in `tools/get.sh`, checks every hash and runs `gh release create`. Nothing is published by `--release`.
 
 ## 11. The ICP store
 
-With `[store.icp]` set, the relay keeps its mail in an ICP store canister (epicbox-store, the
-canister behind icpepicbox.btlabs.uk) instead of the SQLite file. The
+With `[store.icp]` set, the relay keeps its mail in an ICP store canister (epicbox-store) instead of the SQLite file. The
 wallet protocols, federation and `/v1` stay the relay's; the canister holds messages,
 forwards, cancel records and the caps.
 

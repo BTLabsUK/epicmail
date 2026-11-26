@@ -3,7 +3,7 @@
 
   ship-probe.py BASE_URL [--landing] [--timeout S]
 
-BASE_URL is http://127.0.0.1:13481 (on the relay host) or https://epicbox.btlabs.uk (from
+BASE_URL is http://127.0.0.1:3423 (on the relay host) or https://relay.example.org (from
 outside). The probe checks, one line each:
 
   health         GET /health is 200
