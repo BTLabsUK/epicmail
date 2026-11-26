@@ -7,6 +7,10 @@ license = "Apache-2.0"
 description = "epicmail: an Epicbox-compatible relay. One binary, SQLite inside, wire-compatible with Epicbox 2.0.0/3.0.0"
 publish = false
 
+[workspace]
+members = [".", "crates/epicmail-core"]
+resolver = "2"
+
 [lib]
 path = "src/lib.rs"
 
@@ -15,6 +19,7 @@ name = "epicmail"
 path = "src/main.rs"
 
 [dependencies]
+epicmail-core = { path = "crates/epicmail-core" }
 anyhow = "1"
 thiserror = "2"
 tokio = { version = "1.47", features = ["full"] }
@@ -30,7 +35,6 @@ sha2 = "0.11"
 bs58 = "0.5"
 hex = "0.4"
 rand = "0.10"
-regex = "1"
 tracing = "0.1"
 flate2 = { version = "1.1.11", default-features = false, features = ["rust_backend"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

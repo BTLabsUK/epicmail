@@ -10,8 +10,8 @@ use super::{ok, Flow, Session};
 use crate::address::parse_address;
 use crate::clock::now_ms;
 use crate::ids::{is_msgid, rand_id};
-use crate::logging::short;
 use crate::limits::SigRefused;
+use crate::logging::short;
 use crate::relay::{
     CancelOutcome, Cmd, PostOutcome, PostReq, Refusal, ATTACH_HOST_EXT, CANCEL_SEPARATED_EXT, OFFER_LEASE_MS,
 };

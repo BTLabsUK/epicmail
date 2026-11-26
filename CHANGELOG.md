@@ -3,6 +3,16 @@
 Net changes per release. Configuration keys are in `packaging/epicmail.example.toml`; every
 release reads the data of every earlier one.
 
+## Unreleased
+
+- The protocol rules that need no clock, store or network moved into a workspace crate,
+  `crates/epicmail-core` 0.1.0: addresses and domain names, signature checks, txid and msgid
+  formats, the texts clients sign, the refusal texts, the pure steps of PostSlate, the
+  transaction and queue-cap rules, the default limits and the offer order. The relay calls it;
+  nothing on the wire, in the configuration or in the data changed, and no ICP upgrade is needed.
+  The crate also builds for `wasm32-unknown-unknown` (`--no-default-features --features k256`).
+  `epicmail::sig`, `epicmail::address` and `epicmail::ids` keep their paths.
+
 ## 0.1.13
 
 Forwarding:

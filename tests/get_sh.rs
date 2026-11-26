@@ -10,7 +10,11 @@ fn have(cmd: &str) -> bool {
 }
 
 fn arch() -> &'static str {
-    if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" }
+    if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    }
 }
 
 struct Rel {
@@ -30,9 +34,10 @@ fn release() -> Rel {
     std::fs::write(rel.join("epicmail.service"), "[Unit]\n").unwrap();
     std::fs::write(rel.join("epicmail.example.toml"), "# example\n").unwrap();
     let ok = |c: &mut Command| assert!(c.status().unwrap().success());
-    ok(Command::new("sh").current_dir(&rel).arg("-c").arg(format!(
-        "sha256sum {bin} install.sh epicmail.service epicmail.example.toml > SHA256SUMS"
-    )));
+    ok(Command::new("sh")
+        .current_dir(&rel)
+        .arg("-c")
+        .arg(format!("sha256sum {bin} install.sh epicmail.service epicmail.example.toml > SHA256SUMS")));
     let (sk, pk) = (dir.path().join("k.sec"), dir.path().join("k.pub"));
     ok(Command::new("minisign").args(["-G", "-W", "-f", "-s"]).arg(&sk).arg("-p").arg(&pk));
     ok(Command::new("minisign").args(["-S", "-s"]).arg(&sk).arg("-m").arg(rel.join("SHA256SUMS")));
@@ -106,8 +111,17 @@ fn tampered_install_files_are_refused_before_anything_runs() {
     // A release that does not list the files (before 0.1.7) is refused, not run unchecked.
     let r = release();
     let bin = format!("epicmail-9.9.9-linux-{}", arch());
-    std::fs::write(r.rel.join("SHA256SUMS"), std::fs::read_to_string(r.rel.join("SHA256SUMS")).unwrap()
-        .lines().filter(|l| l.contains(&bin)).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+    std::fs::write(
+        r.rel.join("SHA256SUMS"),
+        std::fs::read_to_string(r.rel.join("SHA256SUMS"))
+            .unwrap()
+            .lines()
+            .filter(|l| l.contains(&bin))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
     // The signature no longer matches the edited list: refused earlier, still nothing runs.
     let o = run_get(&r, None);
     assert_eq!(o.status.code(), Some(1), "{}", text(&o));

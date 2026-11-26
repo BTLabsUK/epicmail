@@ -24,24 +24,12 @@ use crate::clock::now_ms;
 use crate::config::Config;
 use crate::limits::Limiter;
 use crate::store::Store;
+use epicmail_core::refusal;
 
 pub use registry::{Cmd, Registry, SockHandle};
 
-/// Lease on a message offered to a socket or an HTTPS pull.
-pub const OFFER_LEASE_MS: i64 = 60_000;
-/// Domain separation prefix for cancel signatures that may travel between relays.
-pub const CANCEL_SIG_PREFIX: &str = "epicbox-cancel/1:";
-/// The extension token a wallet offers in `ClientDetails` and the relay echoes in its `Ok`:
-/// the relay verifies cancels signed over `CANCEL_SIG_PREFIX` + txid, and the wallet may sign
-/// that form. It is also the feature name in `/.well-known/epicbox.json`.
-pub const CANCEL_SEPARATED_EXT: &str = "epicbox-cancel/1";
-/// The extension token a mux/1 client offers in `ClientDetails` and the relay echoes in its
-/// `Ok`: the relay checks Attach signatures over `ATTACH_SIG_PREFIX` + host + `:` + challenge,
-/// bound to one of its public names, and the client may sign that form. It is also the feature
-/// name in `/.well-known/epicbox.json`.
-pub const ATTACH_HOST_EXT: &str = "epicbox-attach/1";
-/// Domain separation prefix for Attach signatures bound to the relay's host name.
-pub const ATTACH_SIG_PREFIX: &str = "epicbox-attach/1:";
+pub use epicmail_core::limits::OFFER_LEASE_MS;
+pub use epicmail_core::text::{ATTACH_HOST_EXT, ATTACH_SIG_PREFIX, CANCEL_SEPARATED_EXT, CANCEL_SIG_PREFIX};
 
 /// The shard, of `shards`, that holds mailbox `key`. Keys are chosen by clients, so the hash is
 /// keyed with a random seed per process: nobody can pick keys that all land on one shard.
@@ -89,32 +77,7 @@ pub struct Relay {
 /// Handshake header that carries the forwarding relay's `instance_id`.
 pub const INSTANCE_HEADER: &str = "x-epicmail-instance";
 
-/// A PostSlate, from any entry point.
-#[derive(Debug, Clone, Default)]
-pub struct PostReq {
-    pub from: Option<String>,
-    pub to: Option<String>,
-    pub str_: Option<String>,
-    pub signature: Option<String>,
-    pub txid: Option<Value>,
-    pub txidsig: Option<Value>,
-}
-
-impl PostReq {
-    /// Read the fields from a PostSlate frame or `/v1/post` body. Missing or mistyped fields are
-    /// None; `post_slate` decides what that means.
-    pub fn from_json(v: &Value) -> Self {
-        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(String::from);
-        Self {
-            from: s("from"),
-            to: s("to"),
-            str_: s("str"),
-            signature: s("signature"),
-            txid: v.get("epicboxtxid").filter(|x| !x.is_null()).cloned(),
-            txidsig: v.get("epicboxtxidsig").filter(|x| !x.is_null()).cloned(),
-        }
-    }
-}
+pub use epicmail_core::post::PostReq;
 
 /// Why a post or a cancel was refused. Each entry point turns it into its own reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +92,12 @@ pub enum Refusal {
     DeniedHost(String),
     /// Store error; nothing was written.
     Internal,
+}
+
+impl From<epicmail_core::post::PostRefusal> for Refusal {
+    fn from(r: epicmail_core::post::PostRefusal) -> Self {
+        Refusal::Invalid(r.kind(), r.text())
+    }
 }
 
 /// How a websocket frame's signature checks meet the prefix limits, and what they found. The
@@ -180,10 +149,10 @@ impl Refusal {
     /// The 3.0.0 `Error` frame for this refusal.
     pub fn classic_frame(&self) -> Value {
         match self {
-            Refusal::RateLimited(s) => error_frame("InvalidRequest", &format!("Rate limit exceeded; retry in {s} s.")),
+            Refusal::RateLimited(s) => error_frame(refusal::KIND_INVALID_REQUEST, &refusal::rate_limited(*s)),
             Refusal::Invalid(kind, d) => error_frame(kind, d),
-            Refusal::Full(d) | Refusal::DeniedHost(d) => error_frame("InvalidRequest", d),
-            Refusal::Internal => error_frame("UnknownError", "Internal error; try again."),
+            Refusal::Full(d) | Refusal::DeniedHost(d) => error_frame(refusal::KIND_INVALID_REQUEST, d),
+            Refusal::Internal => error_frame(refusal::KIND_UNKNOWN, refusal::INTERNAL),
         }
     }
 }

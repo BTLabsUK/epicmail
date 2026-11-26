@@ -631,7 +631,6 @@ async fn probe(ws_url: &str, http: &Http, d: &str) -> anyhow::Result<bool> {
         c.check("Made for waiting mail", matches!(&r, Frame::Json(v) if v["type"] == "Ok"), r.label());
     }
 
-
     // Bad JSON closes the socket.
     let mut j = ws_connect(ws_url).await.map_err(|e| anyhow!(e))?;
     challenge(&mut j).await?;

@@ -116,12 +116,6 @@ pub(super) async fn post(
     }
 }
 
-/// What a client signs for `/v1/pull`: the challenge bound to the relay's identity
-/// (`domain:port`, lower case), so the proof is useless at any other relay.
-fn signed_challenge(challenge: &str, domain: &str, port: u16) -> String {
-    format!("{challenge}@{}:{port}", domain.to_ascii_lowercase())
-}
-
 /// The names other than `server.domain:server.port` a `/v1/pull` signature may be bound to: each
 /// `server.aliases` entry, with its own port or else `server.port`. Lower case, no trailing dot,
 /// the primary name left out.
@@ -196,7 +190,7 @@ async fn prove(st: &AppState, ip: IpAddr, mb: &Value) -> Result<Proven, ProveErr
     let Some(issued) = challenge_issued(challenge, now_s, window) else {
         return Ok(Proven { address, key: Err("challenge is stale or malformed") });
     };
-    let signed = signed_challenge(challenge, &relay.cfg.server.domain, relay.cfg.server.port);
+    let signed = epicmail_core::text::v1_proof_text(challenge, &relay.cfg.server.domain, relay.cfg.server.port);
     if sig::verify(&key, &signed, signature).is_err() {
         // A client that dialled one of the relay's aliases signs for that name. Every extra
         // check is charged to the same budget as a mailbox, and only a mailbox that matches
@@ -207,7 +201,7 @@ async fn prove(st: &AppState, ip: IpAddr, mb: &Value) -> Result<Proven, ProveErr
                 relay.limiter.refused("http", ip);
                 return Ok(Proven { address, key: Err("rate limit exceeded; try again later") });
             }
-            if sig::verify(&key, &signed_challenge(challenge, &host, port), signature).is_ok() {
+            if sig::verify(&key, &epicmail_core::text::v1_proof_text(challenge, &host, port), signature).is_ok() {
                 verified = true;
                 break;
             }
