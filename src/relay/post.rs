@@ -244,8 +244,7 @@ impl Relay {
         };
         match self.store.put_message(m).await {
             Ok(PutOutcome::Stored { msgid }) => {
-                self.registry.wake(&dest_key);
-                self.pull_waiters.wake(&dest_key);
+                self.mail_arrived(&dest_key);
                 PostOutcome::Stored { msgid, txid }
             }
             Ok(PutOutcome::Duplicate { msgid }) => {

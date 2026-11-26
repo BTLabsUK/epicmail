@@ -64,6 +64,7 @@ async fn start_on(
         .into_make_service_with_connect_info::<SocketAddr>();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     tokio::spawn(epicmail::forward::run(relay.clone()));
+    tokio::spawn(epicmail::relay::arrivals(relay.clone()));
     Node { addr, relay }
 }
 

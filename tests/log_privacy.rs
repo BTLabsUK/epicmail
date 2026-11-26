@@ -302,6 +302,7 @@ async fn serve(dir: &std::path::Path, domain: &str, tweak: impl FnOnce(&mut Conf
         .into_make_service_with_connect_info::<SocketAddr>();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     tokio::spawn(epicmail::forward::run(relay.clone()));
+    tokio::spawn(epicmail::relay::arrivals(relay.clone()));
     tokio::spawn(epicmail::traffic::run(relay));
     addr
 }
