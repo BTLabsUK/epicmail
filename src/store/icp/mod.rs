@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use candid::Principal;
 use epicmail_core::address::parse_address;
@@ -228,7 +228,9 @@ impl IcpStore {
         if v.api_version < api::API_VERSION {
             bail!("canister {id} has front-end API {}, this relay needs {}", v.api_version, api::API_VERSION);
         }
-        tracing::info!(canister = %id, version = %v.canister, core = %v.core, "icp store");
+        // The principal the canister's `set_frontends` must list.
+        let frontend = api.agent.get_principal().map_err(|e| anyhow!("icp identity: {e}"))?;
+        tracing::info!(canister = %id, %frontend, version = %v.canister, core = %v.core, "icp store");
         let (tx, rx) = unbounded_channel();
         let inner = Arc::new(Inner {
             api,

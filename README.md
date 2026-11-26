@@ -209,7 +209,9 @@ federation between two relays), a log privacy check of both log outputs at trace
 signature differential
 test against cases recorded from the original verifier ([tools/sigdiff](tools/sigdiff/README.md)).
 `tools/compat-classic.sh` runs the real wallet CLI against two local relays; its header lists what
-it needs.
+it needs. `tools/conformance.sh` checks that a running mailbox behaves like Epicmail.
+`EPICMAIL_TEST_STORE=icp cargo test --features icp --test loopback` runs the loopback relays on
+the ICP store in a local PocketIC ([docs/operating.md](docs/operating.md#11-the-icp-store)).
 
 ## Compatibility
 
@@ -336,6 +338,7 @@ default; `src/config.rs` is the reference.
 |---|---|
 | `[server]` | Listener, identity (`domain`, `port`, `aliases`), trusted proxies, metrics listener, drain |
 | `[store]` | Database path, retention, size cap, group commit, readers, vacuum hour |
+| `[store.icp]` | Keep the mail in an ICP store canister instead of SQLite (build with `--features icp`; [docs/operating.md](docs/operating.md#11-the-icp-store)) |
 | `[protocol]` | Challenge interval, `GetVersion` answer, cancel and mux/1 switches, timeouts, watchdog |
 | `[limits]` | Sizes, rates per network prefix and per sender, socket and mailbox caps |
 | `[federation]` | Forwarding on or off, allow and deny lists, peer URLs, timeouts |
@@ -397,6 +400,8 @@ issue.
 - **One node.** SQLite with one writer, one process, no clustering. A standby restored from
   backup covers most needs; [docs/operating.md](docs/operating.md#7-when-to-switch-to-postgres)
   says when it stops being enough.
+- **On the ICP store**, the canister's caps apply (200 messages per mailbox, 20 per sender) and
+  acknowledgements reach it in batches.
 - **No TLS of its own.** It expects a reverse proxy in front.
 - **Per-prefix limits are coarse.** Users behind one carrier NAT share a budget unless their
   source is in `limits.shared_sources`.
@@ -413,22 +418,24 @@ issue.
 | `src/main.rs`, `src/config.rs` | CLI, startup, shutdown; configuration and its checks |
 | `src/http/` | HTTP routes, the websocket upgrade and the `/v1` API |
 | `src/relay/` | Shared state, posting, cancel, resume tokens, socket registry, sessions |
-| `src/store/` | The `Store` trait and the SQLite store |
+| `src/store/` | The `Store` trait, the SQLite store and the ICP store (`icp/`) |
+| `crates/epicmail-core` | Protocol rules shared with the ICP canister |
 | `src/forward.rs` | Forwarding to other relays |
 | `src/limits.rs` | Rate limits and socket counts |
 | `src/address.rs`, `src/sig.rs` | Epicbox addresses and signatures |
 | `src/logging.rs`, `src/metrics.rs`, `src/traffic.rs` | Log helpers, Prometheus metrics, the log's traffic summary |
 | `src/migrate.rs` | JSON Lines import and export |
 | `tests/` | Loopback relays, log privacy, signature differential |
-| `examples/` | Traffic generators and checks for a running relay |
+| `examples/` | Traffic generators, the conformance suite and other checks for a running relay |
 | `packaging/` | systemd unit, nginx and Caddy examples, example config |
-| `tools/` | One-line installer (`get.sh`), install script, static build, classic wallet run, export from Postgres-backed relays |
+| `tools/` | One-line installer (`get.sh`), install script, static build, classic wallet run, export from Postgres-backed relays, a local ICP for tests (`icp-local`) |
 
 ## Documentation
 
 - [Operating](docs/operating.md): install, limits, health, backup, logging, upgrade
 - [Architecture](docs/architecture.md): modules, message flow, group commit, background tasks
 - [mux/1 specification](docs/mux-1.md)
+- [The ICP mailbox on Epicmail](docs/icp-mailbox.md) and its canister API ([icp-frontend.did](docs/icp-frontend.did))
 - [Example configuration](packaging/epicmail.example.toml)
 
 ## Contributing
