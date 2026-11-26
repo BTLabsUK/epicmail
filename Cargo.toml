@@ -9,6 +9,8 @@ publish = false
 
 [workspace]
 members = [".", "crates/epicmail-core"]
+# Its own lockfile: pocket-ic pins versions the relay cannot take.
+exclude = ["tools/icp-local"]
 resolver = "2"
 
 [lib]

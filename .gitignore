@@ -4,3 +4,4 @@
 *.db-shm
 /local
 /docs/private/
+/tools/icp-local/target

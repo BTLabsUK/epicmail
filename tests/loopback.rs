@@ -22,6 +22,9 @@ use epicmail::sig;
 use epicmail::store::sqlite::SqliteStore;
 use epicmail::store::Store;
 
+#[cfg(feature = "icp")]
+mod icp_local;
+
 /// What a client signs for `/v1/pull` at `domain` (port 443 in the test config).
 fn proof(ch: &str, domain: &str) -> String {
     format!("{ch}@{domain}:443")
@@ -57,7 +60,7 @@ async fn start_on(
     tweak(&mut cfg);
     cfg.validate().unwrap();
     let cfg = Arc::new(cfg);
-    let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&cfg.store.path, 2, 64).unwrap());
+    let store = test_store(dir, &cfg).await;
     let relay = Relay::new(cfg.clone(), store);
     let addr = listener.local_addr().unwrap();
     let app = http::router(AppState { relay: relay.clone(), metrics: None, metrics_on_main: false })
@@ -66,6 +69,34 @@ async fn start_on(
     tokio::spawn(epicmail::forward::run(relay.clone()));
     tokio::spawn(epicmail::relay::arrivals(relay.clone()));
     Node { addr, relay }
+}
+
+/// The store the tests run on: SQLite, or with `EPICMAIL_TEST_STORE=icp` (feature `icp`) a fresh
+/// canister on a local ICP (`icp_local`).
+async fn test_store(dir: &Path, cfg: &Config) -> Arc<dyn Store> {
+    if on_icp() {
+        return icp_store(dir, cfg).await;
+    }
+    Arc::new(SqliteStore::open(&cfg.store.path, 2, 64).unwrap())
+}
+
+#[cfg(feature = "icp")]
+async fn icp_store(dir: &Path, cfg: &Config) -> Arc<dyn Store> {
+    let mut domains = vec![format!("{}:{}", cfg.server.domain, cfg.server.port)];
+    domains.extend(cfg.server.aliases.iter().cloned());
+    let dir = dir.to_path_buf();
+    let icp = tokio::task::spawn_blocking(move || icp_local::store_cfg(&dir, &domains)).await.unwrap();
+    Arc::new(epicmail::store::icp::IcpStore::connect(&icp).await.unwrap())
+}
+
+#[cfg(not(feature = "icp"))]
+async fn icp_store(_: &Path, _: &Config) -> Arc<dyn Store> {
+    panic!("EPICMAIL_TEST_STORE=icp needs --features icp")
+}
+
+/// The tests run on the ICP canister (`EPICMAIL_TEST_STORE=icp`).
+fn on_icp() -> bool {
+    std::env::var("EPICMAIL_TEST_STORE").is_ok_and(|v| v == "icp")
 }
 
 struct Key {
