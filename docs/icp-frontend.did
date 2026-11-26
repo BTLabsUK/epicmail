@@ -1,0 +1,143 @@
+// The front-end API of the ICP store canister: what Epicmail's `IcpStore` calls.
+// These methods are added beside the existing ones (epicbox-store.did), which stay unchanged.
+// See docs/icp-mailbox.md, "Front-end API". Times are unix nanoseconds, canister time.
+// Every fe_* method answers only principals in the `frontends` set; others get Err "Unauthorized.".
+
+type ForwardKind = variant { PostSlate; CancelTx };
+
+// A waiting message without its body: what the front-end's mirror holds.
+type MsgMeta = record {
+  id : nat64;              // the wallet sees msgid "icp<id>"
+  queue : text;            // canonical base58 key of the mailbox
+  sender_key : text;       // canonical base58 key of `from`
+  txid : opt text;
+  bytes : nat32;           // length of `str`
+  posted_ns : nat64;
+  expires_ns : nat64;
+};
+
+type FeMessage = record {
+  id : nat64;
+  queue : text;
+  from : text;             // `from` address exactly as posted
+  str : text;
+  signature : text;
+  txid : opt text;
+  posted_ns : nat64;
+};
+
+type FePut = record {
+  from : text;
+  to : text;
+  str : text;
+  signature : text;
+  txid : opt text;
+  txidsig : opt text;
+};
+
+type FePutResult = variant {
+  Stored : nat64;
+  Duplicate : nat64;       // the same message is already waiting
+  QueueFull;
+  SenderCapped;
+  Cancelled;               // the txid has a tombstone
+  NotParticipant;
+  Refused : text;          // a core post check failed, or the store byte cap: the refusal text
+};
+
+type FeForward = record {
+  peer : text;             // domain:port
+  kind : ForwardKind;
+  frame : text;            // the JSON frame sent to the peer
+  txid : opt text;
+  tx_keys : vec text;      // participant keys to remember for 3.1.0
+  expires_ns : nat64;
+};
+
+type ForwardRow = record {
+  id : nat64;
+  peer : text;
+  kind : ForwardKind;
+  frame : text;
+  attempts : nat32;
+  created_ns : nat64;
+};
+
+type ForwardOutcome = variant {
+  Done;
+  Failed : record { next_ns : nat64; error : text; drop : bool };
+  Deferred : record { next_ns : nat64; error : text };   // peer busy: no attempt counted
+};
+
+type Change = variant {
+  Put : MsgMeta;
+  // Removed by any writer, by expiry or by a cancel. The ids were in `queue`.
+  Removed : record { queue : text; ids : vec nat64 };
+};
+
+type Snapshot = record {
+  msgs : vec MsgMeta;      // ordered by id
+  seq : nat64;             // the change sequence when this page was read
+  done : bool;             // no messages after the last id in `msgs`
+};
+
+type Tombstone = record { participants : vec text; receiver : opt text; acknowledged : bool };
+type TxInfo = record { participants : vec text; endpoints : vec text; tombstone : opt Tombstone };
+
+type FeCancel = record {
+  txid : text;
+  participants : vec text;
+  receiver : opt text;
+  forwards : vec FeForward;
+};
+type CancelWrite = record { queues : vec text; forwards_queued : nat32 };
+
+type FeStats = record {
+  messages_waiting : nat64;
+  mailboxes_waiting : nat64;
+  oldest_waiting_ns : opt nat64;   // posted_ns of the oldest waiting message
+  forwards_waiting : nat64;
+  forward_peers : nat64;
+  oldest_forward_ns : opt nat64;
+  tombstones : nat64;
+  bytes : nat64;                    // live bytes held, counted against max_bytes
+  max_bytes : nat64;
+};
+
+type Version = record { canister : text; core : text; api_version : nat32 };
+
+service : {
+  version : () -> (Version) query;
+  // Controllers only.
+  set_frontends : (vec principal) -> (variant { Ok; Err : text });
+  frontends : () -> (vec principal) query;
+
+  fe_put : (FePut) -> (variant { Ok : FePutResult; Err : text });
+  fe_put_forward : (FeForward) -> (variant { Ok : bool; Err : text });
+
+  // Paged by reply bytes; start with null, then the last id of the previous page.
+  fe_snapshot : (after : opt nat64, limit : nat32) -> (variant { Ok : Snapshot; Err : text }) query;
+  // Changes after `seq`. Gap: `seq` is older than the log keeps; take a new snapshot.
+  fe_changes : (seq : nat64) -> (variant { Ok : record { seq : nat64; changes : vec Change }; Gap; Err : text }) query;
+  // The ids still waiting, in the order asked; reply bytes capped, the rest left out.
+  fe_fetch : (ids : vec nat64) -> (variant { Ok : vec FeMessage; Err : text }) query;
+  // Removes each id that sits in its queue, with the other waiting states of its txid in that
+  // queue. Returns how many messages were removed.
+  fe_ack : (vec record { queue : text; ids : vec nat64 }) -> (variant { Ok : nat64; Err : text });
+
+  fe_forward_peers_due : () -> (variant { Ok : vec text; Err : text }) query;
+  fe_forwards_due : (peer : text, limit : nat32) -> (variant { Ok : vec ForwardRow; Err : text }) query;
+  fe_forward_results : (vec record { id : nat64; outcome : ForwardOutcome }) -> (variant { Ok; Err : text });
+
+  fe_tx_info : (txid : text) -> (variant { Ok : TxInfo; Err : text }) query;
+  fe_cancel : (FeCancel) -> (variant { Ok : CancelWrite; Err : text });
+  fe_pending_cancels : (receiver : text) -> (variant { Ok : vec text; Err : text }) query;
+  fe_ack_cancel : (receiver : text, txid : text) -> (variant { Ok; Err : text });
+
+  // Single use of a /v1 proof. False when it was used before.
+  fe_use_challenge : (key : text, expires_ns : nat64) -> (variant { Ok : bool; Err : text });
+
+  fe_stats : () -> (variant { Ok : FeStats; Err : text }) query;
+  // Transactions first seen at or before `before_ns` with no slate from the other party and no tombstone.
+  fe_unanswered : (before_ns : nat64) -> (variant { Ok : nat64; Err : text }) query;
+}
