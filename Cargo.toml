@@ -48,6 +48,12 @@ ipnet = { version = "2", features = ["serde"] }
 base64 = "0.23"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
+ic-agent = { version = "0.49", optional = true }
+candid = { version = "0.10", optional = true }
+
+[features]
+# The ICP canister as the store (`[store.icp]`).
+icp = ["dep:ic-agent", "dep:candid"]
 
 [dev-dependencies]
 tempfile = "3"

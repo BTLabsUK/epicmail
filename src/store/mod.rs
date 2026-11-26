@@ -1,10 +1,11 @@
 //! Durable state behind one trait, so a second backend (a remote store such as the ICP canister)
 //! can be added without touching the protocol code. Every write call returns after its
 //! transaction has committed: callers send `Ok` to a wallet only after that. The exceptions are
-//! the delivery bookkeeping calls (`made`, `made_in`, `release`, `hold` and the `forward_*`
-//! results), which answer nobody with a promise of durability: a remote store may apply them to
-//! its own view at once and commit them in batches, and `flush` commits what is held back. A
-//! batch lost in a crash only means a message is offered again.
+//! the delivery bookkeeping calls (`made`, `made_in`, `release`, `hold`, the removal in a
+//! Consume `claim` and the `forward_*` results), which answer nobody with a promise of
+//! durability: a remote store may apply them to its own view at once and commit them in
+//! batches, and `flush` commits what is held back. A batch lost in a crash only means a message
+//! is offered again.
 //!
 //! A store that other writers share (mail that arrives without passing through this process)
 //! reports the mailboxes that got mail through `take_arrivals`, so their listeners are woken.
@@ -13,6 +14,8 @@
 //! - `id` is the row id, internal only.
 //! - `msgid` is the 32-character `epicboxmsgid` wallets see.
 
+#[cfg(feature = "icp")]
+pub mod icp;
 pub mod sqlite;
 
 use anyhow::Result;
@@ -60,6 +63,8 @@ pub enum PutOutcome {
     Cancelled,
     /// The txid is known and the poster is not one of its participants.
     NotParticipant,
+    /// The store holds its byte cap (a store that keeps its own, like the ICP canister).
+    StoreFull,
 }
 
 #[derive(Debug, Clone, Serialize)]
