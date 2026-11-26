@@ -1,0 +1,34 @@
+# A relay with small limits, for: tools/conformance.sh --url http://127.0.0.1:3423 --domain a.test --staging
+# Start a second relay (any config with domain b.test on 127.0.0.1:3424 and this one as a peer) for the federation cases.
+# The suite's --queue-cap, --sender-cap and --post-burst defaults match the limits below.
+[server]
+listen = "127.0.0.1:3423"
+domain = "a.test"
+port = 443
+trusted_proxies = []
+drain_seconds = 1
+landing_page = false
+
+[store]
+path = "conformance-a.db"
+
+[protocol]
+challenge_interval_s = 5
+
+[limits]
+queue_cap = 12
+per_sender_cap = 5
+posts_per_min_per_address = 6
+posts_burst_per_address = 10
+posts_per_min_per_ip = 6000
+posts_burst_per_ip = 6000
+
+[federation]
+enabled = true
+allow_private = true
+
+[federation.peers]
+"b.test:443" = "ws://127.0.0.1:3424/"
+
+[log.file]
+enabled = false
