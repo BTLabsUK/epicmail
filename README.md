@@ -435,7 +435,7 @@ issue.
 - [Operating](docs/operating.md): install, limits, health, backup, logging, upgrade
 - [Architecture](docs/architecture.md): modules, message flow, group commit, background tasks
 - [mux/1 specification](docs/mux-1.md)
-- [The ICP mailbox on Epicmail](docs/icp-mailbox.md) and its canister API ([icp-frontend.did](docs/icp-frontend.did))
+- The ICP store canister API: [icp-frontend.did](docs/icp-frontend.did)
 - [Example configuration](packaging/epicmail.example.toml)
 
 ## Contributing

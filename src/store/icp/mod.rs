@@ -1,4 +1,4 @@
-//! A store held by the ICP store canister (docs/icp-mailbox.md, "Epicmail in front of the
+//! A store held by the ICP store canister ("Epicmail in front of the
 //! canister"). The canister keeps the messages, forwards, tombstones and challenges; it is the
 //! one copy, shared with the writers that post to it directly (other canisters, the legacy
 //! Epicbox API).

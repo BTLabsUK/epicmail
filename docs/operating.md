@@ -448,7 +448,7 @@ tools/ship --publish X.Y.Z       # sign and create the GitHub release
 With `[store.icp]` set, the relay keeps its mail in an ICP store canister (epicbox-store, the
 canister behind icpepicbox.btlabs.uk) instead of the SQLite file. The
 wallet protocols, federation and `/v1` stay the relay's; the canister holds messages,
-forwards, cancel records and the caps. [icp-mailbox.md](icp-mailbox.md) has the design.
+forwards, cancel records and the caps.
 
 The binary needs the `icp` feature: `cargo build --release --features icp`. The default build has
 no ICP code or crates in it (no `ic-agent`, no `candid`) and refuses a config that sets
