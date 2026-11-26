@@ -4,8 +4,9 @@
 //! Needs `POCKET_IC_BIN` (the pocket-ic server binary). Prints `{"url": …}` once the gateway is
 //! up, then answers one JSON request per stdin line with one JSON line on stdout:
 //!
-//! - `{"op":"new","wasm":PATH,"dir":DIR,"domains":[…]}`: a fresh canister from `wasm` with a new
-//!   Ed25519 front-end identity written to `dir`, and `domains` as its local domains. Answers
+//! - `{"op":"new","wasm":PATH,"dir":DIR,"domains":[…],"max_bytes":N}`: a fresh canister from
+//!   `wasm` with a new Ed25519 front-end identity written to `dir`, `domains` as its local
+//!   domains and, when given, `max_bytes` as its store cap. Answers
 //!   `{"canister":ID,"url":URL,"identity_pem":PATH}`.
 //! - `{"op":"cycles","canister":ID}`: answers `{"cycles":N}`.
 //!
@@ -29,6 +30,8 @@ fn main() -> Result<()> {
     if std::env::var_os("POCKET_IC_BIN").is_none() {
         bail!("POCKET_IC_BIN is not set: point it at the pocket-ic server binary");
     }
+    // The server would write its logs to our stdout, which carries the replies.
+    std::env::set_var("POCKET_IC_MUTE_SERVER", "1");
     let mut pic = PocketIcBuilder::new().with_application_subnet().build();
     let url = pic.make_live(None).to_string().trim_end_matches('/').to_string();
     let controller = Principal::from_slice(&[0xC0, 0x01]);
@@ -60,7 +63,7 @@ fn answer(pic: &PocketIc, controller: Principal, url: &str, line: &str) -> Resul
                 .iter()
                 .filter_map(|d| d.as_str().map(String::from))
                 .collect();
-            let id = canister(pic, controller, Path::new(text("wasm")?), frontend, &domains)?;
+            let id = canister(pic, controller, Path::new(text("wasm")?), frontend, &domains, req["max_bytes"].as_u64())?;
             Ok(json!({ "canister": id.to_text(), "url": url, "identity_pem": pem }))
         }
         "cycles" => {
@@ -71,13 +74,15 @@ fn answer(pic: &PocketIc, controller: Principal, url: &str, line: &str) -> Resul
     }
 }
 
-/// A fresh store canister from `wasm` that answers `frontend` and treats `domains` as its own.
+/// A fresh store canister from `wasm` that answers `frontend`, treats `domains` as its own and
+/// holds at most `max_bytes`.
 fn canister(
     pic: &PocketIc,
     controller: Principal,
     wasm: &Path,
     frontend: Principal,
     domains: &[String],
+    max_bytes: Option<u64>,
 ) -> Result<Principal> {
     let code = std::fs::read(wasm).with_context(|| format!("reading {}", wasm.display()))?;
     let id = pic.create_canister_with_settings(Some(controller), None);
@@ -89,6 +94,9 @@ fn canister(
     };
     set("set_frontends", Encode!(&vec![frontend])?)?;
     set("set_local_domains", Encode!(&domains.to_vec())?)?;
+    if let Some(n) = max_bytes {
+        set("set_max_bytes", Encode!(&n)?)?;
+    }
     Ok(id)
 }
 

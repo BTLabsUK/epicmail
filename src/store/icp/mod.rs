@@ -45,7 +45,8 @@ use crate::config::IcpCfg;
 
 /// Ids per batched call: well under the 2 MiB ingress limit.
 const BATCH_IDS: usize = 2000;
-/// How long a forward stays hidden after its result was sent: query replicas may lag behind it.
+/// The longest a forward stays hidden after its result was sent: query replicas may lag
+/// behind it.
 const RESULT_LAG: Duration = Duration::from_secs(30);
 const SNAPSHOT_PAGE: u32 = 1000;
 /// Not offerable while a claim fetches the body.
@@ -169,13 +170,14 @@ struct Pending {
     results: HashMap<u64, ForwardOutcome>,
     /// Results in a call now.
     sending: HashSet<u64>,
-    /// Results sent, by when.
+    /// Results sent, hidden until then.
     recent: HashMap<u64, Instant>,
 }
 
 impl Pending {
     fn hidden(&mut self) -> HashSet<u64> {
-        self.recent.retain(|_, t| t.elapsed() < RESULT_LAG);
+        let now = Instant::now();
+        self.recent.retain(|_, t| *t > now);
         self.results.keys().chain(&self.sending).chain(self.recent.keys()).copied().collect()
     }
 }
@@ -427,11 +429,23 @@ impl Inner {
                 }
                 return Err(e);
             }
-            let now = Instant::now();
-            p.recent.extend(results.iter().map(|r| (r.id, now)));
+            let (now, wall) = (Instant::now(), crate::clock::now_ms());
+            p.recent.extend(results.iter().map(|r| (r.id, now + hide_for(&r.outcome, wall))));
             self.batch_ok.store(true, Ordering::Relaxed);
             metrics::counter!("epicbox_icp_batches_total").increment(1);
         }
+    }
+}
+
+/// How long a row stays hidden once its result is sent. A retried row is due again at its
+/// `next_ns` whether or not the replica asked has seen the result yet; until then, and for
+/// `RESULT_LAG` after a row is removed, a lagging replica could hand it back too early.
+fn hide_for(outcome: &ForwardOutcome, now_ms: i64) -> Duration {
+    match outcome {
+        ForwardOutcome::Failed { next_ns, drop: false, .. } | ForwardOutcome::Deferred { next_ns, .. } => {
+            Duration::from_millis((ms(*next_ns) - now_ms).max(0) as u64).min(RESULT_LAG)
+        }
+        _ => RESULT_LAG,
     }
 }
 

@@ -60,7 +60,7 @@ async fn start_on(
     tweak(&mut cfg);
     cfg.validate().unwrap();
     let cfg = Arc::new(cfg);
-    let store = test_store(dir, &cfg).await;
+    let store = test_store(&cfg).await;
     let relay = Relay::new(cfg.clone(), store);
     let addr = listener.local_addr().unwrap();
     let app = http::router(AppState { relay: relay.clone(), metrics: None, metrics_on_main: false })
@@ -71,26 +71,26 @@ async fn start_on(
     Node { addr, relay }
 }
 
-/// The store the tests run on: SQLite, or with `EPICMAIL_TEST_STORE=icp` (feature `icp`) a fresh
-/// canister on a local ICP (`icp_local`).
-async fn test_store(dir: &Path, cfg: &Config) -> Arc<dyn Store> {
+/// The store the tests run on: SQLite, or with `EPICMAIL_TEST_STORE=icp` (feature `icp`) a
+/// canister on a local ICP (`icp_local`), one per store path.
+async fn test_store(cfg: &Config) -> Arc<dyn Store> {
     if on_icp() {
-        return icp_store(dir, cfg).await;
+        return icp_store(cfg).await;
     }
     Arc::new(SqliteStore::open(&cfg.store.path, 2, 64).unwrap())
 }
 
 #[cfg(feature = "icp")]
-async fn icp_store(dir: &Path, cfg: &Config) -> Arc<dyn Store> {
+async fn icp_store(cfg: &Config) -> Arc<dyn Store> {
     let mut domains = vec![format!("{}:{}", cfg.server.domain, cfg.server.port)];
     domains.extend(cfg.server.aliases.iter().cloned());
-    let dir = dir.to_path_buf();
-    let icp = tokio::task::spawn_blocking(move || icp_local::store_cfg(&dir, &domains)).await.unwrap();
+    let (path, max_bytes) = (cfg.store.path.clone(), cfg.store.max_bytes);
+    let icp = tokio::task::spawn_blocking(move || icp_local::store_cfg(&path, &domains, max_bytes)).await.unwrap();
     Arc::new(epicmail::store::icp::IcpStore::connect(&icp).await.unwrap())
 }
 
 #[cfg(not(feature = "icp"))]
-async fn icp_store(_: &Path, _: &Config) -> Arc<dyn Store> {
+async fn icp_store(_: &Config) -> Arc<dyn Store> {
     panic!("EPICMAIL_TEST_STORE=icp needs --features icp")
 }
 
@@ -187,7 +187,9 @@ async fn http_with_head(n: &Node, method: &str, path: &str, body: Option<Value>)
     (status, head.to_string(), serde_json::from_str(body).unwrap_or(Value::String(body.to_string())))
 }
 
+/// Messages waiting on `n`, after the writes a store batches (acks on ICP) are sent.
 async fn waiting(n: &Node) -> u64 {
+    n.relay.store.flush().await.unwrap();
     n.relay.store.stats(now_ms()).await.unwrap().messages_waiting as u64
 }
 
@@ -807,10 +809,13 @@ async fn a_client_that_stops_reading_is_closed() {
         c.limits.bytes_per_min_per_ip = 1 << 30;
     })
     .await;
-    let (alice, bob) = (Key::new(), Key::new());
-    // About 12 MB of mail: more than the kernel buffers on both ends of a loopback socket.
+    let bob = Key::new();
+    // About 12 MB of mail: more than the kernel buffers on both ends of a loopback socket. Eight
+    // senders keep each under a store's per-sender cap (20 on the ICP canister).
+    let senders: Vec<Key> = (0..8).map(|_| Key::new()).collect();
     let pad = "0".repeat(100_000);
     for i in 0..120u32 {
+        let alice = &senders[i as usize % senders.len()];
         let body = json!({
             "destination": {"public_key": bob.pk, "domain": "relay.test", "port": 443},
             "encrypted_message": format!("{i:08x}{pad}"), "salt": "00", "nonce": "00"
@@ -1110,6 +1115,11 @@ async fn a_socket_with_our_own_instance_id_is_a_forward_loop() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unreachable_peer_costs_one_attempt_per_backoff_not_one_per_row() {
+    // Reads rows still in backoff by asking forwards_due with a later `now`; the canister
+    // ignores it and uses its own clock.
+    if on_icp() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let n = start(dir.path(), "relay.test", |c| {
         c.federation.allow_private = true;
@@ -1267,6 +1277,10 @@ async fn a_slate_reposted_with_another_from_is_still_one_message() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pulls_stop_a_quarter_above_the_store_cap() {
+    // The cutoff guards the SQLite file; the canister caps its bytes itself and reports none.
+    if on_icp() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let n = start(dir.path(), "relay.test", |c| c.store.max_bytes = 1).await;
     let bob = Key::new();
@@ -1505,6 +1519,10 @@ async fn a_cancel_hands_the_message_in_flight_back_at_once() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_store_failure_mid_cancel_leaves_nothing_half_done() {
+    // Breaks the SQLite file under the relay.
+    if on_icp() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let n = start(dir.path(), "relay.test", |c| {
         // Nothing listens there, so forward rows stay queued and can be read.
@@ -2706,8 +2724,20 @@ fn metric(name: &str, labels: &[(&str, &str)]) -> f64 {
 
 /// The queued forward rows of a relay for a peer, also those waiting out a short back-off
 /// (`forwards_due` hides rows that have expired at the time it is given, so not `i64::MAX`).
+///
+/// On ICP the canister shows only rows due by its own clock, and the store hides a row while
+/// its result is on the way, so an empty answer is read again until no forward waits at all.
 async fn queued_forwards(n: &Node, peer: &str) -> Vec<epicmail::store::ForwardRow> {
-    n.relay.store.forwards_due(peer, now_ms() + 120_000, 100).await.unwrap()
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        n.relay.store.flush().await.unwrap();
+        let rows = n.relay.store.forwards_due(peer, now_ms() + 120_000, 100).await.unwrap();
+        if !rows.is_empty() || !on_icp() || n.relay.store.stats(now_ms()).await.unwrap().forwards_waiting == 0 {
+            return rows;
+        }
+        assert!(std::time::Instant::now() < deadline, "a forward waits but none is due");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2787,7 +2817,8 @@ async fn an_unanswered_cancel_is_dropped_and_does_not_hold_the_peer_back() {
     .await;
     let before = metric("epicbox_forwards_total", &[("result", "unanswered")]);
     let now = now_ms();
-    let cancel = json!({"type":"CancelTx","address":"x","epicboxtxid":"t","signature":"s"});
+    let (k, txid) = (Key::new(), "0123456789abcdef0123456789abcdef");
+    let cancel = json!({"type":"CancelTx","address":k.pk,"epicboxtxid":txid,"signature":k.sign(txid)});
     a.relay
         .store
         .put_forward(NewForward {
