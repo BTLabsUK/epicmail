@@ -71,44 +71,8 @@ pub struct StoreCfg {
     pub unanswered_hours: u32,
     /// `[store.icp]`: keep the mail in the ICP store canister instead of the SQLite file. Needs
     /// a binary built with the `icp` feature. `path` then holds nothing.
-    pub icp: Option<IcpCfg>,
-}
-
-/// `[store.icp]`: the ICP store canister, called through its front-end API
-/// (`docs/icp-frontend.did`). The canister owns caps, retention and the byte cap; this relay
-/// keeps a mirror of what waits there and answers wallets from it.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct IcpCfg {
-    /// Canister id (principal text).
-    pub canister: String,
-    /// The ICP API endpoint.
-    pub url: String,
-    /// PEM file of the front-end identity (secp256k1 or Ed25519), one of the canister's
-    /// `frontends`. Read once at start.
-    pub identity_pem: PathBuf,
-    /// A local replica (PocketIC, dfx): fetch its root key. Never on mainnet.
-    pub local_replica: bool,
-    /// Milliseconds between reads of the canister's change log, for mail other writers posted.
-    pub poll_ms: u64,
-    /// Milliseconds acknowledgements and forward results are held to go in one call.
-    pub batch_ms: u64,
-    /// Seconds one call may take, retries included, before it fails.
-    pub call_timeout_s: u64,
-}
-
-impl Default for IcpCfg {
-    fn default() -> Self {
-        Self {
-            canister: String::new(),
-            url: "https://icp-api.io".into(),
-            identity_pem: PathBuf::new(),
-            local_replica: false,
-            poll_ms: 1000,
-            batch_ms: 200,
-            call_timeout_s: 30,
-        }
-    }
+    #[cfg(feature = "icp")]
+    pub icp: Option<crate::store::icp::IcpCfg>,
 }
 
 /// `[protocol]`: the websocket protocol. Every Challenge, the first included, is fresh and
@@ -351,6 +315,7 @@ impl Default for StoreCfg {
             vacuum_hour_utc: 3,
             max_bytes: 2 << 30,
             unanswered_hours: 24,
+            #[cfg(feature = "icp")]
             icp: None,
         }
     }
@@ -515,16 +480,9 @@ impl Config {
         if self.store.readers == 0 || self.store.group_commit_max == 0 {
             bail!("store.readers and store.group_commit_max must be at least 1");
         }
+        #[cfg(feature = "icp")]
         if let Some(icp) = &self.store.icp {
-            if icp.canister.is_empty() || icp.identity_pem.as_os_str().is_empty() {
-                bail!("store.icp needs canister and identity_pem");
-            }
-            if !(icp.url.starts_with("https://") || icp.local_replica && icp.url.starts_with("http://")) {
-                bail!("store.icp.url must start with https:// (http:// only with local_replica)");
-            }
-            if icp.poll_ms == 0 || icp.batch_ms == 0 || icp.call_timeout_s == 0 {
-                bail!("store.icp.poll_ms, batch_ms and call_timeout_s must be at least 1");
-            }
+            icp.validate()?;
         }
         if self.protocol.challenge_interval_s < 5 {
             bail!("protocol.challenge_interval_s must be at least 5");
@@ -767,5 +725,13 @@ listen_typo = 1
 ",
         );
         assert!(err.is_err());
+    }
+
+    /// The default build has no ICP store, so it takes `[store.icp]` for a typo.
+    #[cfg(not(feature = "icp"))]
+    #[test]
+    fn store_icp_needs_the_icp_build() {
+        let err = toml::from_str::<Config>("[store.icp]\ncanister = \"aaaaa-aa\"\n").unwrap_err();
+        assert!(err.to_string().contains("unknown field `icp`"), "{err}");
     }
 }

@@ -18,6 +18,9 @@
 //! Ids: the canister's message id `n` is the wallet's msgid `icp<n>` and the row id `n`.
 
 pub mod api;
+mod config;
+
+pub use self::config::IcpCfg;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,7 +44,6 @@ use super::{
     CancelWrite, ClaimMode, ForwardKind, ForwardRow, NewForward, NewMessage, PutOutcome, Stats, Store, StoredMessage,
     SweepStats, Tombstone, TxInfo,
 };
-use crate::config::IcpCfg;
 
 /// Ids per batched call: well under the 2 MiB ingress limit.
 const BATCH_IDS: usize = 2000;

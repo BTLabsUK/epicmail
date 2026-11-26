@@ -8,7 +8,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use epicmail::config::IcpCfg;
+use epicmail::store::icp::IcpCfg;
 use serde_json::{json, Value};
 
 struct Tool {

@@ -77,16 +77,15 @@ fn open_store(cfg: &Config) -> Result<Arc<SqliteStore>> {
 
 /// The store `serve` and `selftest` use: the ICP canister when `[store.icp]` is set.
 async fn serving_store(cfg: &Config) -> Result<Arc<dyn Store>> {
-    match &cfg.store.icp {
-        #[cfg(feature = "icp")]
-        Some(icp) => Ok(Arc::new(epicmail::store::icp::IcpStore::connect(icp).await?)),
-        #[cfg(not(feature = "icp"))]
-        Some(_) => bail!("[store.icp] is set but this build has no ICP support (build with --features icp)"),
-        None => Ok(open_store(cfg)?),
+    #[cfg(feature = "icp")]
+    if let Some(icp) = &cfg.store.icp {
+        return Ok(Arc::new(epicmail::store::icp::IcpStore::connect(icp).await?));
     }
+    Ok(open_store(cfg)?)
 }
 
 /// import and export work on the SQLite file.
+#[cfg(feature = "icp")]
 fn sqlite_only(cfg: &Config, what: &str) -> Result<()> {
     if cfg.store.icp.is_some() {
         bail!("{what} works on the SQLite store; [store.icp] is set");
@@ -297,6 +296,7 @@ async fn housekeeping(relay: Arc<Relay>) {
 }
 
 async fn import(cfg: Config, file: PathBuf) -> Result<()> {
+    #[cfg(feature = "icp")]
     sqlite_only(&cfg, "import")?;
     let store = open_store(&cfg)?;
     let f = std::fs::File::open(&file).with_context(|| format!("opening {}", file.display()))?;
@@ -306,6 +306,7 @@ async fn import(cfg: Config, file: PathBuf) -> Result<()> {
 }
 
 fn export(cfg: &Config, out: Option<PathBuf>) -> Result<()> {
+    #[cfg(feature = "icp")]
     sqlite_only(cfg, "export")?;
     let stats = match out {
         Some(p) => {
@@ -337,9 +338,9 @@ async fn selftest(cfg: Config) -> Result<()> {
     println!("signatures: ok");
     let store = serving_store(&cfg).await?;
     store.check_writable().await.context("store write check")?;
-    match &cfg.store.icp {
-        Some(icp) => println!("store: ok (icp canister {})", icp.canister),
-        None => println!("store: ok ({})", cfg.store.path.display()),
-    }
+    let place = cfg.store.path.display().to_string();
+    #[cfg(feature = "icp")]
+    let place = cfg.store.icp.as_ref().map_or(place, |i| format!("icp canister {}", i.canister));
+    println!("store: ok ({place})");
     Ok(())
 }

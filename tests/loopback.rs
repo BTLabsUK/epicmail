@@ -136,10 +136,16 @@ async fn send(ws: &mut Ws, v: Value) {
     ws.send(Message::Text(v.to_string().into())).await.unwrap();
 }
 
+/// The longest wait for a frame. Every canister call in a local PocketIC is a round, and with the
+/// whole suite running at once a round can take seconds.
+fn frame_wait() -> Duration {
+    Duration::from_secs(if on_icp() { 30 } else { 10 })
+}
+
 /// Next JSON frame, skipping websocket control frames.
 async fn recv(ws: &mut Ws) -> Value {
     loop {
-        let m = tokio::time::timeout(Duration::from_secs(10), ws.next())
+        let m = tokio::time::timeout(frame_wait(), ws.next())
             .await
             .expect("timed out waiting for a frame")
             .expect("socket ended")
