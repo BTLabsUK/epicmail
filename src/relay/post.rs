@@ -254,6 +254,7 @@ impl Relay {
             }
             Ok(PutOutcome::QueueFull) => Refused(Refusal::Full(refusal::QUEUE_FULL.into())),
             Ok(PutOutcome::SenderCapped) => Refused(Refusal::Full(refusal::SENDER_CAPPED.into())),
+            Ok(PutOutcome::StoreFull) => Refused(Refusal::Full(refusal::STORE_FULL.into())),
             Ok(PutOutcome::Cancelled) => PostOutcome::Cancelled { txid: txid.unwrap_or_default() },
             Ok(PutOutcome::NotParticipant) => {
                 Refused(Refusal::Invalid(refusal::KIND_INVALID_REQUEST, refusal::NOT_PARTICIPANT.into()))

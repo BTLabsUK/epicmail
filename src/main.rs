@@ -75,11 +75,30 @@ fn open_store(cfg: &Config) -> Result<Arc<SqliteStore>> {
     Ok(Arc::new(SqliteStore::open(&cfg.store.path, cfg.store.readers, cfg.store.group_commit_max)?))
 }
 
+/// The store `serve` and `selftest` use: the ICP canister when `[store.icp]` is set.
+async fn serving_store(cfg: &Config) -> Result<Arc<dyn Store>> {
+    match &cfg.store.icp {
+        #[cfg(feature = "icp")]
+        Some(icp) => Ok(Arc::new(epicmail::store::icp::IcpStore::connect(icp).await?)),
+        #[cfg(not(feature = "icp"))]
+        Some(_) => bail!("[store.icp] is set but this build has no ICP support (build with --features icp)"),
+        None => Ok(open_store(cfg)?),
+    }
+}
+
+/// import and export work on the SQLite file.
+fn sqlite_only(cfg: &Config, what: &str) -> Result<()> {
+    if cfg.store.icp.is_some() {
+        bail!("{what} works on the SQLite store; [store.icp] is set");
+    }
+    Ok(())
+}
+
 async fn serve(cfg: Config) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let handle = relay_metrics::install()?;
     let cfg = Arc::new(cfg);
-    let store: Arc<dyn Store> = open_store(&cfg)?;
+    let store = serving_store(&cfg).await?;
     store.check_writable().await.context("store is not writable")?;
     let relay = Relay::new(cfg.clone(), store);
 
@@ -278,6 +297,7 @@ async fn housekeeping(relay: Arc<Relay>) {
 }
 
 async fn import(cfg: Config, file: PathBuf) -> Result<()> {
+    sqlite_only(&cfg, "import")?;
     let store = open_store(&cfg)?;
     let f = std::fs::File::open(&file).with_context(|| format!("opening {}", file.display()))?;
     let stats = migrate::import_jsonl(store.as_ref(), &cfg, std::io::BufReader::new(f), now_ms()).await?;
@@ -286,6 +306,7 @@ async fn import(cfg: Config, file: PathBuf) -> Result<()> {
 }
 
 fn export(cfg: &Config, out: Option<PathBuf>) -> Result<()> {
+    sqlite_only(cfg, "export")?;
     let stats = match out {
         Some(p) => {
             let f = std::fs::File::create(&p).with_context(|| format!("creating {}", p.display()))?;
@@ -314,8 +335,11 @@ async fn selftest(cfg: Config) -> Result<()> {
         bail!("signature check failed");
     }
     println!("signatures: ok");
-    let store = open_store(&cfg)?;
+    let store = serving_store(&cfg).await?;
     store.check_writable().await.context("store write check")?;
-    println!("store: ok ({})", cfg.store.path.display());
+    match &cfg.store.icp {
+        Some(icp) => println!("store: ok (icp canister {})", icp.canister),
+        None => println!("store: ok ({})", cfg.store.path.display()),
+    }
     Ok(())
 }

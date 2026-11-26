@@ -442,3 +442,64 @@ tools/ship --publish X.Y.Z       # sign and create the GitHub release
 `--release` also copies `tools/install.sh` and the two packaging files `get.sh` uses into the staged files and lists them in `SHA256SUMS`, so `get.sh` can check them.
 
 `--publish` signs `SHA256SUMS` with the BT Labs key (`~/.config/btlabs/signing/btlabs-2026-a.key`, or `SHIP_SIGN_KEY`) through `tools/ship-sign.py`, checks the signature against the public key pinned in `tools/get.sh`, checks every hash and runs `gh release create`. Nothing is published by `--release`.
+
+## 11. The ICP store
+
+With `[store.icp]` set, the relay keeps its mail in an ICP store canister (epicbox-store, the
+canister behind icpepicbox.btlabs.uk) instead of the SQLite file. The
+wallet protocols, federation and `/v1` stay the relay's; the canister holds messages,
+forwards, cancel records and the caps. [icp-mailbox.md](icp-mailbox.md) has the design.
+
+The binary needs the `icp` feature: `cargo build --release --features icp`. A build without it
+refuses a config that sets `[store.icp]`.
+
+```toml
+[store.icp]
+canister = "<canister id>"
+identity_pem = "/etc/epicmail/icp-frontend.pem"   # secp256k1 or Ed25519; read once at start
+url = "https://icp-api.io"                         # default
+poll_ms = 1000                                     # reads of the canister's change log
+batch_ms = 200                                     # acks and forward results held for one call
+call_timeout_s = 30                                # one call, retries included
+```
+
+`local_replica = true` is for PocketIC or dfx only: it trusts the replica's root key and allows
+an `http://` url.
+
+Set up the canister once, as a controller:
+
+1. `set_frontends(vec { principal "<front-end principal>" })`. The relay logs the principal of
+   its identity on the `icp store` line at start.
+2. `set_local_domains(vec { "<server.domain>:443" })`: the domains this mailbox answers for.
+3. Optionally `set_max_bytes(<bytes>)`.
+
+At start the relay checks the canister's front-end API version, reads a snapshot of the waiting
+messages' metadata into memory, then follows the canister's change log every `poll_ms`. Mail
+posted to the canister directly (its own `/v1`, other canisters) reaches the relay's sockets
+within `poll_ms`. Bodies are fetched when a message is offered.
+
+What differs from SQLite:
+
+- **Caps are the canister's.** 200 messages per mailbox, 20 per sender and mailbox, 128 KiB per
+  message, and its own byte cap. `limits.queue_cap`, `limits.per_sender_cap` and
+  `store.max_bytes` do not apply. Retention is the canister's 7 days.
+- **Acknowledgements are batched.** A Made or Ack removes the message from the relay's view at
+  once and reaches the canister within `batch_ms`; so do forward results. A shutdown sends what
+  is held. `/status.json` counts can lag by `batch_ms`.
+- **Leases live in the relay's memory.** After a restart a message can be offered again before
+  its 60 s lease ends. Wallets handle a repeat.
+- **Reads are uncertified queries**, answered by one replica. The relay checks each body against
+  its sender's signature before it sends it, so a replica cannot forge mail. The canister trusts
+  the front-end's key for reads and acknowledgements.
+- **No local data.** `sweep` and `vacuum` are the canister's; `import` and `export` refuse a
+  config with `[store.icp]`; backups are canister snapshots.
+- **Each update call costs cycles**: a post, a forward, a cancel, and one call per batch of
+  acknowledgements or forward results. Queries cost the canister cycles too.
+
+Upgrade and roll back the canister with a snapshot (`dfx canister snapshot create`, then
+`snapshot load`). The relay's own upgrade is as in section 9, without the database steps.
+
+Tests: `tools/icp-local` runs a local PocketIC with a store canister per request. With
+`POCKET_IC_BIN` (the pocket-ic server) and `EPICMAIL_TEST_ICP_WASM` (the canister wasm) set,
+`EPICMAIL_TEST_STORE=icp cargo test --features icp --test loopback` runs the loopback suite on
+the ICP store. Three tests that need the SQLite file or a later clock skip there.
