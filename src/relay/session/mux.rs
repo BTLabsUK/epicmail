@@ -12,10 +12,10 @@ use crate::address::parse_address;
 use crate::clock::now_ms;
 use crate::ids::is_txid;
 use crate::ids::{is_msgid, rand_b64url};
-use crate::logging::short;
 use crate::limits::SigRefused;
+use crate::logging::short;
 use crate::relay::tokens::TOKEN_TTL_MS;
-use crate::relay::{CancelOutcome, ATTACH_HOST_EXT, ATTACH_SIG_PREFIX, CANCEL_SEPARATED_EXT};
+use crate::relay::{CancelOutcome, ATTACH_HOST_EXT, CANCEL_SEPARATED_EXT};
 use crate::relay::{Cmd, PostOutcome, PostReq, Refusal, OFFER_LEASE_MS};
 use crate::sig;
 use crate::store::ClaimMode;
@@ -313,7 +313,7 @@ impl Session {
             let proven_sig = match host {
                 Some(h) if !r.cfg.is_public_host(h) => Err("wrong_host"),
                 Some(h) => {
-                    let text = format!("{ATTACH_SIG_PREFIX}{h}:{challenge}");
+                    let text = epicmail_core::text::attach_text(h, &challenge);
                     sig::verify(&key, &text, signature).map_err(|_| "bad_signature")
                 }
                 None if !r.cfg.protocol.accept_bare_attach => Err("bad_signature"),

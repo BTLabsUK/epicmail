@@ -4,21 +4,18 @@
 use std::net::IpAddr;
 use std::sync::atomic::Ordering;
 
-use serde_json::{json, Value};
+use epicmail_core::post::{check_envelope, route};
+use epicmail_core::refusal;
+use epicmail_core::tx::{tx_gate, TxGate};
+use serde_json::json;
 
 use super::{PostOutcome, PostReq, Refusal, Relay, SigScope};
-use crate::address::{parse_address, EpicboxAddress};
+use crate::address::EpicboxAddress;
 use crate::clock::now_ms;
-use crate::ids::{is_txid, rand_id};
+use crate::ids::rand_id;
 use crate::logging::short_addr;
-use crate::sig;
 use crate::store::{ForwardKind, NewForward, NewMessage, PutOutcome};
 use crate::traffic::Count;
-
-/// The refusal text for a PostSlate with missing fields or half the 3.1.0 fields, worded as the
-/// stock relay words it.
-const MISSING_FIELDS: &str = "PostSlate requires from, to, str, and signature. epicboxtxid and epicboxtxidsig \
-                              must either both be absent (legacy) or both be valid (protocol 3.1.0).";
 
 /// A slate that passed every check in `check_post`.
 struct Slate {
@@ -160,17 +157,12 @@ impl Relay {
     }
 
     /// Every check that needs no store: limits, sizes, addresses, signatures and the
-    /// destination inside the slate.
-    fn check_post(
-        &self,
-        ip: IpAddr,
-        req: PostReq,
-        allow_cancel: bool,
-        scope: &mut SigScope,
-    ) -> Result<Slate, Refusal> {
+    /// destination inside the slate. The pure steps are `epicmail_core::post`; the limiters run
+    /// between them in the same order as before: IP limit, signature block, the checks, the
+    /// address limit once the signatures are good, then the destination.
+    fn check_post(&self, ip: IpAddr, req: PostReq, allow_cancel: bool, scope: &mut SigScope) -> Result<Slate, Refusal> {
         let lim = &self.cfg.limits;
-        let body_len = req.str_.as_ref().map(|s| s.len()).unwrap_or(0);
-        self.limiter.post_ip(ip, body_len).map_err(Refusal::RateLimited)?;
+        self.limiter.post_ip(ip, req.body_len()).map_err(Refusal::RateLimited)?;
         // The socket's first signed frame is not refused for failures other sockets of the prefix
         // made: that costs the sender a connection of its own.
         if !scope.first {
@@ -178,63 +170,29 @@ impl Relay {
                 return Err(Refusal::RateLimited(s));
             }
         }
-        if body_len > lim.max_str_bytes {
-            return Err(Refusal::Invalid(
-                "InvalidRequest",
-                format!("Slate is larger than {} bytes.", lim.max_str_bytes),
-            ));
-        }
-        let from_s = req.from.clone().unwrap_or_default();
-        let to_s = req.to.clone().unwrap_or_default();
-
-        // 3.1.0 fields: both absent (legacy) or both valid.
         let cancel_fields = allow_cancel && self.cfg.protocol.cancel;
-        let (txid, txidsig) = if cancel_fields {
-            match (&req.txid, &req.txidsig) {
-                (None, None) => (None, None),
-                (Some(Value::String(t)), Some(Value::String(s))) if is_txid(t) => (Some(t.clone()), Some(s.clone())),
-                _ => return Err(Refusal::Invalid("InvalidRequest", MISSING_FIELDS.into())),
-            }
-        } else {
-            (None, None)
-        };
-        if cancel_fields && (req.str_.is_none() || req.signature.is_none() || req.from.is_none() || req.to.is_none()) {
-            return Err(Refusal::Invalid("InvalidRequest", MISSING_FIELDS.into()));
-        }
-
-        let wrong = || Refusal::Invalid("InvalidRequest", format!("Wrong address format. From: {from_s}, To: {to_s}"));
-        let (Ok(from), Ok(to)) = (parse_address(&from_s), parse_address(&to_s)) else {
-            return Err(wrong());
-        };
-        if !from.public_key_valid() || !to.public_key_valid() {
-            return Err(wrong());
-        }
-        // No signature to check, so no failed one: the same answer, not counted.
-        let (Some(body), Some(signature)) = (req.str_.clone(), req.signature.clone()) else {
-            return Err(Refusal::Invalid("InvalidRequest", "Error postslate signature.".into()));
-        };
-        if sig::verify(&from.public_key, &body, &signature).is_err() {
-            self.limiter.sig_failed(ip);
-            scope.failed += 1;
-            return Err(Refusal::Invalid("InvalidRequest", "Error postslate signature.".into()));
-        }
-        if let (Some(t), Some(ts)) = (&txid, &txidsig) {
-            if sig::verify(&from.public_key, t, ts).is_err() {
+        let env = check_envelope(req, lim.max_str_bytes, cancel_fields).map_err(|r| {
+            // A missing signature is not a failed one: the same answer, not counted.
+            if r.is_failed_signature() {
                 self.limiter.sig_failed(ip);
                 scope.failed += 1;
-                return Err(Refusal::Invalid("InvalidSignature", "Invalid epicboxtxid signature.".into()));
             }
-        }
-        self.limiter.post_addr(&from.public_key).map_err(Refusal::RateLimited)?;
-
-        // Route by the destination inside the signed slate, as the stock relay does.
-        let Ok(payload) = serde_json::from_str::<Value>(&body) else {
-            return Err(Refusal::Invalid("InvalidRequest", "Invalid Slate payload.".into()));
-        };
-        let Some((dest_key, dest_domain, dest_port)) = destination(&payload) else {
-            return Err(Refusal::Invalid("InvalidRequest", "Invalid slate destination.".into()));
-        };
-        Ok(Slate { from_s, to_s, from, body, signature, txid, txidsig, dest_key, dest_domain, dest_port })
+            Refusal::from(r)
+        })?;
+        self.limiter.post_addr(&env.from.public_key).map_err(Refusal::RateLimited)?;
+        let dest = route(&env.body).map_err(Refusal::from)?;
+        Ok(Slate {
+            from_s: env.from_s,
+            to_s: env.to_s,
+            from: env.from,
+            body: env.body,
+            signature: env.signature,
+            txid: env.txid,
+            txidsig: env.txidsig,
+            dest_key: dest.dest_key,
+            dest_domain: dest.dest_domain,
+            dest_port: dest.dest_port,
+        })
     }
 
     /// A refusal when the host in the sender's address is in `federation.deny_sender_hosts`.
@@ -244,7 +202,7 @@ impl Relay {
     fn sender_host_refusal(&self, from: &EpicboxAddress) -> Option<Refusal> {
         let host = self.cfg.denied_sender_host(from.domain.as_deref())?;
         crate::sampled!(info, host = %host, "refused a slate from a denied sender host");
-        Some(Refusal::DeniedHost(format!("This relay does not accept slates from {host}.")))
+        Some(Refusal::DeniedHost(refusal::sender_host_denied(&host)))
     }
 
     /// A refusal when the store holds `store.max_bytes` of live data or more.
@@ -256,7 +214,7 @@ impl Relay {
         }
         metrics::counter!("epicbox_limit_refusals_total", "limit" => "store_bytes").increment(1);
         crate::sampled!(warn, used_bytes = used, max_bytes = cap, "store is full; refusing posts");
-        Some(Refusal::Full("Relay storage is full; try again later.".into()))
+        Some(Refusal::Full(refusal::STORE_FULL.into()))
     }
 
     /// Store a checked slate for one of this relay's mailboxes and wake its listener.
@@ -295,15 +253,12 @@ impl Relay {
                 self.registry.wake(&dest_key);
                 PostOutcome::Stored { msgid, txid }
             }
-            Ok(PutOutcome::QueueFull) => Refused(Refusal::Full("Recipient mailbox is full; try again later.".into())),
-            Ok(PutOutcome::SenderCapped) => {
-                Refused(Refusal::Full("Too many messages from this sender are waiting for the recipient.".into()))
-            }
+            Ok(PutOutcome::QueueFull) => Refused(Refusal::Full(refusal::QUEUE_FULL.into())),
+            Ok(PutOutcome::SenderCapped) => Refused(Refusal::Full(refusal::SENDER_CAPPED.into())),
             Ok(PutOutcome::Cancelled) => PostOutcome::Cancelled { txid: txid.unwrap_or_default() },
-            Ok(PutOutcome::NotParticipant) => Refused(Refusal::Invalid(
-                "InvalidRequest",
-                "Posting address is not a participant of epicboxtxid.".into(),
-            )),
+            Ok(PutOutcome::NotParticipant) => {
+                Refused(Refusal::Invalid(refusal::KIND_INVALID_REQUEST, refusal::NOT_PARTICIPANT.into()))
+            }
             Err(e) => {
                 crate::sampled!(error, error = %e, "store put_message failed");
                 self.store_ok.store(false, Ordering::Relaxed);
@@ -318,19 +273,19 @@ impl Relay {
         let Slate { from_s, to_s, from, body, signature, txid, txidsig, dest_key, dest_domain, dest_port } = slate;
         let peer = format!("{}:{}", dest_domain.to_ascii_lowercase(), dest_port);
         if let Some(t) = &txid {
-            match self.store.tx_info(t).await {
-                Ok(info) if info.tombstone.is_some() => return PostOutcome::Cancelled { txid: t.clone() },
-                // The same rule as for local mail: once a transaction has participants here, a
-                // stranger cannot post under its txid, or the forward would link them as a
-                // participant and let them cancel it.
-                Ok(info) if !info.participants.is_empty() && !info.participants.contains(&from.public_key) => {
-                    return Refused(Refusal::Invalid(
-                        "InvalidRequest",
-                        "Posting address is not a participant of epicboxtxid.".into(),
-                    ));
-                }
-                Ok(_) => {}
+            let info = match self.store.tx_info(t).await {
+                Ok(i) => i,
                 Err(_) => return Refused(Refusal::Internal),
+            };
+            // The same rule as for local mail: once a transaction has participants here, a
+            // stranger cannot post under its txid, or the forward would link them as a
+            // participant and let them cancel it.
+            match tx_gate(info.tombstone.is_some(), &info.participants, &from.public_key) {
+                TxGate::Cancelled => return PostOutcome::Cancelled { txid: t.clone() },
+                TxGate::NotParticipant => {
+                    return Refused(Refusal::Invalid(refusal::KIND_INVALID_REQUEST, refusal::NOT_PARTICIPANT.into()));
+                }
+                TxGate::Proceed { .. } => {}
             }
         }
         let mut frame = json!({"type":"PostSlate","from":from_s,"to":to_s,"str":body,"signature":signature});
@@ -368,16 +323,16 @@ impl Relay {
 
     /// `forward_refusal`, and whether the refusal comes from the allow/deny lists.
     fn forward_refusal_kind(&self, domain: &str, port: u16) -> Option<(Refusal, bool)> {
-        let invalid = |d: &str| Refusal::Invalid("InvalidRequest", d.to_string());
+        let invalid = |d: &str| Refusal::Invalid(refusal::KIND_INVALID_REQUEST, d.to_string());
         let fed = &self.cfg.federation;
         let d = crate::config::normalize_domain(domain).unwrap_or_default();
         let dp = format!("{d}:{port}");
         if !fed.enabled {
-            return Some((invalid("This relay does not forward to other relays."), false));
+            return Some((invalid(refusal::NO_FORWARDING), false));
         }
         // Port 0 names no listener; the same text as a list refusal, but the client's mistake.
         if port == 0 {
-            return Some((invalid(&format!("Forwarding to {dp} is not allowed.")), false));
+            return Some((invalid(&refusal::forwarding_not_allowed(&dp)), false));
         }
         let listed = |l: &Vec<String>| {
             l.iter().any(|x| {
@@ -386,10 +341,10 @@ impl Relay {
             })
         };
         if listed(&fed.deny) || (!fed.allow.is_empty() && !listed(&fed.allow)) {
-            return Some((invalid(&format!("Forwarding to {dp} is not allowed.")), true));
+            return Some((invalid(&refusal::forwarding_not_allowed(&dp)), true));
         }
         if d.is_empty() || d.len() > 253 || !d.contains('.') && !fed.peers.contains_key(&dp) {
-            return Some((invalid("Invalid slate destination."), false));
+            return Some((invalid(refusal::INVALID_DESTINATION), false));
         }
         None
     }
@@ -408,31 +363,6 @@ impl Relay {
 
 fn endpoint_of(domain: Option<&str>, port: Option<u16>) -> Option<String> {
     domain.map(|d| format!("{}:{}", d.to_ascii_lowercase(), port.unwrap_or(443)))
-}
-
-/// `destination{public_key, domain, port}` from a slate body. Port may be a number or a numeric
-/// string; it defaults to 443.
-fn destination(payload: &Value) -> Option<(String, String, u16)> {
-    let d = payload.get("destination")?;
-    let key = d.get("public_key")?.as_str()?;
-    let domain = d.get("domain")?.as_str()?;
-    let port = match d.get("port") {
-        None | Some(Value::Null) => 443,
-        Some(Value::Number(n)) => u16::try_from(n.as_u64()?).ok()?,
-        Some(Value::String(s)) => s.parse().ok()?,
-        _ => return None,
-    };
-    if domain.is_empty() || !domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
-        return None;
-    }
-    // `relay.example.org.` is the same host as `relay.example.org`: route both the same way, or
-    // an absolute name makes this relay forward to itself and slips past `federation.deny`.
-    let domain = crate::config::normalize_domain(domain)?;
-    let addr = parse_address(key).ok()?;
-    if addr.domain.is_some() || !addr.public_key_valid() {
-        return None;
-    }
-    Some((addr.public_key, domain, port))
 }
 
 #[cfg(test)]
@@ -464,7 +394,10 @@ mod tests {
     #[test]
     fn destination_port_zero_is_refused_in_the_usual_form() {
         let (r, _d) = relay(|_| {});
-        assert_eq!(text(r.forward_refusal("peer.example", 0)).as_deref(), Some("Forwarding to peer.example:0 is not allowed."));
+        assert_eq!(
+            text(r.forward_refusal("peer.example", 0)).as_deref(),
+            Some("Forwarding to peer.example:0 is not allowed.")
+        );
         assert!(r.forward_refusal("peer.example", 443).is_none());
         assert!(!r.peer_allowed("peer.example:0"));
         assert!(r.peer_allowed("peer.example:443"));

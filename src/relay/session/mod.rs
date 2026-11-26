@@ -374,7 +374,8 @@ impl Session {
             }
             return Flow::Continue;
         };
-        let flow = if self.mux.is_some() { self.on_mux(ws, &ty, &msg).await } else { self.on_classic(ws, &ty, &msg).await };
+        let flow =
+            if self.mux.is_some() { self.on_mux(ws, &ty, &msg).await } else { self.on_classic(ws, &ty, &msg).await };
         match flow {
             Flow::Continue if self.sig_failures >= MAX_SOCKET_SIG_FAILURES => {
                 metrics::counter!("epicbox_sig_failure_closes_total").increment(1);

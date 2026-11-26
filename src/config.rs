@@ -305,7 +305,7 @@ impl Default for StoreCfg {
     fn default() -> Self {
         Self {
             path: "epicmail.db".into(),
-            retention_days: 7,
+            retention_days: epicmail_core::limits::DEFAULT_RETENTION_DAYS,
             group_commit_max: 256,
             readers: 4,
             vacuum_hour_utc: 3,
@@ -352,15 +352,15 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_frame_bytes: 1 << 20,
-            max_str_bytes: 128 << 10,
+            max_str_bytes: epicmail_core::limits::DEFAULT_MAX_STR_BYTES,
             posts_per_min_per_address: 60,
             posts_burst_per_address: 120,
             posts_per_min_per_ip: 240,
             posts_burst_per_ip: 480,
             bytes_per_min_per_ip: 16 << 20,
             frames_per_min_per_socket: 1200,
-            queue_cap: 2000,
-            per_sender_cap: 200,
+            queue_cap: epicmail_core::limits::DEFAULT_QUEUE_CAP,
+            per_sender_cap: epicmail_core::limits::DEFAULT_PER_SENDER_CAP,
             sockets_per_ip: 256,
             sockets_per_address: 4,
             failed_sigs_per_min_per_ip: 120,
@@ -598,16 +598,7 @@ impl Config {
     }
 }
 
-/// A relay domain in one form: lower case, without the trailing dot of an absolute name.
-/// None when it is empty or not a plausible host name (empty labels, leading dot).
-pub fn normalize_domain(domain: &str) -> Option<String> {
-    let d = domain.to_ascii_lowercase();
-    let d = d.strip_suffix('.').unwrap_or(&d);
-    if d.is_empty() || d.len() > 253 || d.split('.').any(|l| l.is_empty() || l.len() > 63) {
-        return None;
-    }
-    Some(d.to_string())
-}
+pub use epicmail_core::address::normalize_domain;
 
 #[cfg(test)]
 mod tests {
@@ -615,11 +606,6 @@ mod tests {
 
     #[test]
     fn domains_have_one_normal_form() {
-        assert_eq!(normalize_domain("Relay.Example.org."), Some("relay.example.org".into()));
-        assert_eq!(normalize_domain("relay.example.org"), Some("relay.example.org".into()));
-        for bad in ["", ".", "a..b", ".a.b", "a.b..", "a.b.."] {
-            assert_eq!(normalize_domain(bad), None, "{bad}");
-        }
         let mut c = Config::default();
         c.server.domain = "relay.example.org".into();
         c.server.aliases = vec!["old.example.org.".into()];

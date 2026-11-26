@@ -18,15 +18,7 @@ pub fn rand_b64url(n: usize) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&b)
 }
 
-/// `[A-Za-z0-9_-]{32}`: a 3.1.0 epicboxtxid.
-pub fn is_txid(s: &str) -> bool {
-    s.len() == 32 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
-/// `[A-Za-z0-9_-]{1,64}`: a message id as clients may send it.
-pub fn is_msgid(s: &str) -> bool {
-    (1..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
+pub use epicmail_core::ids::{is_msgid, is_txid};
 
 #[cfg(test)]
 mod tests {

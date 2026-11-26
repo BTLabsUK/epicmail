@@ -10,6 +10,9 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use epicmail_core::tx::{
+    add_participant, cap_gate, decode_participants, encode_participants, tx_gate, CapRefusal, TxGate,
+};
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use sha2::{Digest, Sha256};
@@ -322,8 +325,15 @@ fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
 }
 
 const MSG_COLS: &str = "id, msgid, queue, sender, body, signature, challenge, txid, deliveries, created_at";
-const OFFER_ORDER: &str = "ORDER BY CASE WHEN deliveries>=3 THEN 1 ELSE 0 END, \
-     CASE WHEN deliveries>=3 THEN last_offered_at ELSE created_at END, id";
+/// `epicmail_core::limits::offer_key` as SQL: messages offered `LATE_AFTER_OFFERS` times or more
+/// go after the others.
+fn offer_order() -> String {
+    let n = epicmail_core::limits::LATE_AFTER_OFFERS;
+    format!(
+        "ORDER BY CASE WHEN deliveries>={n} THEN 1 ELSE 0 END, \
+         CASE WHEN deliveries>={n} THEN last_offered_at ELSE created_at END, id"
+    )
+}
 
 fn link_tx(conn: &Connection, txid: &str, keys: &[&str], endpoint: Option<&str>, now: i64) -> rusqlite::Result<()> {
     let mut st =
@@ -377,14 +387,12 @@ impl Store for SqliteStore {
             let mut first_of_tx = false;
             if let Some(txid) = &m.txid {
                 let cancelled: bool = c.prepare_cached("SELECT 1 FROM cancels WHERE txid=?1")?.exists([txid])?;
-                if cancelled {
-                    return Ok(PutOutcome::Cancelled);
-                }
                 let parts = tx_participants(c, txid)?;
-                if !parts.is_empty() && !parts.iter().any(|p| p == &m.sender_key) {
-                    return Ok(PutOutcome::NotParticipant);
+                match tx_gate(cancelled, &parts, &m.sender_key) {
+                    TxGate::Cancelled => return Ok(PutOutcome::Cancelled),
+                    TxGate::NotParticipant => return Ok(PutOutcome::NotParticipant),
+                    TxGate::Proceed { first_of_tx: first } => first_of_tx = first,
                 }
-                first_of_tx = parts.is_empty();
             }
             let dedupe = dedupe_message(&m.queue, &m.sender_key, &m.body, &m.signature);
             if let Some(msgid) = c
@@ -404,11 +412,10 @@ impl Store for SqliteStore {
             let (in_queue, from_sender): (i64, i64) = c
                 .prepare_cached("SELECT count(*), coalesce(sum(sender_key=?2),0) FROM messages WHERE queue=?1")?
                 .query_row(params![m.queue, m.sender_key], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            if in_queue >= i64::from(m.queue_cap) {
-                return Ok(PutOutcome::QueueFull);
-            }
-            if from_sender >= i64::from(m.per_sender_cap) {
-                return Ok(PutOutcome::SenderCapped);
+            match cap_gate(in_queue, from_sender, m.queue_cap, m.per_sender_cap) {
+                Some(CapRefusal::QueueFull) => return Ok(PutOutcome::QueueFull),
+                Some(CapRefusal::SenderCapped) => return Ok(PutOutcome::SenderCapped),
+                None => {}
             }
             c.prepare_cached(
                 "INSERT INTO messages(msgid,queue,sender,sender_key,recipient,body,signature,challenge,\
@@ -504,7 +511,8 @@ impl Store for SqliteStore {
         self.write(move |c| {
             let sql = format!(
                 "SELECT {MSG_COLS} FROM messages WHERE queue=?1 AND not_before<=?2 AND expires_at>?2 \
-                 {OFFER_ORDER} LIMIT ?3"
+                 {} LIMIT ?3",
+                offer_order()
             );
             let mut st = c.prepare_cached(&sql)?;
             let rows = st.query_map(
@@ -689,9 +697,7 @@ impl Store for SqliteStore {
             for row in st.query_map([&txid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
                 let (q, s) = row?;
                 for k in [q, s] {
-                    if !info.participants.contains(&k) {
-                        info.participants.push(k);
-                    }
+                    add_participant(&mut info.participants, k);
                 }
             }
             info.tombstone = c
@@ -699,7 +705,7 @@ impl Store for SqliteStore {
                 .query_row([&txid], |r| {
                     let p: String = r.get(0)?;
                     Ok(Tombstone {
-                        participants: p.split(',').filter(|s| !s.is_empty()).map(String::from).collect(),
+                        participants: decode_participants(&p),
                         receiver: r.get(1)?,
                         acknowledged: r.get::<_, i64>(2)? != 0,
                     })
@@ -724,7 +730,7 @@ impl Store for SqliteStore {
             c.prepare_cached(
                 "INSERT OR IGNORE INTO cancels(txid,participants,receiver,acknowledged,created_at) VALUES(?1,?2,?3,?4,?5)",
             )?
-            .execute(params![txid, participants.join(","), receiver, receiver.is_none() as i64, now])?;
+            .execute(params![txid, encode_participants(&participants), receiver, receiver.is_none() as i64, now])?;
             let mut st = c.prepare_cached("SELECT DISTINCT queue FROM messages WHERE txid=?1")?;
             let queues: Vec<String> =
                 st.query_map([&txid], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
@@ -799,19 +805,20 @@ impl Store for SqliteStore {
     }
 
     async fn sweep(&self, now: i64, retention_ms: i64) -> Result<SweepStats> {
-        let stats = self.write(move |c| {
-            let cutoff = now - retention_ms;
-            // Which peers a cancel was queued for lives as long as its tombstone.
-            c.execute("DELETE FROM cancel_forwards WHERE created_at<=?1", [cutoff])?;
-            Ok(SweepStats {
-                messages_expired: c.execute("DELETE FROM messages WHERE expires_at<=?1", [now])? as u64,
-                forwards_expired: c.execute("DELETE FROM forwards WHERE expires_at<=?1", [now])? as u64,
-                tombstones_expired: c.execute("DELETE FROM cancels WHERE created_at<=?1", [cutoff])? as u64,
-                challenges_expired: c.execute("DELETE FROM used_challenges WHERE expires_at<=?1", [now])? as u64,
-                txlinks_expired: c.execute("DELETE FROM txlinks WHERE created_at<=?1", [cutoff])? as u64,
+        let stats = self
+            .write(move |c| {
+                let cutoff = now - retention_ms;
+                // Which peers a cancel was queued for lives as long as its tombstone.
+                c.execute("DELETE FROM cancel_forwards WHERE created_at<=?1", [cutoff])?;
+                Ok(SweepStats {
+                    messages_expired: c.execute("DELETE FROM messages WHERE expires_at<=?1", [now])? as u64,
+                    forwards_expired: c.execute("DELETE FROM forwards WHERE expires_at<=?1", [now])? as u64,
+                    tombstones_expired: c.execute("DELETE FROM cancels WHERE created_at<=?1", [cutoff])? as u64,
+                    challenges_expired: c.execute("DELETE FROM used_challenges WHERE expires_at<=?1", [now])? as u64,
+                    txlinks_expired: c.execute("DELETE FROM txlinks WHERE created_at<=?1", [cutoff])? as u64,
+                })
             })
-        })
-        .await?;
+            .await?;
         // Forwards that were never delivered and ran out their retention: otherwise they leave no trace.
         metrics::counter!("epicbox_forwards_expired_total").increment(stats.forwards_expired);
         Ok(stats)
@@ -1088,10 +1095,8 @@ mod tests {
         assert_eq!(s.unanswered(1000).await.unwrap(), 1, "only t2: t1 is answered, t3 is cancelled");
         // A second answer is not a second round trip.
         s.put_message(tx(msg("a", "b", "s2b", 6000), "t1")).await.unwrap();
-        let answers: i64 = s
-            .read(|c| c.query_row("SELECT count(*) FROM txlinks WHERE kind=3", [], |r| r.get(0)))
-            .await
-            .unwrap();
+        let answers: i64 =
+            s.read(|c| c.query_row("SELECT count(*) FROM txlinks WHERE kind=3", [], |r| r.get(0))).await.unwrap();
         assert_eq!(answers, 1);
         // The other party answering t2 closes it.
         s.put_message(tx(msg("c", "e2", "x2", 7000), "t2")).await.unwrap();

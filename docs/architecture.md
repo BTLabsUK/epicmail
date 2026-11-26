@@ -23,12 +23,13 @@ All of it shares one `Relay` value (`src/relay/mod.rs`).
 | `store/sqlite.rs` | The SQLite implementation |
 | `forward.rs` | Delivery to other relays |
 | `limits.rs` | Rate limits and socket counts per IP prefix |
-| `address.rs`, `sig.rs` | Address grammar and signature checks, both matching the stock relay |
+| `crates/epicmail-core` | The pure protocol rules shared with an ICP canister: addresses, signatures, ids, signed texts, refusal texts, the pure steps of PostSlate, transaction and cap rules, default limits. No clock, store or network; builds for wasm32 with `--no-default-features --features k256` |
+| `address.rs`, `sig.rs` | Re-exports of `epicmail-core`: the address grammar and signature checks, both matching the stock relay |
 | `metrics.rs` | Prometheus exporter and metric descriptions |
 | `logging.rs` | Log setup (stderr and the log file, each with its own level), shortened identifiers for log lines, sampling of lines that repeat |
 | `logfile.rs` | The log file: a bounded queue to a writer thread, rotation by time and size, gzip, pruning |
 | `migrate.rs` | JSON Lines import and export |
-| `clock.rs`, `ids.rs` | Wall-clock milliseconds, random ids and id checks |
+| `clock.rs`, `ids.rs` | Wall-clock milliseconds, random ids; the id checks are re-exported from `epicmail-core` |
 
 ## Message flow
 

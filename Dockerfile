@@ -12,11 +12,14 @@ WORKDIR /src
 ENV RUSTFLAGS="-C target-feature=+crt-static"
 # Cache dependencies first.
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir -p src/bin && echo 'fn main() {}' > src/main.rs && echo '' > src/lib.rs \
+COPY crates/epicmail-core/Cargo.toml crates/epicmail-core/Cargo.toml
+RUN mkdir -p src/bin crates/epicmail-core/src && echo 'fn main() {}' > src/main.rs && echo '' > src/lib.rs \
+    && echo '' > crates/epicmail-core/src/lib.rs \
     && echo 'fn main() {}' > src/bin/sigdiff-gen.rs \
     && cargo build --release --target x86_64-unknown-linux-musl --locked || true
 COPY src ./src
-RUN touch src/main.rs src/lib.rs \
+COPY crates ./crates
+RUN touch src/main.rs src/lib.rs crates/epicmail-core/src/lib.rs \
     && cargo build --release --locked --target x86_64-unknown-linux-musl --bin epicmail \
     && mkdir /data-skel \
     && cp target/x86_64-unknown-linux-musl/release/epicmail /epicmail

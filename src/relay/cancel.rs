@@ -10,7 +10,11 @@ use std::net::IpAddr;
 
 use serde_json::{json, Value};
 
-use super::{CancelOutcome, Cmd, Refusal, Relay, SigScope, CANCEL_SIG_PREFIX};
+use epicmail_core::refusal;
+use epicmail_core::text::cancel_text;
+use epicmail_core::tx::cancel_gate;
+
+use super::{CancelOutcome, Cmd, Refusal, Relay, SigScope};
 use crate::address::parse_address;
 use crate::clock::now_ms;
 use crate::ids::{is_txid, rand_id};
@@ -36,14 +40,14 @@ impl Relay {
             }
         };
         let Some(requester) = requester else {
-            return R(Refusal::Invalid("InvalidRequest", "Missing cancellation address.".into()));
+            return R(Refusal::Invalid(refusal::KIND_INVALID_REQUEST, refusal::CANCEL_NO_ADDRESS.into()));
         };
         let txid = match msg.get("epicboxtxid").and_then(|t| t.as_str()) {
             Some(t) if is_txid(t) => t.to_string(),
-            _ => return R(Refusal::Invalid("InvalidRequest", "Invalid or missing 32-character epicboxtxid.".into())),
+            _ => return R(Refusal::Invalid(refusal::KIND_INVALID_REQUEST, refusal::CANCEL_BAD_TXID.into())),
         };
         let Some(signature) = msg.get("signature").and_then(|s| s.as_str()) else {
-            return R(Refusal::Invalid("InvalidRequest", "Missing signature.".into()));
+            return R(Refusal::Invalid(refusal::KIND_INVALID_REQUEST, refusal::CANCEL_NO_SIGNATURE.into()));
         };
         // The domain-separated form, then the bare one: up to two checks. The socket's first
         // signed frame is counted and not refused.
@@ -57,25 +61,23 @@ impl Relay {
         // The domain-separated form (`epicbox-cancel/1:<txid>`) proves the sender asked to
         // cancel and is accepted too; clients learn of it from the
         // Ok's `ext` and the well-known file. A forward carries the signature as received.
-        let separated = sig::verify(&requester, &format!("{CANCEL_SIG_PREFIX}{txid}"), signature).is_ok();
+        let separated = sig::verify(&requester, &cancel_text(&txid), signature).is_ok();
         let bare_ok =
             !separated && self.cfg.protocol.accept_bare_cancel && sig::verify(&requester, &txid, signature).is_ok();
         if !separated && !bare_ok {
             self.limiter.sig_failed(ip);
             scope.failed += 1;
-            return R(Refusal::Invalid("InvalidSignature", "Invalid signature.".into()));
+            return R(Refusal::Invalid(refusal::KIND_INVALID_SIGNATURE, refusal::CANCEL_BAD_SIGNATURE.into()));
         }
         let info = match self.store.tx_info(&txid).await {
             Ok(i) => i,
             Err(_) => return R(Refusal::Internal),
         };
-        let participants = match &info.tombstone {
-            Some(t) => t.participants.clone(),
-            None => info.participants.clone(),
-        };
-        if participants.is_empty() || !participants.contains(&requester) {
+        // A requester that is not a known participant gets a plain Ok: nothing is revealed.
+        let tombstone = info.tombstone.as_ref().map(|t| t.participants.as_slice());
+        let Some(plan) = cancel_gate(tombstone, &info.participants, &requester) else {
             return CancelOutcome::Ok;
-        }
+        };
         // Relays pass the request id on; a request seen moments ago is one coming back around a
         // relay loop, so it is confirmed and not processed or forwarded again. Ids are
         // remembered only once the cancel is stored, so a request that failed can be retried.
@@ -88,8 +90,7 @@ impl Relay {
         if self.cancel_request_seen(&txid, &request_id) {
             return CancelOutcome::Cancelled(txid);
         }
-        let first = info.tombstone.is_none();
-        let receiver = participants.iter().find(|p| **p != requester).cloned();
+        let (participants, first, receiver) = (plan.participants, plan.first, plan.receiver);
         let now = now_ms();
         // The CancelTx for each peer relay is queued in the same store transaction as the
         // tombstone, so a store error leaves neither, and the requester's retry starts clean.
